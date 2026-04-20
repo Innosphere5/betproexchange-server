@@ -5,10 +5,13 @@ const matchSchema = new mongoose.Schema({
   teamA: { type: String, required: true },
   teamB: { type: String, required: true },
   league: { type: String, required: true },
+  sportKey: { type: String, default: 'cricket_ipl' },
   status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
   score: {
-    home: { type: String, default: "0/0" },
-    away: { type: String, default: "0/0" }
+    teamA_runs: { type: String, default: "0/0" },
+    teamB_runs: { type: String, default: "0/0" },
+    overs: { type: String, default: "0.0" },
+    lastUpdated: { type: Date, default: Date.now }
   },
   startTime: { type: Date, required: true },
   lastUpdated: { type: Date, default: Date.now }

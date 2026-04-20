@@ -2,6 +2,16 @@ const express = require('express');
 const router = express.Router();
 const Match = require('../models/Match');
 
+// Get only live matches
+router.get('/live', async (req, res) => {
+    try {
+        const liveMatches = await Match.find({ status: 'live' }).sort({ startTime: -1 });
+        res.json(liveMatches);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
 // Get all matches
 router.get('/', async (req, res) => {
     try {

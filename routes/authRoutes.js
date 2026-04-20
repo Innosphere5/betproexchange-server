@@ -23,10 +23,10 @@ router.post('/register', async (req, res) => {
 
     await user.save();
 
-    const payload = { userId: user.username };
+    const payload = { userId: user.username, role: user.role };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.json({ token, user: { username: user.username, balance: user.walletBalance } });
+    res.json({ token, user: { username: user.username, balance: user.walletBalance, role: user.role } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -38,16 +38,17 @@ router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    const user = await User.findOne({ username });
+    // Case-insensitive username lookup
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
-    const payload = { userId: user.username };
+    const payload = { userId: user.username, role: user.role };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings } });
+    res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings, role: user.role } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

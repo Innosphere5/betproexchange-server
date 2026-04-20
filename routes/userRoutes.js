@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Bet = require('../models/Bet');
 const CasinoBet = require('../models/CasinoBet');
+const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
 
 // Get User Statement (All transactions/bets)
@@ -10,6 +11,8 @@ router.get('/statement', auth, async (req, res) => {
     const cricketBets = await Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
 
+    const transactions = await Transaction.find({ userId: req.user.userId }).sort({ createdAt: -1 });
+    
     // Combine and format for statement
     const statement = [
       ...cricketBets.map(b => ({
@@ -27,6 +30,14 @@ router.get('/statement', auth, async (req, res) => {
         amount: -b.amount,
         type: 'CASINO_BET',
         status: b.status
+      })),
+      ...transactions.map(t => ({
+        id: t._id,
+        date: t.createdAt,
+        description: t.description || 'Balance Transaction',
+        amount: t.amount,
+        type: t.type,
+        status: 'SETTLED'
       }))
     ];
 

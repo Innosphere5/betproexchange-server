@@ -24,6 +24,7 @@ const PORT = process.env.PORT || 5000;
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
+const adminRoutes = require('./routes/adminRoutes');
 const auth = require('./middleware/auth');
 
 app.use(cors());
@@ -31,6 +32,7 @@ app.use(express.json());
 app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
+app.use('/api/admin', adminRoutes);
 
 // MongoDB Connection Options
 mongoose.set('bufferCommands', false);
@@ -44,13 +46,17 @@ mongoose.connect(process.env.MONGO_URI)
     
     // Initial fetch
     const { fetchUpcomingMatches } = require('./services/matchService');
-    fetchUpcomingMatches();
+    fetchUpcomingMatches(io);
 
     // Start Cron Jobs (after DB connection)
-    require('./jobs/matchFetch.job');
+    const { initMatchFetchJob } = require('./jobs/matchFetch.job');
+    initMatchFetchJob(io);
     const { initStatusJob } = require('./jobs/statusUpdate.job');
     initStatusJob(io);
-    require('./jobs/scoreUpdate.job');
+    const { initLiveScoreJob } = require('./jobs/liveScoreJob');
+    initLiveScoreJob(io);
+    const { initSettlementJob } = require('./jobs/settlementJob');
+    initSettlementJob(io);
   })
   .catch(err => console.error('❌ MongoDB Error:', err.message));
 
@@ -71,7 +77,8 @@ app.get('/api/user/wallet', auth, async (req, res) => {
 // Bet Placement Endpoint
 app.post('/api/user/bet', auth, async (req, res) => {
   try {
-    const { matchName, runner, stake, odds, isLive, type } = req.body;
+    const { matchId, matchName, runner, stake, odds, isLive, type } = req.body;
+    if (!matchId) return res.status(400).json({ error: 'Missing matchId' });
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
 
     const user = await User.findOneAndUpdate(
@@ -84,6 +91,7 @@ app.post('/api/user/bet', auth, async (req, res) => {
 
     const newBet = new Bet({ 
         userId: req.user.userId, 
+        matchId, 
         matchName, 
         runner, 
         stake, 

@@ -14,22 +14,19 @@ const updateMatchStatuses = async (io) => {
                 newStatus = 'live';
             }
             
-            // Assume matches last max 8 hours for completion
-            const eightHoursLater = new Date(match.startTime.getTime() + 8 * 60 * 60 * 1000);
-            if (now > eightHoursLater) {
-                newStatus = 'completed';
-            }
+            // Note: 'completed' status is now handled by resultSettlementService 
+            // based on real API data to ensure accurate settlements.
 
             if (newStatus !== match.status) {
                 match.status = newStatus;
                 match.lastUpdated = now;
                 await match.save();
-                console.log(`Match ${match.matchId} status updated to ${newStatus}`);
+                console.log(`[StatusService] Match ${match.matchId} status updated to ${newStatus}`);
 
-                if (newStatus === 'completed') {
-                    // MVP: Randomly declare winner between teamA and teamB
-                    const winningTeam = Math.random() > 0.5 ? match.teamA : match.teamB;
-                    await settleMatch(`${match.teamA} v ${match.teamB}`, winningTeam, io);
+                // Immediately sync with UI so "LIVE" badge appears
+                if (io) {
+                    const allMatches = await Match.find().sort({ startTime: 1 });
+                    io.emit('matches_updated', allMatches);
                 }
             }
         }

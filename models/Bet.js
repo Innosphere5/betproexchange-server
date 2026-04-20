@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const betSchema = new mongoose.Schema({
   userId: { type: String, required: true },
+  matchId: { type: String, required: true, index: true },
   matchName: { type: String, required: true },
   runner: { type: String, required: true },
   stake: { type: Number, required: true },

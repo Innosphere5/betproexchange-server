@@ -1,26 +1,27 @@
 const axios = require('axios');
+require('dotenv').config();
 
 async function test() {
-  const API_KEY = 'd39745ccfdd9ad9dce70dd6dd8d0fb550962c07d918d258d5a029e0dec701761';
+  const API_KEY = process.env.API_KEY || '418d9e600687ebb5c3510d95d6d4f369';
+  const BASE_URL = 'https://api.the-odds-api.com/v4';
+  
   try {
-    const res = await axios.get('https://api.odds-api.io/v3/events', {
-      params: { apiKey: API_KEY, sport: 'cricket' }
-    });
-    console.log("TOTAL EVENTS:", res.data.length);
-    console.log("SAMPLE DATES:");
-    res.data.slice(0, 5).forEach(e => {
-       console.log(`- ${e.home} vs ${e.away} | Date: ${e.date}`);
+    console.log(`[Test] Using API Key: ${API_KEY.substring(0, 5)}...`);
+    // Testing specific sport for scores
+    const sport = 'cricket_ipl'; 
+    const res = await axios.get(`${BASE_URL}/sports/${sport}/scores`, {
+      params: { apiKey: API_KEY, daysFrom: 3 }
     });
     
-    // find upcoming or live
-    const now = new Date();
-    const upcoming = res.data.filter(e => new Date(e.date) >= now);
-    console.log("TOTAL UPCOMING:", upcoming.length);
-    if (upcoming.length > 0) {
-      console.log("UPCOMING SAMPLE:", upcoming[0]);
+    console.log(`[Test] Success! Found ${res.data.length} matches with scores.`);
+    if (res.data.length > 0) {
+      const match = res.data[0];
+      console.log(`[Test] Sample Match: ${match.home_team} vs ${match.away_team}`);
+      console.log(`[Test] Score Structure:`, JSON.stringify(match.scores, null, 2));
     }
-  } catch(e) {
-    console.error(e.message);
+  } catch (e) {
+    console.error(`[Test] Error: ${e.response?.status} - ${e.response?.data?.message || e.message}`);
   }
 }
+
 test();

@@ -14,6 +14,8 @@ const userSchema = new mongoose.Schema({
     plus3: { type: Number, default: 10000 },
     plus4: { type: Number, default: 25000 },
   },
+  role: { type: String, enum: ['user', 'master', 'admin'], default: 'user' },
+  parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   createdAt: { type: Date, default: Date.now }
 });
 

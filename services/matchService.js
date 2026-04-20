@@ -1,44 +1,64 @@
-const axios = require('axios');
 const Match = require('../models/Match');
-require('dotenv').config();
+const { getEvents } = require('./apiManager');
 
-const API_KEY = process.env.API_KEY;
-const BASE_URL = 'https://api.odds-api.io/v3';
-
-const fetchUpcomingMatches = async () => {
+/**
+ * fetchUpcomingMatches
+ * 
+ * Migrated to the-odds-api.com v4.
+ * Fetches IPL, Pakistan (PSL), and International Men's matches.
+ * Automatically prunes old matches no longer in the API.
+ */
+const fetchUpcomingMatches = async (io) => {
     try {
-        console.log('Fetching matches from odds-api.io...');
-        const response = await axios.get(`${BASE_URL}/events`, {
-            params: { apiKey: API_KEY, sport: 'cricket' }
-        });
+        console.log('[MatchService] Syncing matches from v4 API...');
 
-        const events = response.data || [];
-        const now = new Date();
+        const sportsToFetch = [
+            'cricket_ipl',
+            'cricket_psl',
+            'cricket_test_match',
+            'cricket_odi',
+            'cricket_international_t20'
+        ];
 
-        // 1. IPL, 2. PSL, 3. International (Men) - Limit to 5
-        let iplMatches = events.filter(e => e.league?.name?.includes('IPL') || e.league?.name?.includes('Indian Premier League'));
-        let pslMatches = events.filter(e => e.league?.name?.includes('PSL') || e.league?.name?.includes('Pakistan Super League'));
-        let intMatches = events.filter(e => e.league?.name?.includes('International') && !e.league?.name?.includes('Women'));
+        let allFetchedMatches = [];
 
-        let combined = [...iplMatches, ...pslMatches, ...intMatches].slice(0, 5);
-
-        // Fallback to any 5 matches if we don't have enough from the above
-        if (combined.length < 5) {
-            const others = events.filter(e => !combined.find(c => c.id === e.id)).slice(0, 5 - combined.length);
-            combined = [...combined, ...others];
+        for (const sport of sportsToFetch) {
+            const data = await getEvents(sport, 'events');
+            if (Array.isArray(data)) {
+                allFetchedMatches = [...allFetchedMatches, ...data];
+            }
         }
 
-        for (const event of combined) {
-            const isLive = new Date(event.date) <= now;
-            
+        if (allFetchedMatches.length === 0) {
+            console.warn('[MatchService] No matches returned from API.');
+            return;
+        }
+
+        const now = new Date();
+        const activeIds = new Set();
+
+        for (const event of allFetchedMatches) {
+            const matchId = event.id.toString();
+            activeIds.add(matchId);
+
+            const startTime = new Date(event.commence_time);
+            const isLive = startTime <= now;
+
             const matchData = {
-                matchId: event.id.toString(),
-                teamA: event.home,
-                teamB: event.away,
-                league: event.league?.name || 'Cricket',
-                startTime: new Date(event.date),
-                status: isLive ? 'live' : 'upcoming',
-                score: event.scores || { home: "0/0", away: "0/0" }
+                matchId:     matchId,
+                teamA:       event.home_team,
+                teamB:       event.away_team,
+                league:      event.sport_title || 'Cricket',
+                sportKey:    event.sport_key,
+                startTime:   startTime,
+                status:      isLive ? 'live' : 'upcoming',
+                score: { 
+                    teamA_runs: '0/0', 
+                    teamB_runs: '0/0', 
+                    overs: '0.0', 
+                    lastUpdated: new Date() 
+                },
+                lastUpdated: new Date(),
             };
 
             await Match.findOneAndUpdate(
@@ -48,10 +68,27 @@ const fetchUpcomingMatches = async () => {
             );
         }
 
-        console.log(`Successfully synced ${combined.length} matches.`);
+        // --- Pruning Logic ---
+        // Remove matches that are no longer in the API (old/previous matches)
+        const deleteResult = await Match.deleteMany({
+            matchId: { $nin: Array.from(activeIds) }
+        });
+
+        if (deleteResult.deletedCount > 0) {
+            console.log(`[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} old matches.`);
+        }
+
+        console.log(`[MatchService] ✅ Sync complete. Active matches: ${activeIds.size}`);
+
+        if (io) {
+            const allMatches = await Match.find().sort({ startTime: 1 });
+            io.emit('matches_updated', allMatches);
+        }
+
     } catch (error) {
-        console.error('Error fetching matches:', error.message);
+        console.error('[MatchService] Error during sync:', error.message);
     }
 };
 
 module.exports = { fetchUpcomingMatches };
+
