@@ -1,15 +1,15 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const API_KEY  = process.env.API_KEY;
-const BASE_URL = 'https://api.the-odds-api.com/v4';
+const API_TOKEN = process.env.API_KEY;
+const BASE_URL  = 'https://cricket.sportmonks.com/api/v2.0';
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 const cache = new Map();
 
 const CACHE_TTL_MS = {
-  events:  120 * 1000,      // 2 minutes — match list / upcoming
-  scores:  20 * 1000,       // 20 seconds — live scores (reduced to 20s for real-time feel)
+  fixtures:  120 * 1000,      // 2 minutes — fixture list
+  livescores: 20 * 1000,      // 20 seconds — live scores
 };
 
 // ─── Circuit Breaker ──────────────────────────────────────────────────────────
@@ -62,12 +62,17 @@ function recordSuccess() {
   breaker.state = 'CLOSED';
 }
 
-function recordFailure(status) {
+function recordFailure(status, responseData) {
   if (status === 429) {
     rateLimitedUntil = new Date(Date.now() + 5 * 60_000);
     console.warn(`[API Manager] ⚠️ 429 Rate Limit. Paused until ${rateLimitedUntil.toISOString()}`);
     return;
   }
+  
+  if (responseData) {
+    console.error(`[API Manager] Full Error Response:`, JSON.stringify(responseData, null, 2));
+  }
+
   breaker.failures++;
   if (breaker.failures >= breaker.THRESHOLD) {
     breaker.state = 'OPEN';
@@ -77,29 +82,36 @@ function recordFailure(status) {
 
 // ─── Core Fetch ──────────────────────────────────────────────────────────────
 
-async function fetchWithRetry(path, params = {}, retries = 3) {
+async function fetchFromSportmonks(endpoint, params = {}, retries = 2) {
+  const url = `${BASE_URL}/${endpoint}`;
+  
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const response = await axios.get(`${BASE_URL}${path}`, {
-        params: { apiKey: API_KEY, ...params },
+      const response = await axios.get(url, {
+        params: { api_token: API_TOKEN, ...params },
         timeout: 15_000,
       });
+
       recordSuccess();
       return response.data;
     } catch (err) {
       const status = err.response?.status;
+      const data   = err.response?.data;
+
       if (status === 429) {
-        recordFailure(429);
+        recordFailure(429, data);
         throw err;
       }
+      
       if (status >= 400 && status < 500) {
-        recordFailure(status);
+        recordFailure(status, data);
         throw err;
       }
+
       if (attempt < retries) {
         await sleep(2000 * Math.pow(2, attempt - 1));
       } else {
-        recordFailure(status);
+        recordFailure(status, data);
         throw err;
       }
     }
@@ -109,29 +121,32 @@ async function fetchWithRetry(path, params = {}, retries = 3) {
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
- * getEvents
- * Now v4 compatible. 
- * @param {string} sport - e.g. 'cricket_ipl'
- * @param {'events'|'scores'} type - endpoint type
+ * getData
+ * Sportmonks v2 compatible.
+ * @param {string} endpoint - e.g. 'fixtures' or 'livescores/now'
+ * @param {object} options - { include, filter, cacheKeySuffix }
  */
-async function getEvents(sport = 'cricket_ipl', type = 'events') {
-  const endpoint = type === 'events' ? `/sports/${sport}/odds` : `/sports/${sport}/scores`;
-  const cacheKey = `${type}:${sport}`;
-  const ttl = CACHE_TTL_MS[type];
+async function getData(endpoint, options = {}) {
+  const { include, filter = {}, cacheKeySuffix = '' } = options;
+  const type = endpoint.includes('livescores') ? 'livescores' : 'fixtures';
+  
+  const cacheKey = `${endpoint}:${cacheKeySuffix}:${JSON.stringify(filter)}:${include}`;
+  const ttl = CACHE_TTL_MS[type] || 60000;
 
   if (isCacheValid(cacheKey, ttl)) return getCached(cacheKey);
 
   if (rateLimitedUntil && Date.now() < rateLimitedUntil) {
-    return getCached(cacheKey) ?? [];
+    return getCached(cacheKey) ?? null;
   }
 
-  if (!checkCircuitBreaker()) return getCached(cacheKey) ?? [];
+  if (!checkCircuitBreaker()) return getCached(cacheKey) ?? null;
 
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
 
-  const params = type === 'events' ? { regions: 'uk', markets: 'h2h', oddsFormat: 'decimal' } : {};
+  const params = { ...filter };
+  if (include) params.include = include;
 
-  const promise = fetchWithRetry(endpoint, params)
+  const promise = fetchFromSportmonks(endpoint, params)
     .then(data => {
       setCache(cacheKey, data);
       inflight.delete(cacheKey);
@@ -139,7 +154,8 @@ async function getEvents(sport = 'cricket_ipl', type = 'events') {
     })
     .catch(err => {
       inflight.delete(cacheKey);
-      return getCached(cacheKey) ?? [];
+      console.warn(`[API Manager] Request failed for ${endpoint}: ${err.message}`);
+      return getCached(cacheKey) ?? null;
     });
 
   inflight.set(cacheKey, promise);
@@ -154,9 +170,5 @@ function getStatus() {
   };
 }
 
-function clearCache() {
-  cache.clear();
-}
-
-module.exports = { getEvents, getStatus, clearCache };
+module.exports = { getData, getStatus };
 

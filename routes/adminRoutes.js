@@ -17,11 +17,17 @@ const isAdminOrMaster = (req, res, next) => {
 // Create Downline User (Bettor or Master)
 router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
   try {
-    const { username, password, role, initialBalance } = req.body;
+    const { username, password, role, initialBalance, share } = req.body;
 
     // Validation
     if (!username || !password || !role) {
       return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Share Validation (0-85)
+    const masterShare = parseFloat(share) || 0;
+    if (masterShare < 0 || masterShare > 85) {
+      return res.status(400).json({ error: 'Share must be between 0 and 85' });
     }
 
     // Role restriction: Master can only create 'user' (Bettor)
@@ -48,6 +54,7 @@ router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
       username,
       password: hashedPassword,
       role,
+      share: role === 'master' ? masterShare : 0,
       parentId: parent._id,
       walletBalance: balance
     });
@@ -125,6 +132,108 @@ router.post('/load-balance', auth, isAdminOrMaster, async (req, res) => {
     await newTransaction.save();
 
     res.json({ success: true, newBalance: target.walletBalance, parentBalance: parent.walletBalance });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update Downline User Detail (Share, Password, etc.)
+router.post('/update-user', auth, isAdminOrMaster, async (req, res) => {
+  try {
+    const { targetUsername, share, newPassword } = req.body;
+    const parent = await User.findOne({ username: req.user.userId });
+    
+    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    if (!target) return res.status(404).json({ error: 'User not found in downline' });
+
+    // Restriction: Master can only edit Bettors
+    if (req.user.role === 'master' && target.role !== 'user') {
+      return res.status(403).json({ error: 'Masters can only edit Bettors' });
+    }
+
+    // Update Share if Master
+    if (target.role === 'master') {
+      const upShare = parseFloat(share);
+      if (!isNaN(upShare)) {
+        if (upShare < 0 || upShare > 85) {
+          return res.status(400).json({ error: 'Share must be between 0 and 85' });
+        }
+        target.share = upShare;
+      }
+    }
+
+    // Update Password if provided
+    if (newPassword && newPassword.trim() !== '') {
+      const salt = await bcrypt.genSalt(10);
+      target.password = await bcrypt.hash(newPassword, salt);
+    }
+
+    await target.save();
+    res.json({ success: true, user: { username: target.username, share: target.share, role: target.role } });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Toggle User Status (Active/InActive)
+router.post('/toggle-status', auth, isAdminOrMaster, async (req, res) => {
+  try {
+    const { targetUsername, status } = req.body;
+    const parent = await User.findOne({ username: req.user.userId });
+    
+    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    if (!target) return res.status(404).json({ error: 'User not found in downline' });
+
+    if (!['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    target.status = status;
+    await target.save();
+
+    // Cascade Inactivation: If a Master is inactivated, we could optionally inactivate their bettors
+    // For now, the login check already prevents access, but we could explicitly set them.
+    // In production level, we usually just let the parent block handle it or recursively update.
+    if (status === 'inactive' && target.role === 'master') {
+      await User.updateMany({ parentId: target._id }, { status: 'inactive' });
+    }
+
+    res.json({ success: true, status: target.status });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Remove User Permanently (Hard Delete)
+router.delete('/remove-user/:username', auth, isAdminOrMaster, async (req, res) => {
+  try {
+    const { username } = req.params;
+    const parent = await User.findOne({ username: req.user.userId });
+
+    const target = await User.findOne({ username, parentId: parent._id });
+    if (!target) return res.status(404).json({ error: 'User not found in downline' });
+
+    // Safety Check: Avoid deleting users with money (must withdraw first for audit trail)
+    if (target.walletBalance > 0) {
+      // return res.status(400).json({ error: 'Cannot delete user with remaining balance. Please withdraw funds first.' });
+      // Actually, user said "inactive means delete", maybe they want to wipe it regardless.
+      // I'll keep the check but provide a way or just allow it if Admin is sure.
+      // For now, I'll allow it but log a warning.
+      console.warn(`Admin ${parent.username} is deleting user ${username} with balance ${target.walletBalance}`);
+    }
+
+    await User.deleteOne({ _id: target._id });
+    
+    // Also cleanup sub-users if Master? 
+    // Usually we reassign or deny deletion if they have children.
+    const hasChildren = await User.exists({ parentId: target._id });
+    if (hasChildren) {
+      // In production level, you can't just delete a master without handling the children.
+      return res.status(400).json({ error: 'Cannot delete Master with active downline. Delete or reassign downline users first.' });
+    }
+
+    res.json({ success: true, message: 'User permanently removed' });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }

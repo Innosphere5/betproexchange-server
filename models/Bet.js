@@ -11,6 +11,6 @@ const betSchema = new mongoose.Schema({
   isLive: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   status: { type: String, enum: ['OPEN', 'MATCHED', 'WIN', 'LOSE', 'CANCELLED'], default: 'MATCHED' }
-});
+}, { timestamps: true });
 
 module.exports = mongoose.model('Bet', betSchema);

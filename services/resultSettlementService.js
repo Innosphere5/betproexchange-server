@@ -1,79 +1,104 @@
 const Match = require('../models/Match');
-const { getEvents } = require('./apiManager');
+const { getData } = require('./apiManager');
 const { settleMatch } = require('./settlementService');
 
 /**
  * processMatchResults
  * 
- * Logic to fetch results from the API, identify completed matches, 
+ * Logic to fetch results from Sportmonks v2 API, identify completed matches, 
  * determine the winner, and trigger settlement.
  */
 const processMatchResults = async (io) => {
     try {
         console.log('[ResultSettlement] Checking for completed match results...');
         
-        // Find matches that are 'live' or 'upcoming' but might have finished
+        // Find all matches that aren't completed yet
         const pendingMatches = await Match.find({ status: { $ne: 'completed' } });
 
-        if (pendingMatches.length === 0) return;
-
-        const sportsToFetch = [
-            'cricket_ipl',
-            'cricket_psl',
-            'cricket_test_match',
-            'cricket_odi',
-            'cricket_international_t20'
-        ];
-
-        let allResultData = [];
-        for (const sport of sportsToFetch) {
-            const data = await getEvents(sport, 'scores');
-            if (Array.isArray(data)) {
-                allResultData = [...allResultData, ...data];
-            }
+        if (pendingMatches.length === 0) {
+            console.log('[ResultSettlement] No pending matches found in DB.');
+            return;
         }
 
+        console.log(`[ResultSettlement] Found ${pendingMatches.length} pending matches in DB to check.`);
+
+        // Use absolute dates for the last 3 days to be safe
+        const d = new Date();
+        const today = d.toISOString().split('T')[0];
+        d.setDate(d.getDate() - 2);
+        const threeDaysAgo = d.toISOString().split('T')[0];
+
+        const response = await getData('fixtures', {
+            filter: {
+                'filter[starts_between]': `${threeDaysAgo},${today}`,
+            },
+            include: 'runs,localteam,visitorteam'
+        });
+
+        if (!response || !Array.isArray(response.data)) {
+            console.warn('[ResultSettlement] API returned no fixture data for settlement.');
+            return;
+        }
+
+        console.log(`[ResultSettlement] Fetched ${response.data.length} fixtures for the check.`);
+
         for (const match of pendingMatches) {
-            const resultEntry = allResultData.find(r => r.id?.toString() === match.matchId);
+            const apiMatch = response.data.find(f => f.id?.toString() === match.matchId);
 
-            if (resultEntry && resultEntry.completed) {
-                console.log(`[ResultSettlement] Match ${match.matchId} (${match.teamA} v ${match.teamB}) marked as COMPLETED by API.`);
+            if (!apiMatch) {
+                // If not in the 3-day window, try fetching it individually if it's very old?
+                // For now, just skip if not found
+                continue;
+            }
 
-                let winningTeam = 'VOID'; // Default if no clear winner
+            // Sportmonks statuses: 'Finished', 'Aborted', 'No Result', 'Abandoned'
+            const isCompleted = ['Finished', 'Aborted', 'No Result', 'Abandoned'].includes(apiMatch.status);
 
-                if (resultEntry.scores && resultEntry.scores.length >= 2) {
-                    const scoreA = resultEntry.scores.find(s => s.name === match.teamA);
-                    const scoreB = resultEntry.scores.find(s => s.name === match.teamB);
+            if (isCompleted) {
+                console.log(`[ResultSettlement] 🏆 Match ${match.matchId} (${match.teamA} v ${match.teamB}) is ${apiMatch.status}.`);
 
-                    if (scoreA && scoreB) {
-                        // Extract numeric portion of score (e.g. "201/5" -> 201)
-                        const runsA = parseInt(scoreA.score.split('/')[0]);
-                        const runsB = parseInt(scoreB.score.split('/')[0]);
+                let winningTeam = 'VOID'; 
 
-                        if (runsA > runsB) {
-                            winningTeam = match.teamA;
-                        } else if (runsB > runsA) {
-                            winningTeam = match.teamB;
-                        } else {
-                            winningTeam = 'TIE';
-                        }
+                if (apiMatch.status === 'Finished') {
+                    // Use winner_team_id if available, otherwise fallback to score
+                    if (apiMatch.winner_team_id === apiMatch.localteam_id) {
+                        winningTeam = match.teamA;
+                    } else if (apiMatch.winner_team_id === apiMatch.visitorteam_id) {
+                        winningTeam = match.teamB;
+                    } else {
+                        // Manual score fallback
+                        const runs = apiMatch.runs || [];
+                        const rA = runs.find(r => r.team_id === apiMatch.localteam_id)?.score || 0;
+                        const rB = runs.find(r => r.team_id === apiMatch.visitorteam_id)?.score || 0;
+
+                        if (rA > rB) winningTeam = match.teamA;
+                        else if (rB > rA) winningTeam = match.teamB;
+                        else winningTeam = 'TIE';
                     }
                 }
 
-                // Update Match Status in DB
+                console.log(`[ResultSettlement] Identified winner: ${winningTeam}`);
+
+                // Update Match Status and Score in DB
                 match.status = 'completed';
+                const runs = apiMatch.runs || [];
+                const tA = runs.find(r => r.team_id === apiMatch.localteam_id);
+                const tB = runs.find(r => r.team_id === apiMatch.visitorteam_id);
+                
                 match.score = {
-                    teamA_runs: resultEntry.scores.find(s => s.name === match.teamA)?.score || match.score.teamA_runs,
-                    teamB_runs: resultEntry.scores.find(s => s.name === match.teamB)?.score || match.score.teamB_runs,
+                    teamA_runs: tA ? `${tA.score}/${tA.wickets}` : match.score?.teamA_runs || '0/0',
+                    teamB_runs: tB ? `${tB.score}/${tB.wickets}` : match.score?.teamB_runs || '0/0',
                     overs: "Final",
                     lastUpdated: new Date()
                 };
+                
                 await match.save();
+                console.log(`[ResultSettlement] DB Match ${match.matchId} updated to completed.`);
 
                 // Trigger Bet Settlement
                 await settleMatch(match.matchId, winningTeam, io);
 
-                // Notify Frontend
+                // Notify Frontend that match is completed
                 if (io) {
                     const allMatches = await Match.find().sort({ startTime: 1 });
                     io.emit('matches_updated', allMatches);
@@ -82,7 +107,7 @@ const processMatchResults = async (io) => {
         }
 
     } catch (error) {
-        console.error('[ResultSettlement] Error processing results:', error.message);
+        console.error('[ResultSettlement] CRITICAL ERROR:', error.message);
     }
 };
 

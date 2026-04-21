@@ -15,7 +15,9 @@ const userSchema = new mongoose.Schema({
     plus4: { type: Number, default: 25000 },
   },
   role: { type: String, enum: ['user', 'master', 'admin'], default: 'user' },
+  share: { type: Number, default: 0, min: 0, max: 85 },
   parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
   createdAt: { type: Date, default: Date.now }
 });
 

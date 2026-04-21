@@ -42,6 +42,10 @@ router.post('/login', async (req, res) => {
     const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
+    if (user.status === 'inactive') {
+      return res.status(403).json({ error: 'Account is inactive. Please contact support.' });
+    }
+
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 

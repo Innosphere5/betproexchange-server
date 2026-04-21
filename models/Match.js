@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const matchSchema = new mongoose.Schema({
   matchId: { type: String, required: true, unique: true, index: true },
+  leagueId: { type: Number, index: true }, // Added for Sportmonks league filtering
   teamA: { type: String, required: true },
   teamB: { type: String, required: true },
   league: { type: String, required: true },

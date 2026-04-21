@@ -1,84 +1,98 @@
 const Match = require('../models/Match');
-const { getEvents } = require('./apiManager');
+const { getData } = require('./apiManager');
 
 /**
  * fetchUpcomingMatches
  * 
- * Migrated to the-odds-api.com v4.
- * Fetches IPL, Pakistan (PSL), and International Men's matches.
- * Automatically prunes old matches no longer in the API.
+ * Migrated to Sportmonks Cricket API v2.0.
+ * Fetches fixtures for today and next 2 days.
+ * Filters for IPL (5), PSL (3), and International (10, 11, 12).
+ * Keeps only top 6 matches sorted by start time.
  */
 const fetchUpcomingMatches = async (io) => {
     try {
-        console.log('[MatchService] Syncing matches from v4 API...');
+        console.log('[MatchService] Syncing fixtures from Sportmonks v2 API...');
 
-        const sportsToFetch = [
-            'cricket_ipl',
-            'cricket_psl',
-            'cricket_test_match',
-            'cricket_odi',
-            'cricket_international_t20'
-        ];
-
-        let allFetchedMatches = [];
-
-        for (const sport of sportsToFetch) {
-            const data = await getEvents(sport, 'events');
-            if (Array.isArray(data)) {
-                allFetchedMatches = [...allFetchedMatches, ...data];
-            }
+        // 1. Cleanup: Remove matches older than 24 hours
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const prunedOldCount = await Match.deleteMany({ startTime: { $lt: twentyFourHoursAgo } });
+        if (prunedOldCount.deletedCount > 0) {
+            console.log(`[MatchService] 🗑️ Cleaned ${prunedOldCount.deletedCount} matches older than 24h.`);
         }
 
-        if (allFetchedMatches.length === 0) {
-            console.warn('[MatchService] No matches returned from API.');
+        const today = new Date().toISOString().split('T')[0];
+        const twoDaysLater = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+        const response = await getData('fixtures', {
+            filter: {
+                'filter[starts_between]': `${today},${twoDaysLater}`,
+            },
+            include: 'localteam,visitorteam,league'
+        });
+
+        if (!response || !Array.isArray(response.data)) {
+            console.warn('[MatchService] No fixtures returned or API error.');
             return;
         }
 
-        const now = new Date();
-        const activeIds = new Set();
+        console.log(`[MatchService] Total matches from API: ${response.data.length}`);
+        if (response.data.length > 0) {
+            console.log(`[MatchService] Sample Data (First 3):`, response.data.slice(0, 3).map(f => ({ id: f.id, league: f.league?.name, status: f.status })));
+        }
 
-        for (const event of allFetchedMatches) {
-            const matchId = event.id.toString();
-            activeIds.add(matchId);
+        const allowedLeagueIds = [1, 8, 2, 3, 4, 11, 17, 18, 41];
+        
+        // 3. Filter and Map
+        let matches = response.data
+            .filter(f => allowedLeagueIds.includes(f.league_id))
+            .map(f => ({
+                matchId:   f.id.toString(),
+                leagueId:  f.league_id,
+                teamA:     f.localteam?.name || 'Local Team',
+                teamB:     f.visitorteam?.name || 'Visitor Team',
+                league:    f.league?.name || 'Cricket',
+                startTime: new Date(f.starting_at),
+                status:    f.status === 'Live' ? 'live' : 'upcoming',
+                sportKey:  'cricket_international', // Unified key for cricket
+                lastUpdated: new Date()
+            }));
 
-            const startTime = new Date(event.commence_time);
-            const isLive = startTime <= now;
+        // 4. Sort and Limit (Top 5-6 matches)
+        matches.sort((a, b) => a.startTime - b.startTime);
+        const topMatches = matches.slice(0, 6);
 
-            const matchData = {
-                matchId:     matchId,
-                teamA:       event.home_team,
-                teamB:       event.away_team,
-                league:      event.sport_title || 'Cricket',
-                sportKey:    event.sport_key,
-                startTime:   startTime,
-                status:      isLive ? 'live' : 'upcoming',
-                score: { 
-                    teamA_runs: '0/0', 
-                    teamB_runs: '0/0', 
-                    overs: '0.0', 
-                    lastUpdated: new Date() 
-                },
-                lastUpdated: new Date(),
-            };
-
+        const activeIds = [];
+        for (const m of topMatches) {
+            activeIds.push(m.matchId);
+            
+            // Upsert with default score if new
             await Match.findOneAndUpdate(
-                { matchId: matchData.matchId },
-                { $set: matchData },
-                { upsert: true, new: true }
+                { matchId: m.matchId },
+                { 
+                    $set: m,
+                    $setOnInsert: {
+                        score: { 
+                            teamA_runs: '0/0', 
+                            teamB_runs: '0/0', 
+                            overs: '0.0', 
+                            lastUpdated: new Date() 
+                        }
+                    }
+                },
+                { upsert: true, returnDocument: 'after' }
             );
         }
 
-        // --- Pruning Logic ---
-        // Remove matches that are no longer in the API (old/previous matches)
+        // 5. Prune matches not in the top 6 active list
         const deleteResult = await Match.deleteMany({
-            matchId: { $nin: Array.from(activeIds) }
+            matchId: { $nin: activeIds }
         });
 
         if (deleteResult.deletedCount > 0) {
-            console.log(`[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} old matches.`);
+            console.log(`[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} matches to maintain limit.`);
         }
 
-        console.log(`[MatchService] ✅ Sync complete. Active matches: ${activeIds.size}`);
+        console.log(`[MatchService] ✅ Sync complete. Stored matches: ${activeIds.length}`);
 
         if (io) {
             const allMatches = await Match.find().sort({ startTime: 1 });

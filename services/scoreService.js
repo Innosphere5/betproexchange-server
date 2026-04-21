@@ -1,76 +1,73 @@
 const Match = require('../models/Match');
-const { getEvents } = require('./apiManager');
+const { getData } = require('./apiManager');
 
 /**
  * updateLiveScores
  * 
- * Fetches live scores for all supported cricket categories.
- * Maps v4 score structure (array of {name, score}) to our database format.
+ * Migrated to Sportmonks Cricket API v2.0.
+ * Fetches all current live scores in one call.
+ * Extracts runs/wickets/overs from the 'runs' include.
  */
 const updateLiveScores = async (io) => {
     try {
-        const liveMatches = await Match.find({ status: 'live' });
+        // 1. Fetch live scores from API
+        // Sportmonks Param: include=runs,localteam,visitorteam
+        const response = await getData('livescores', {
+            include: 'runs,localteam,visitorteam'
+        });
 
-        if (liveMatches.length === 0) {
+        if (!response || !Array.isArray(response.data) || response.data.length === 0) {
+            // If no live matches from API, check if we have any 'live' matches in DB to sync
             return;
         }
 
-        const sportsToFetch = [
-            'cricket_ipl',
-            'cricket_psl',
-            'cricket_test_match',
-            'cricket_odi',
-            'cricket_international_t20'
-        ];
-
-        let allScoreData = [];
-
-        for (const sport of sportsToFetch) {
-            const data = await getEvents(sport, 'scores');
-            if (Array.isArray(data)) {
-                allScoreData = [...allScoreData, ...data];
-            }
-        }
-
-        if (allScoreData.length === 0) return;
-
         let updatedCount = 0;
 
-        for (const match of liveMatches) {
-            const freshMatch = allScoreData.find(e => e.id?.toString() === match.matchId);
+        for (const liveData of response.data) {
+            const matchId = liveData.id.toString();
+            const matchInDb = await Match.findOne({ matchId });
 
-            if (freshMatch && freshMatch.scores) {
-                // v4 scores format: [{ name: "Team A", score: "100" }, { name: "Team B", score: "50" }]
-                const homeScoreObj = freshMatch.scores.find(s => s.name === freshMatch.home_team);
-                const awayScoreObj = freshMatch.scores.find(s => s.name === freshMatch.away_team);
+            if (!matchInDb) continue;
 
-                const newScore = {
-                    home: homeScoreObj ? homeScoreObj.score : (match.score?.home || '0/0'),
-                    away: awayScoreObj ? awayScoreObj.score : (match.score?.away || '0/0')
-                };
+            const runs = liveData.runs || [];
+            
+            // Map runs to teams
+            // localteam is usually teamA, visitorteam is teamB
+            const teamARunsObj = runs.find(r => r.team_id === liveData.localteam_id);
+            const teamBRunsObj = runs.find(r => r.team_id === liveData.visitorteam_id);
 
-                // Only update if something changed
-                if (newScore.home !== match.score?.home || newScore.away !== match.score?.away) {
-                    await Match.updateOne(
-                        { matchId: match.matchId },
-                        {
-                            $set: {
-                                score:       newScore,
+            const teamA_score = teamARunsObj ? `${teamARunsObj.score}/${teamARunsObj.wickets}` : matchInDb.score?.teamA_runs;
+            const teamB_score = teamBRunsObj ? `${teamBRunsObj.score}/${teamBRunsObj.wickets}` : matchInDb.score?.teamB_runs;
+            // Use the highest overs from both teams as the current progress
+            const currentOvers = teamARunsObj?.overs || teamBRunsObj?.overs || matchInDb.score?.overs || "0.0";
+
+            const hasChanged = 
+                teamA_score !== matchInDb.score?.teamA_runs || 
+                teamB_score !== matchInDb.score?.teamB_runs ||
+                currentOvers !== matchInDb.score?.overs;
+
+            if (hasChanged) {
+                await Match.updateOne(
+                    { matchId },
+                    {
+                        $set: {
+                            status: 'live', // Force status to live if scores are being received
+                            score: {
+                                teamA_runs: teamA_score,
+                                teamB_runs: teamB_score,
+                                overs:      currentOvers,
                                 lastUpdated: new Date()
-                            }
+                            },
+                            lastUpdated: new Date()
                         }
-                    );
-                    updatedCount++;
-                }
+                    }
+                );
+                updatedCount++;
             }
         }
 
         if (updatedCount > 0 && io) {
             console.log(`[ScoreService] Updated scores for ${updatedCount} matches.`);
-            const allMatches = await Match.find().sort({ startTime: 1 });
-            io.emit('matches_updated', allMatches);
-        } else if (liveMatches.length > 0 && io) {
-            // Even if score didn't change, sync the 'live' state occasionally
             const allMatches = await Match.find().sort({ startTime: 1 });
             io.emit('matches_updated', allMatches);
         }
