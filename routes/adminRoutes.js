@@ -3,6 +3,8 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
+const Match = require('../models/Match');
+const Bet = require('../models/Bet');
 const auth = require('../middleware/auth');
 
 // Middleware to check if user is Admin or Master
@@ -137,6 +139,55 @@ router.post('/load-balance', auth, isAdminOrMaster, async (req, res) => {
   }
 });
 
+// Withdraw Balance (Reduce)
+router.post('/withdraw-balance', auth, isAdminOrMaster, async (req, res) => {
+  try {
+    const { targetUsername, amount } = req.body;
+    const withdrawAmount = parseFloat(amount);
+
+    if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+
+    const parent = await User.findOne({ username: req.user.userId });
+    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+
+    if (!target) return res.status(404).json({ error: 'Downline user not found' });
+
+    // Restriction: Master can only withdraw from Bettors
+    if (req.user.role === 'master' && target.role !== 'user') {
+      return res.status(403).json({ error: 'Masters can only manage Bettors' });
+    }
+
+    if (target.walletBalance < withdrawAmount) {
+      return res.status(400).json({ error: 'User has insufficient balance to withdraw this amount' });
+    }
+
+    target.walletBalance -= withdrawAmount;
+    await target.save();
+
+    // Give back to parent if not Admin
+    if (req.user.role !== 'admin') {
+      parent.walletBalance += withdrawAmount;
+      await parent.save();
+    }
+
+    // Create Transaction Record
+    const newTransaction = new Transaction({
+      userId: target.username,
+      amount: -withdrawAmount,
+      type: 'WITHDRAW',
+      description: `Balance reduced by ${parent.role} ${parent.username}`,
+      performedBy: parent.username
+    });
+    await newTransaction.save();
+
+    res.json({ success: true, newBalance: target.walletBalance, parentBalance: parent.walletBalance });
+  } catch (err) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Update Downline User Detail (Share, Password, etc.)
 router.post('/update-user', auth, isAdminOrMaster, async (req, res) => {
   try {
@@ -253,6 +304,49 @@ router.get('/user-statement/:username', auth, isAdminOrMaster, async (req, res) 
     res.json(transactions);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get Dashboard Stats (Match-wise exposure)
+router.get('/dashboard-stats', auth, isAdminOrMaster, async (req, res) => {
+  try {
+    const parent = await User.findOne({ username: req.user.userId });
+    if (!parent) return res.status(404).json({ error: 'User not found' });
+
+    // 1. Get all scheduled/live matches
+    const activeMatches = await Match.find({ status: { $in: ['scheduled', 'live'] } }).select('matchId teamA teamB');
+    const matchIds = activeMatches.map(m => m.matchId);
+
+    // 2. Prepare Match Stake Query
+    let matchStatsQuery = { matchId: { $in: matchIds }, status: 'MATCHED' };
+    
+    if (req.user.role === 'master') {
+      // Find direct downline for Master
+      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      matchStatsQuery.userId = { $in: usernames };
+    }
+    // Admin sees all bets by default (no userId filter)
+
+    // 3. Aggregate Stakes
+    const stakesByMatch = await Bet.aggregate([
+      { $match: matchStatsQuery },
+      { $group: { _id: "$matchId", totalStake: { $sum: "$stake" } } }
+    ]);
+
+    const stakeMap = {};
+    stakesByMatch.forEach(s => stakeMap[s._id] = s.totalStake);
+
+    const results = activeMatches.map(m => ({
+      matchId: m.matchId,
+      name: `${m.teamA} v ${m.teamB} / Match Odds`,
+      amount: stakeMap[m.matchId] || 0
+    }));
+
+    res.json(results);
+  } catch (err) {
+    console.error("Dashboard Stats Error:", err);
+    res.status(500).json({ error: 'Server error mapping dashboard stats' });
   }
 });
 

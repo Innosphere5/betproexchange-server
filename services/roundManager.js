@@ -190,22 +190,22 @@ async function declareResult() {
       for (let bet of bets) {
         if (bet.choice === result) {
           bet.status = 'WIN';
-          const payout = bet.amount * (bet.odds || 2.0);
+          const grossPayout = bet.amount * (bet.odds || 2.0);
+          const netPayout = Math.max(0, grossPayout - 50);
 
           // Use ATOMIC update to credit wallet
           const user = await User.findOneAndUpdate(
             { username: bet.userId },
-            { $inc: { walletBalance: payout } },
+            { $inc: { walletBalance: netPayout } },
             { new: true }
           );
 
           if (user) {
-            console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${payout}`);
-            // Note: In a real app, you might want to emit to a specific user socket
+            console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${netPayout} (Gross: ${grossPayout})`);
             io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
           }
 
-          io.emit('casino_wallet_payout', { userId: bet.userId, amount: payout, choice: bet.choice, result: 'WIN' });
+          io.emit('casino_wallet_payout', { userId: bet.userId, amount: netPayout, choice: bet.choice, result: 'WIN' });
         } else {
           bet.status = 'LOSE';
           console.log(`[LOSER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: 0`);

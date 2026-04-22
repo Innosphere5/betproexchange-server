@@ -1,4 +1,5 @@
 const Match = require('../models/Match');
+const Bet = require('../models/Bet');
 const { getData } = require('./apiManager');
 const { settleMatch } = require('./settlementService');
 
@@ -7,47 +8,62 @@ const { settleMatch } = require('./settlementService');
  * 
  * Logic to fetch results from Sportmonks v2 API, identify completed matches, 
  * determine the winner, and trigger settlement.
+ * 
+ * ENHANCED: Now also checks for results of every "MATCHED" bet in the DB, 
+ * even if the Match object was deleted or is old.
  */
 const processMatchResults = async (io) => {
     try {
         console.log('[ResultSettlement] Checking for completed match results...');
         
-        // Find all matches that aren't completed yet
+        // 1. Get IDs from pending matches in DB
         const pendingMatches = await Match.find({ status: { $ne: 'completed' } });
+        const pendingMatchIds = pendingMatches.map(m => m.matchId);
 
-        if (pendingMatches.length === 0) {
-            console.log('[ResultSettlement] No pending matches found in DB.');
+        // 2. Get IDs from "MATCHED" bets (this catches old matches that were pruned from DB)
+        const activeBets = await Bet.find({ status: 'MATCHED' });
+        const betMatchIds = [...new Set(activeBets.map(b => b.matchId))];
+
+        // Combine unique IDs to check
+        const allIdsToCheck = [...new Set([...pendingMatchIds, ...betMatchIds])];
+
+        if (allIdsToCheck.length === 0) {
+            console.log('[ResultSettlement] No pending matches or active bets found to check.');
             return;
         }
 
-        console.log(`[ResultSettlement] Found ${pendingMatches.length} pending matches in DB to check.`);
+        console.log(`[ResultSettlement] Found ${allIdsToCheck.length} unique match IDs to check result status.`);
 
-        // Use absolute dates for the last 3 days to be safe
+        // Sportmonks allows fetching multiple fixtures by ID if separated by comma in some versions, 
+        // but for safety and v2 compatibility, we'll try a date-based bulk fetch first for a wider window (7 days).
         const d = new Date();
         const today = d.toISOString().split('T')[0];
-        d.setDate(d.getDate() - 2);
-        const threeDaysAgo = d.toISOString().split('T')[0];
+        d.setDate(d.getDate() - 7); // Increased to 7 days
+        const sevenDaysAgo = d.toISOString().split('T')[0];
 
         const response = await getData('fixtures', {
             filter: {
-                'filter[starts_between]': `${threeDaysAgo},${today}`,
+                'filter[starts_between]': `${sevenDaysAgo},${today}`,
             },
             include: 'runs,localteam,visitorteam'
         });
 
         if (!response || !Array.isArray(response.data)) {
-            console.warn('[ResultSettlement] API returned no fixture data for settlement.');
+            console.warn('[ResultSettlement] API returned no fixture data.');
             return;
         }
 
-        console.log(`[ResultSettlement] Fetched ${response.data.length} fixtures for the check.`);
+        const apifixtures = response.data;
+        console.log(`[ResultSettlement] Fetched ${apifixtures.length} fixtures for the check.`);
 
-        for (const match of pendingMatches) {
-            const apiMatch = response.data.find(f => f.id?.toString() === match.matchId);
+        for (const matchId of allIdsToCheck) {
+            const apiMatch = apifixtures.find(f => f.id?.toString() === matchId);
 
             if (!apiMatch) {
-                // If not in the 3-day window, try fetching it individually if it's very old?
-                // For now, just skip if not found
+                // If match is older than 7 days, it won't be in the bulk fetch.
+                // We should ideally fetch it by ID specifically, but Sportmonks v2 fixtures endpoint 
+                // might need a different path. For now, we print a log.
+                // console.log(`[ResultSettlement] Match ${matchId} not found in 7-day window.`);
                 continue;
             }
 
@@ -55,55 +71,55 @@ const processMatchResults = async (io) => {
             const isCompleted = ['Finished', 'Aborted', 'No Result', 'Abandoned'].includes(apiMatch.status);
 
             if (isCompleted) {
-                console.log(`[ResultSettlement] 🏆 Match ${match.matchId} (${match.teamA} v ${match.teamB}) is ${apiMatch.status}.`);
+                console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status}.`);
 
                 let winningTeam = 'VOID'; 
 
                 if (apiMatch.status === 'Finished') {
-                    // Use winner_team_id if available, otherwise fallback to score
                     if (apiMatch.winner_team_id === apiMatch.localteam_id) {
-                        winningTeam = match.teamA;
+                        winningTeam = apiMatch.localteam?.name || 'Home Team';
                     } else if (apiMatch.winner_team_id === apiMatch.visitorteam_id) {
-                        winningTeam = match.teamB;
+                        winningTeam = apiMatch.visitorteam?.name || 'Away Team';
                     } else {
-                        // Manual score fallback
                         const runs = apiMatch.runs || [];
                         const rA = runs.find(r => r.team_id === apiMatch.localteam_id)?.score || 0;
                         const rB = runs.find(r => r.team_id === apiMatch.visitorteam_id)?.score || 0;
 
-                        if (rA > rB) winningTeam = match.teamA;
-                        else if (rB > rA) winningTeam = match.teamB;
+                        if (rA > rB) winningTeam = apiMatch.localteam?.name || 'Home Team';
+                        else if (rB > rA) winningTeam = apiMatch.visitorteam?.name || 'Away Team';
                         else winningTeam = 'TIE';
                     }
                 }
 
-                console.log(`[ResultSettlement] Identified winner: ${winningTeam}`);
+                console.log(`[ResultSettlement] Identified winner for ${matchId}: ${winningTeam}`);
 
-                // Update Match Status and Score in DB
-                match.status = 'completed';
-                const runs = apiMatch.runs || [];
-                const tA = runs.find(r => r.team_id === apiMatch.localteam_id);
-                const tB = runs.find(r => r.team_id === apiMatch.visitorteam_id);
-                
-                match.score = {
-                    teamA_runs: tA ? `${tA.score}/${tA.wickets}` : match.score?.teamA_runs || '0/0',
-                    teamB_runs: tB ? `${tB.score}/${tB.wickets}` : match.score?.teamB_runs || '0/0',
-                    overs: "Final",
-                    lastUpdated: new Date()
-                };
-                
-                await match.save();
-                console.log(`[ResultSettlement] DB Match ${match.matchId} updated to completed.`);
-
-                // Trigger Bet Settlement
-                await settleMatch(match.matchId, winningTeam, io);
-
-                // Notify Frontend that match is completed
-                if (io) {
-                    const allMatches = await Match.find().sort({ startTime: 1 });
-                    io.emit('matches_updated', allMatches);
+                // 1. Update Match record if it exists
+                const dbMatch = pendingMatches.find(m => m.matchId === matchId);
+                if (dbMatch) {
+                    dbMatch.status = 'completed';
+                    dbMatch.winner = winningTeam;
+                    const runs = apiMatch.runs || [];
+                    const tA = runs.find(r => r.team_id === apiMatch.localteam_id);
+                    const tB = runs.find(r => r.team_id === apiMatch.visitorteam_id);
+                    
+                    dbMatch.score = {
+                        teamA_runs: tA ? `${tA.score}/${tA.wickets}` : dbMatch.score?.teamA_runs || '0/0',
+                        teamB_runs: tB ? `${tB.score}/${tB.wickets}` : dbMatch.score?.teamB_runs || '0/0',
+                        overs: "Final",
+                        lastUpdated: new Date()
+                    };
+                    await dbMatch.save();
                 }
+
+                // 2. Trigger Bet Settlement for this match
+                await settleMatch(matchId, winningTeam, io);
             }
+        }
+
+        // Notify UI about match updates
+        if (io) {
+            const allMatches = await Match.find().sort({ startTime: 1 });
+            io.emit('matches_updated', allMatches);
         }
 
     } catch (error) {

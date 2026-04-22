@@ -15,6 +15,7 @@ const matchSchema = new mongoose.Schema({
     lastUpdated: { type: Date, default: Date.now }
   },
   startTime: { type: Date, required: true },
+  winner: { type: String, default: null }, // Team name that won
   lastUpdated: { type: Date, default: Date.now }
 });
 

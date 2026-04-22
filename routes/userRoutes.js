@@ -47,7 +47,7 @@ router.get('/statement', auth, async (req, res) => {
             id: `WIN-${b._id}`,
             date: b.updatedAt || b.createdAt,
             description: `Win Payout: ${b.matchName}`,
-            amount: b.stake * b.odds,
+            amount: Math.max(0, (b.stake * b.odds) - 50),
             type: 'CRICKET_WIN',
             status: 'SETTLED'
         });
@@ -58,7 +58,7 @@ router.get('/statement', auth, async (req, res) => {
             id: `WIN-${b._id}`,
             date: b.updatedAt || b.createdAt,
             description: `Casino Win Payout`,
-            amount: b.amount * (b.odds || 2.0),
+            amount: Math.max(0, (b.amount * (b.odds || 2.0)) - 50),
             type: 'CASINO_WIN',
             status: 'SETTLED'
         });
@@ -92,13 +92,13 @@ router.get('/profit-loss', auth, async (req, res) => {
 
     let cricketPL = 0;
     cricketBets.forEach(b => {
-        if (b.status === 'WIN') cricketPL += (b.stake * (b.odds - 1));
+        if (b.status === 'WIN') cricketPL += ((b.stake * b.odds) - b.stake - 50);
         else if (b.status === 'LOSE') cricketPL -= b.stake;
     });
 
     let casinoPL = 0;
     casinoBets.forEach(b => {
-        if (b.status === 'WIN') casinoPL += (b.amount * ((b.odds || 2.0) - 1));
+        if (b.status === 'WIN') casinoPL += ((b.amount * (b.odds || 2.0)) - b.amount - 50);
         else if (b.status === 'LOSE') casinoPL -= b.amount;
     });
 

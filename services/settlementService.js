@@ -22,6 +22,11 @@ const settleMatch = async (matchId, winningTeam, io) => {
 
         const isRefund = winningTeam === 'REFUND' || winningTeam === 'VOID' || winningTeam === 'TIE';
 
+        // Update Match winner in DB
+        if (!isRefund) {
+            await Match.findOneAndUpdate({ matchId }, { winner: winningTeam });
+        }
+
         for (const bet of activeBets) {
             if (isRefund) {
                 // REFUND Condition: Return the stake to the user
@@ -56,24 +61,26 @@ const settleMatch = async (matchId, winningTeam, io) => {
             const isWin = isBack ? runnerWon : !runnerWon;
 
             if (isWin) {
-                // User Won: Payout is stake * odds
-                const payout = bet.stake * bet.odds;
+                // User Won: Payout is (stake * odds) - 50 fee
+                // We ensure payout is at least 0
+                const grossPayout = bet.stake * bet.odds;
+                const netPayout = Math.max(0, grossPayout - 50);
                 
                 const user = await User.findOneAndUpdate(
                     { username: bet.userId },
-                    { $inc: { walletBalance: payout } },
+                    { $inc: { walletBalance: netPayout } },
                     { new: true }
                 );
 
                 bet.status = 'WIN';
                 await bet.save();
 
-                console.log(`[BET WIN] User: ${bet.userId} won ${payout} on ${bet.runner} (${bet.type}).`);
+                console.log(`[BET WIN] User: ${bet.userId} won ${netPayout} (Gross: ${grossPayout}) on ${bet.runner} (${bet.type}).`);
 
                 if (io) {
                     io.emit('bet_notification', {
                         status: 'WIN',
-                        amount: payout,
+                        amount: netPayout,
                         matchName: bet.matchName,
                         runner: bet.runner,
                         type: bet.type
@@ -108,4 +115,5 @@ const settleMatch = async (matchId, winningTeam, io) => {
     }
 };
 
+const Match = require('../models/Match');
 module.exports = { settleMatch };
