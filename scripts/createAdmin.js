@@ -17,15 +17,15 @@ const createAdmin = async () => {
             console.log('ℹ️ Index userId_1 not found or already dropped');
         }
 
-        const username = 'Adnan';
-        const password = 'waqas';
+        const username = 'admin';
+        const password = 'admin123';
 
         let user = await User.findOne({ username });
 
         if (user) {
-            console.log('Admin user Adnan already exists. Updating password and role...');
+            console.log('Admin user already exists. Updating password and role...');
         } else {
-            console.log('Creating admin user Adnan...');
+            console.log('Creating admin user...');
             user = new User({ username });
         }
 

@@ -42,12 +42,12 @@ router.get('/statement', auth, async (req, res) => {
     ];
 
     // Add winning entries if settled
-    cricketBets.filter(b => b.status === 'WIN').forEach(b => {
+    cricketBets.filter(b => b.status === 'won' || b.status === 'WIN').forEach(b => {
         statement.push({
             id: `WIN-${b._id}`,
             date: b.updatedAt || b.createdAt,
             description: `Win Payout: ${b.matchName}`,
-            amount: Math.max(0, (b.stake * b.odds) - 50),
+            amount: b.payout || (b.stake * b.odds),
             type: 'CRICKET_WIN',
             status: 'SETTLED'
         });
@@ -75,8 +75,8 @@ router.get('/statement', auth, async (req, res) => {
 // Get User Results (Only settled bets)
 router.get('/results', auth, async (req, res) => {
   try {
-    const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } }).sort({ createdAt: -1 });
-    const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } }).sort({ createdAt: -1 });
+    const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
+    const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
 
     res.json({ cricket: cricketBets, casino: casinoBets });
   } catch (err) {
@@ -92,8 +92,8 @@ router.get('/profit-loss', auth, async (req, res) => {
 
     let cricketPL = 0;
     cricketBets.forEach(b => {
-        if (b.status === 'WIN') cricketPL += ((b.stake * b.odds) - b.stake - 50);
-        else if (b.status === 'LOSE') cricketPL -= b.stake;
+        if (b.status === 'won' || b.status === 'WIN') cricketPL += ((b.payout || (b.stake * b.odds)) - b.stake);
+        else if (b.status === 'lost' || b.status === 'LOSE') cricketPL -= b.stake;
     });
 
     let casinoPL = 0;

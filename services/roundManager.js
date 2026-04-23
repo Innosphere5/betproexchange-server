@@ -190,8 +190,9 @@ async function declareResult() {
       for (let bet of bets) {
         if (bet.choice === result) {
           bet.status = 'WIN';
-          const grossPayout = bet.amount * (bet.odds || 2.0);
-          const netPayout = Math.max(0, grossPayout - 50);
+          const profit = bet.amount * ((bet.odds || 2.0) - 1);
+          const netProfit = profit * 0.95;
+          const netPayout = bet.amount + netProfit;
 
           // Use ATOMIC update to credit wallet
           const user = await User.findOneAndUpdate(
@@ -201,7 +202,7 @@ async function declareResult() {
           );
 
           if (user) {
-            console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${netPayout} (Gross: ${grossPayout})`);
+            console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${netPayout}`);
             io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
           }
 

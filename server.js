@@ -97,7 +97,8 @@ app.post('/api/user/bet', auth, async (req, res) => {
         stake, 
         odds, 
         isLive,
-        type: type || 'back'
+        type: type || 'back',
+        status: 'pending'
     });
     await newBet.save();
     

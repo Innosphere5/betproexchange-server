@@ -12,40 +12,41 @@ const settleMatch = async (matchId, winningTeam, io) => {
         console.log(`[SETTLEMENT] Beginning settlement for matchId: ${matchId}`);
         console.log(`[SETTLEMENT] Declared Result/Winner: ${winningTeam}`);
 
-        // Find all active bets for this match
-        const activeBets = await Bet.find({ matchId, status: 'MATCHED' });
+        // Find all pending bets for this match
+        const activeBets = await Bet.find({ matchId, status: 'pending' });
 
         if (activeBets.length === 0) {
-            console.log(`[SETTLEMENT] No active bets found for matchId: ${matchId}`);
+            console.log(`[SETTLEMENT] No pending bets found for matchId: ${matchId}`);
             return;
         }
 
         const isRefund = winningTeam === 'REFUND' || winningTeam === 'VOID' || winningTeam === 'TIE';
 
-        // Update Match winner in DB
-        if (!isRefund) {
-            await Match.findOneAndUpdate({ matchId }, { winner: winningTeam });
-        }
-
         for (const bet of activeBets) {
+            // Idempotency check (extra safety)
+            if (bet.status !== 'pending') continue;
+
             if (isRefund) {
                 // REFUND Condition: Return the stake to the user
                 const user = await User.findOneAndUpdate(
-                    { username: bet.userId }, // Bet model uses userId which matches username in User model
+                    { username: bet.userId },
                     { $inc: { walletBalance: bet.stake } },
                     { new: true }
                 );
 
-                bet.status = 'CANCELLED';
+                bet.status = 'cancelled';
+                bet.result = winningTeam;
+                bet.settledAt = new Date();
                 await bet.save();
 
                 console.log(`[BET REFUND] User: ${bet.userId} refunded ${bet.stake} for ${bet.matchName}.`);
 
                 if (io && user) {
                     io.emit('wallet_updated', { userId: user.username, balance: user.walletBalance });
-                    io.emit('bet_notification', {
-                        status: 'CANCELLED',
-                        message: `Match Void: ${bet.stake} refunded for ${bet.matchName}`,
+                    io.emit('bet_settled', {
+                        betId: bet._id,
+                        status: 'cancelled',
+                        message: `Match Void: ${bet.stake} refunded`,
                         matchName: bet.matchName
                     });
                 }
@@ -54,36 +55,34 @@ const settleMatch = async (matchId, winningTeam, io) => {
 
             const isBack = bet.type === 'back';
             const runnerWon = bet.runner === winningTeam;
-            
-            // Winning Condition: 
-            // - Back bet wins if runner wins.
-            // - Lay bet wins if runner loses (runner !== winningTeam).
             const isWin = isBack ? runnerWon : !runnerWon;
 
             if (isWin) {
-                // User Won: Payout is (stake * odds) - 50 fee
-                // We ensure payout is at least 0
-                const grossPayout = bet.stake * bet.odds;
-                const netPayout = Math.max(0, grossPayout - 50);
+                // User Won: payout = stake + (profit * 0.97)
+                const profit = bet.stake * (bet.odds - 1);
+                const netProfit = profit * 0.97;
+                const payoutAmount = bet.stake + netProfit;
                 
                 const user = await User.findOneAndUpdate(
                     { username: bet.userId },
-                    { $inc: { walletBalance: netPayout } },
+                    { $inc: { walletBalance: payoutAmount } },
                     { new: true }
                 );
 
-                bet.status = 'WIN';
+                bet.status = 'won';
+                bet.payout = payoutAmount;
+                bet.result = winningTeam;
+                bet.settledAt = new Date();
                 await bet.save();
 
-                console.log(`[BET WIN] User: ${bet.userId} won ${netPayout} (Gross: ${grossPayout}) on ${bet.runner} (${bet.type}).`);
+                console.log(`[BET WIN] User: ${bet.userId} won ${payoutAmount} on ${bet.runner}.`);
 
                 if (io) {
-                    io.emit('bet_notification', {
-                        status: 'WIN',
-                        amount: netPayout,
-                        matchName: bet.matchName,
-                        runner: bet.runner,
-                        type: bet.type
+                    io.emit('bet_settled', {
+                        betId: bet._id,
+                        status: 'won',
+                        payout: payoutAmount,
+                        matchName: bet.matchName
                     });
                     
                     if (user) {
@@ -91,19 +90,20 @@ const settleMatch = async (matchId, winningTeam, io) => {
                     }
                 }
             } else {
-                // User Lost: Stake is already deducted at placement, so just update status
-                bet.status = 'LOSE';
+                // User Lost: Stake is already deducted, so just update status
+                bet.status = 'lost';
+                bet.payout = 0;
+                bet.result = winningTeam;
+                bet.settledAt = new Date();
                 await bet.save();
 
-                console.log(`[BET LOSE] User: ${bet.userId} lost stake of ${bet.stake} on ${bet.runner} (${bet.type}).`);
+                console.log(`[BET LOSE] User: ${bet.userId} lost stake of ${bet.stake} on ${bet.runner}.`);
 
                 if (io) {
-                    io.emit('bet_notification', {
-                        status: 'LOSE',
-                        amount: bet.stake,
-                        matchName: bet.matchName,
-                        runner: bet.runner,
-                        type: bet.type
+                    io.emit('bet_settled', {
+                        betId: bet._id,
+                        status: 'lost',
+                        matchName: bet.matchName
                     });
                 }
             }
