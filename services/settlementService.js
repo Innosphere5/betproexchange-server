@@ -1,6 +1,8 @@
 const Bet = require('../models/Bet');
 const User = require('../models/User');
 
+const { distributeProfitLoss } = require('./hierarchyService');
+
 /**
  * settleMatch
  * @param {string} matchId - The unique ID of the match
@@ -75,6 +77,9 @@ const settleMatch = async (matchId, winningTeam, io) => {
                 bet.settledAt = new Date();
                 await bet.save();
 
+                // Distribute House Loss up the chain
+                await distributeProfitLoss(bet.userId, -netProfit);
+
                 console.log(`[BET WIN] User: ${bet.userId} won ${payoutAmount} on ${bet.runner}.`);
 
                 if (io) {
@@ -96,6 +101,9 @@ const settleMatch = async (matchId, winningTeam, io) => {
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
+
+                // Distribute House Profit up the chain
+                await distributeProfitLoss(bet.userId, bet.stake);
 
                 console.log(`[BET LOSE] User: ${bet.userId} lost stake of ${bet.stake} on ${bet.runner}.`);
 

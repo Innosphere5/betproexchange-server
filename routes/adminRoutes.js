@@ -7,17 +7,18 @@ const Match = require('../models/Match');
 const Bet = require('../models/Bet');
 const auth = require('../middleware/auth');
 
-// Middleware to check if user is Admin or Master
-const isAdminOrMaster = (req, res, next) => {
-  if (req.user.role === 'admin' || req.user.role === 'master') {
+// Middleware to check if user is Authorized (SuperAdmin, Admin or Master)
+const isAuthorized = (req, res, next) => {
+  const authorizedRoles = ['superadmin', 'admin', 'master'];
+  if (authorizedRoles.includes(req.user.role)) {
     next();
   } else {
-    res.status(403).json({ error: 'Access denied. Requires Admin or Master role.' });
+    res.status(403).json({ error: 'Access denied. Requires Authorized role.' });
   }
 };
 
-// Create Downline User (Bettor or Master)
-router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
+// Create Downline User (Admin, Master, or Bettor)
+router.post('/create-user', auth, isAuthorized, async (req, res) => {
   try {
     const { username, password, role, initialBalance, share } = req.body;
 
@@ -28,16 +29,20 @@ router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
 
     // Share Validation (0-85)
     const masterShare = parseFloat(share) || 0;
-    if (masterShare < 0 || masterShare > 85) {
-      return res.status(400).json({ error: 'Share must be between 0 and 85' });
+    if (masterShare < 0 || masterShare > 100) {
+      return res.status(400).json({ error: 'Share must be between 0 and 100' });
     }
 
-    // Role restriction: Master can only create 'user' (Bettor)
+    // Role restriction logic
     if (req.user.role === 'master' && role !== 'user') {
       return res.status(403).json({ error: 'Masters can only create Bettors' });
     }
+    if (req.user.role === 'admin' && !['master', 'user'].includes(role)) {
+      return res.status(403).json({ error: 'Admins can only create Masters or Bettors' });
+    }
+    // superadmin can create admin, master, user (no restriction needed here as role is in enum)
 
-    let existingUser = await User.findOne({ username });
+    let existingUser = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
     if (existingUser) return res.status(400).json({ error: 'Username already exists' });
 
     const parent = await User.findOne({ username: req.user.userId });
@@ -45,7 +50,8 @@ router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
 
     // Initial Balance Check
     const balance = parseFloat(initialBalance) || 0;
-    if (req.user.role !== 'admin' && parent.walletBalance < balance) {
+    const skipBalanceCheck = req.user.role === 'superadmin' || req.user.role === 'admin';
+    if (!skipBalanceCheck && parent.walletBalance < balance) {
       return res.status(400).json({ error: 'Insufficient balance in parent account' });
     }
 
@@ -56,13 +62,13 @@ router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
       username,
       password: hashedPassword,
       role,
-      share: role === 'master' ? masterShare : 0,
+      share: (role === 'master' || role === 'admin') ? masterShare : 0,
       parentId: parent._id,
       walletBalance: balance
     });
 
-    // Deduct from parent balance if not Admin
-    if (req.user.role !== 'admin') {
+    // Deduct from parent balance if not SuperAdmin or Admin
+    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
       parent.walletBalance -= balance;
       await parent.save();
     }
@@ -75,24 +81,38 @@ router.post('/create-user', auth, isAdminOrMaster, async (req, res) => {
   }
 });
 
-// Get Downline Users
-router.get('/downline', auth, isAdminOrMaster, async (req, res) => {
+// Get Downline Users with sub-user counts
+router.get('/downline', auth, isAuthorized, async (req, res) => {
   try {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
-    let query = { parentId: parent._id };
-    // If Admin, maybe show all? But request says "connect pipelines", so usually hierarchy.
-    // For now, only direct downline.
-    const users = await User.find(query).select('-password').sort({ createdAt: -1 });
-    res.json(users);
+    const users = await User.find({ parentId: parent._id }).select('-password').sort({ createdAt: -1 }).lean();
+    
+    // Efficiently get counts for all found users
+    const userIds = users.map(u => u._id);
+    const counts = await User.aggregate([
+      { $match: { parentId: { $in: userIds } } },
+      { $group: { _id: "$parentId", count: { $sum: 1 } } }
+    ]);
+
+    const countMap = {};
+    counts.forEach(c => countMap[c._id.toString()] = c.count);
+
+    const usersWithCounts = users.map(u => ({
+      ...u,
+      downlineCount: countMap[u._id.toString()] || 0
+    }));
+
+    res.json(usersWithCounts);
   } catch (err) {
-    res.status(500).json({ error: 'Server error' });
+    console.error("Downline Error:", err);
+    res.status(500).json({ error: 'Server error fetching downline' });
   }
 });
 
 // Load Balance
-router.post('/load-balance', auth, isAdminOrMaster, async (req, res) => {
+router.post('/load-balance', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, amount } = req.body;
     const addAmount = parseFloat(amount);
@@ -111,8 +131,8 @@ router.post('/load-balance', auth, isAdminOrMaster, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only load balance for Bettors' });
     }
 
-    // Deduct from parent if not Admin
-    if (req.user.role !== 'admin') {
+    // Deduct from parent if not SuperAdmin or Admin
+    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
       if (parent.walletBalance < addAmount) {
         return res.status(400).json({ error: 'Insufficient balance' });
       }
@@ -140,7 +160,7 @@ router.post('/load-balance', auth, isAdminOrMaster, async (req, res) => {
 });
 
 // Withdraw Balance (Reduce)
-router.post('/withdraw-balance', auth, isAdminOrMaster, async (req, res) => {
+router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, amount } = req.body;
     const withdrawAmount = parseFloat(amount);
@@ -166,8 +186,8 @@ router.post('/withdraw-balance', auth, isAdminOrMaster, async (req, res) => {
     target.walletBalance -= withdrawAmount;
     await target.save();
 
-    // Give back to parent if not Admin
-    if (req.user.role !== 'admin') {
+    // Give back to parent if not SuperAdmin or Admin
+    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
       parent.walletBalance += withdrawAmount;
       await parent.save();
     }
@@ -189,7 +209,7 @@ router.post('/withdraw-balance', auth, isAdminOrMaster, async (req, res) => {
 });
 
 // Update Downline User Detail (Share, Password, etc.)
-router.post('/update-user', auth, isAdminOrMaster, async (req, res) => {
+router.post('/update-user', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, share, newPassword } = req.body;
     const parent = await User.findOne({ username: req.user.userId });
@@ -228,7 +248,7 @@ router.post('/update-user', auth, isAdminOrMaster, async (req, res) => {
 });
 
 // Toggle User Status (Active/InActive)
-router.post('/toggle-status', auth, isAdminOrMaster, async (req, res) => {
+router.post('/toggle-status', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, status } = req.body;
     const parent = await User.findOne({ username: req.user.userId });
@@ -257,7 +277,7 @@ router.post('/toggle-status', auth, isAdminOrMaster, async (req, res) => {
 });
 
 // Remove User Permanently (Hard Delete)
-router.delete('/remove-user/:username', auth, isAdminOrMaster, async (req, res) => {
+router.delete('/remove-user/:username', auth, isAuthorized, async (req, res) => {
   try {
     const { username } = req.params;
     const parent = await User.findOne({ username: req.user.userId });
@@ -291,7 +311,7 @@ router.delete('/remove-user/:username', auth, isAdminOrMaster, async (req, res) 
 });
 
 // Get Downline User Statement (Ledger)
-router.get('/user-statement/:username', auth, isAdminOrMaster, async (req, res) => {
+router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => {
   try {
     const { username } = req.params;
     const parent = await User.findOne({ username: req.user.userId });
@@ -308,7 +328,7 @@ router.get('/user-statement/:username', auth, isAdminOrMaster, async (req, res) 
 });
 
 // Get Dashboard Stats (Match-wise exposure)
-router.get('/dashboard-stats', auth, isAdminOrMaster, async (req, res) => {
+router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
   try {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
@@ -325,8 +345,15 @@ router.get('/dashboard-stats', auth, isAdminOrMaster, async (req, res) => {
       const downlineUsers = await User.find({ parentId: parent._id }).select('username');
       const usernames = downlineUsers.map(u => u.username);
       matchStatsQuery.userId = { $in: usernames };
+    } else if (req.user.role === 'admin') {
+      // Find all downline (masters and their users) for Admin
+      const masters = await User.find({ parentId: parent._id }).select('_id');
+      const masterIds = masters.map(m => m._id);
+      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      matchStatsQuery.userId = { $in: usernames };
     }
-    // Admin sees all bets by default (no userId filter)
+    // Superadmin sees all bets by default (no userId filter)
 
     // 3. Aggregate Stakes
     const stakesByMatch = await Bet.aggregate([
@@ -343,10 +370,40 @@ router.get('/dashboard-stats', auth, isAdminOrMaster, async (req, res) => {
       amount: stakeMap[m.matchId] || 0
     }));
 
+// Get Commission Report
+router.get('/commission-report', auth, isAuthorized, async (req, res) => {
+  try {
+    const parent = await User.findOne({ username: req.user.userId });
+    if (!parent) return res.status(404).json({ error: 'User not found' });
+
+    // Fetch all commission share transactions for this manager
+    const commissions = await Transaction.find({ 
+      userId: parent.username, 
+      type: 'COMMISSION_SHARE' 
+    }).sort({ createdAt: -1 });
+
+    // Group by source (optional, but useful for the UI)
+    const groupedCommissions = {};
+    commissions.forEach(c => {
+      // Extract bettor name from description "Commission from username (X% share)"
+      const match = c.description.match(/from (.*?) \(/);
+      const bettorName = match ? match[1] : 'Unknown';
+      
+      if (!groupedCommissions[bettorName]) {
+        groupedCommissions[bettorName] = 0;
+      }
+      groupedCommissions[bettorName] += c.amount;
+    });
+
+    const results = Object.keys(groupedCommissions).map(name => ({
+      name,
+      amount: groupedCommissions[name]
+    }));
+
     res.json(results);
   } catch (err) {
-    console.error("Dashboard Stats Error:", err);
-    res.status(500).json({ error: 'Server error mapping dashboard stats' });
+    console.error("Commission Report Error:", err);
+    res.status(500).json({ error: 'Server error fetching commission report' });
   }
 });
 

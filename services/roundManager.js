@@ -132,6 +132,8 @@ function getHandRank(cards) {
   return { type: 'HIGH CARD', score: ranks[0] * 100 + ranks[1] * 10 + ranks[2] };
 }
 
+const { distributeProfitLoss } = require('./hierarchyService');
+
 async function declareResult() {
   if (!currentRound) {
     console.warn("[CASINO] Attempted to declare result but currentRound is null. Aborting.");
@@ -201,6 +203,9 @@ async function declareResult() {
             { new: true }
           );
 
+          // Distribute House Loss up the chain
+          await distributeProfitLoss(bet.userId, -netProfit);
+
           if (user) {
             console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${netPayout}`);
             io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
@@ -209,6 +214,10 @@ async function declareResult() {
           io.emit('casino_wallet_payout', { userId: bet.userId, amount: netPayout, choice: bet.choice, result: 'WIN' });
         } else {
           bet.status = 'LOSE';
+          
+          // Distribute House Profit up the chain
+          await distributeProfitLoss(bet.userId, bet.amount);
+
           console.log(`[LOSER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: 0`);
           io.emit('casino_wallet_payout', { userId: bet.userId, amount: bet.amount, choice: bet.choice, result: 'LOSE' });
         }
