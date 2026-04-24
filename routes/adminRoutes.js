@@ -370,6 +370,13 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
       amount: stakeMap[m.matchId] || 0
     }));
 
+    res.json(results);
+  } catch (err) {
+    console.error("Dashboard Stats Error:", err);
+    res.status(500).json({ error: 'Server error mapping dashboard stats' });
+  }
+});
+
 // Get Commission Report
 router.get('/commission-report', auth, isAuthorized, async (req, res) => {
   try {
