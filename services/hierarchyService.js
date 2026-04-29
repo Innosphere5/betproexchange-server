@@ -46,26 +46,27 @@ async function distributePL(username, amount, isCasino = false) {
             const isTopLevel = (i === chain.length - 1);
             
             // Determine my share percentage
-            // Top level always effectively has 100% (or the remainder)
             let mySharePercent = isTopLevel ? 100 : (user.share || 0);
             
-            // Share math: Earnings = Total * (MyShare - ChildShare) / 100
             let shareDiff = mySharePercent - childShare;
-            if (shareDiff < 0) shareDiff = 0; // Safety
+            if (shareDiff < 0) shareDiff = 0;
 
             let earnings = (shareDiff / 100) * amount;
 
-            // If this is the top level and it's casino profit, subtract the 5% commission from SuperAdmin's earnings
+            // Direct Downline Name for the Final Sheet labeling
+            // If i=0, the downline is the bettor. 
+            // If i>0, the downline is the child user in the chain.
+            const downlineName = (i === 0) ? username : chain[i - 1].username;
+
             if (isTopLevel && commissionAmount > 0) {
                 console.log(`[HIERARCHY] Deducting commission from SuperAdmin ${user.username} (${earnings.toFixed(2)} -> ${(earnings - commissionAmount).toFixed(2)})`);
                 earnings -= commissionAmount;
                 
-                // Optional: Record the commission separately
                 await Transaction.create({
                     userId: user.username,
                     amount: commissionAmount,
                     type: 'PLATFORM_COMMISSION',
-                    description: `Casino Platform Commission from ${username}`,
+                    description: `Casino Platform Commission from ${downlineName}`,
                     performedBy: 'SYSTEM'
                 });
             }
@@ -77,7 +78,7 @@ async function distributePL(username, amount, isCasino = false) {
                     userId: user.username,
                     amount: earnings,
                     type: 'COMMISSION_SHARE',
-                    description: `${isCasino ? 'Casino' : 'Cricket'} Share from ${username} (${shareDiff}%)`,
+                    description: `${isCasino ? 'Casino' : 'Cricket'} Share from ${downlineName} (${shareDiff}%)`,
                     performedBy: 'SYSTEM'
                 });
 

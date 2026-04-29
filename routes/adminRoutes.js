@@ -451,39 +451,44 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
     }).sort({ createdAt: -1 });
 
-    const accountSummary = {}; // { username: totalAmount }
+    const accountSummary = {}; // { username: { wins: 0, losses: 0 } }
 
     txs.forEach(tx => {
-      // "Cricket Share from bettor (25%)"
-      const match = tx.description.match(/from (.*?) \(/);
-      const sourceName = match ? match[1] : (tx.type === 'PLATFORM_COMMISSION' ? 'Commission' : 'Unknown');
+      // Extract source name from description:
+      // "Cricket Share from name (25%)" OR "Casino Platform Commission from name"
+      let sourceName = 'Unknown';
+      const match = tx.description.match(/from (.*?)(?: \(|$)/);
+      if (match) {
+        sourceName = match[1].trim();
+      }
+
+      if (!accountSummary[sourceName]) {
+        accountSummary[sourceName] = { wins: 0, losses: 0 };
+      }
 
       // tx.amount is positive for House Profit (Bettor Loss)
       // tx.amount is negative for House Loss (Bettor Win)
-      if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = 0;
+      if (tx.amount < 0) {
+        // House Loss means User Win -> Green Side
+        accountSummary[sourceName].wins += Math.abs(tx.amount);
+      } else if (tx.amount > 0) {
+        // House Profit means User Loss -> Red Side
+        accountSummary[sourceName].losses += tx.amount;
       }
-      accountSummary[sourceName] += tx.amount;
     });
 
     const profit = []; // Green Side (Bettor Wins)
     const loss = [];   // Red Side (Bettor Loses)
 
     Object.keys(accountSummary).forEach(name => {
-      const netHouseAmount = accountSummary[name];
+      const { wins, losses } = accountSummary[name];
       
-      if (netHouseAmount < 0) {
-        // House Loss means User Win -> Green Side
-        profit.push({ 
-          name, 
-          amount: Math.abs(netHouseAmount) 
-        });
-      } else if (netHouseAmount > 0) {
-        // House Profit means User Loss -> Red Side
-        loss.push({ 
-          name, 
-          amount: netHouseAmount 
-        });
+      if (wins > 0) {
+        profit.push({ name, amount: wins });
+      }
+      
+      if (losses > 0) {
+        loss.push({ name, amount: losses });
       }
     });
 
