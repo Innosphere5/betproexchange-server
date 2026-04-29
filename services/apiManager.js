@@ -9,7 +9,7 @@ const cache = new Map();
 
 const CACHE_TTL_MS = {
   fixtures:  120 * 1000,      // 2 minutes — fixture list
-  livescores: 20 * 1000,      // 20 seconds — live scores
+  livescores: 5 * 1000,      // 5 seconds — live scores
 };
 
 // ─── Circuit Breaker ──────────────────────────────────────────────────────────

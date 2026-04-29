@@ -50,7 +50,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
 
     // Initial Balance Check
     const balance = parseFloat(initialBalance) || 0;
-    const skipBalanceCheck = req.user.role === 'superadmin' || req.user.role === 'admin';
+    // Initial Balance Check (Only SuperAdmin has unlimited spending)
+    const skipBalanceCheck = req.user.role === 'superadmin';
     if (!skipBalanceCheck && parent.walletBalance < balance) {
       return res.status(400).json({ error: 'Insufficient balance in parent account' });
     }
@@ -67,10 +68,20 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       walletBalance: balance
     });
 
-    // Deduct from parent balance if not SuperAdmin or Admin
-    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
+    // Deduct from parent balance if not SuperAdmin
+    if (req.user.role !== 'superadmin') {
       parent.walletBalance -= balance;
       await parent.save();
+
+      // Create Transaction Record for the deduction
+      const newTransaction = new Transaction({
+        userId: username,
+        amount: balance,
+        type: 'LOAD_BALANCE',
+        description: `Initial balance for ${role} account created by ${parent.role} ${parent.username}`,
+        performedBy: parent.username
+      });
+      await newTransaction.save();
     }
 
     await newUser.save();
@@ -114,7 +125,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
 // Load Balance
 router.post('/load-balance', auth, isAuthorized, async (req, res) => {
   try {
-    const { targetUsername, amount } = req.body;
+    const { targetUsername, amount, type } = req.body;
     const addAmount = parseFloat(amount);
 
     if (isNaN(addAmount) || addAmount <= 0) {
@@ -131,30 +142,34 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only load balance for Bettors' });
     }
 
-    // Deduct from parent if not SuperAdmin or Admin
-    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
-      if (parent.walletBalance < addAmount) {
-        return res.status(400).json({ error: 'Insufficient balance' });
+    if (type === 'credit') {
+      target.credit = (target.credit || 0) + addAmount;
+    } else {
+      if (req.user.role !== 'superadmin') {
+        if (parent.walletBalance < addAmount) {
+          return res.status(400).json({ error: 'Insufficient balance' });
+        }
+        parent.walletBalance -= addAmount;
+        await parent.save();
       }
-      parent.walletBalance -= addAmount;
-      await parent.save();
+      target.walletBalance += addAmount;
     }
 
-    target.walletBalance += addAmount;
     await target.save();
 
     // Create Transaction Record
     const newTransaction = new Transaction({
       userId: target.username,
       amount: addAmount,
-      type: 'LOAD_BALANCE',
-      description: `Balance loaded by ${parent.role} ${parent.username}`,
+      type: type === 'credit' ? 'LOAD_CREDIT' : 'LOAD_BALANCE',
+      description: `${type === 'credit' ? 'Credit' : 'Balance'} loaded by ${parent.role} ${parent.username}`,
       performedBy: parent.username
     });
     await newTransaction.save();
 
-    res.json({ success: true, newBalance: target.walletBalance, parentBalance: parent.walletBalance });
+    res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -162,7 +177,7 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
 // Withdraw Balance (Reduce)
 router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
   try {
-    const { targetUsername, amount } = req.body;
+    const { targetUsername, amount, type } = req.body;
     const withdrawAmount = parseFloat(amount);
 
     if (isNaN(withdrawAmount) || withdrawAmount <= 0) {
@@ -179,31 +194,41 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only manage Bettors' });
     }
 
-    if (target.walletBalance < withdrawAmount) {
-      return res.status(400).json({ error: 'User has insufficient balance to withdraw this amount' });
+    if (type === 'credit') {
+      if ((target.credit || 0) < withdrawAmount) {
+        return res.status(400).json({ error: 'User has insufficient credit to withdraw this amount' });
+      }
+      target.credit -= withdrawAmount;
+    } else {
+      // Default: Cash
+      if (target.walletBalance < withdrawAmount) {
+        return res.status(400).json({ error: 'User has insufficient balance to withdraw this amount' });
+      }
+      target.walletBalance -= withdrawAmount;
+
+      // Give back to parent if not SuperAdmin or Admin
+      // Give back to parent if not SuperAdmin
+      if (req.user.role !== 'superadmin') {
+        parent.walletBalance += withdrawAmount;
+        await parent.save();
+      }
     }
 
-    target.walletBalance -= withdrawAmount;
     await target.save();
-
-    // Give back to parent if not SuperAdmin or Admin
-    if (req.user.role !== 'superadmin' && req.user.role !== 'admin') {
-      parent.walletBalance += withdrawAmount;
-      await parent.save();
-    }
 
     // Create Transaction Record
     const newTransaction = new Transaction({
       userId: target.username,
       amount: -withdrawAmount,
-      type: 'WITHDRAW',
-      description: `Balance reduced by ${parent.role} ${parent.username}`,
+      type: type === 'credit' ? 'WITHDRAW_CREDIT' : 'WITHDRAW',
+      description: `${type === 'credit' ? 'Credit' : 'Balance'} reduced by ${parent.role} ${parent.username}`,
       performedBy: parent.username
     });
     await newTransaction.save();
 
-    res.json({ success: true, newBalance: target.walletBalance, parentBalance: parent.walletBalance });
+    res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -414,4 +439,54 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
   }
 });
 
+// Get Final Sheet (Profit/Loss Ledger)
+router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
+  try {
+    const currentUser = await User.findOne({ username: req.user.userId });
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+
+    // 1. Fetch all downline users (children)
+    const downlineUsers = await User.find({ parentId: currentUser._id });
+    const childUsernames = downlineUsers.map(u => u.username);
+
+    // 2. Fetch all transactions performed by these children (to see what they distributed)
+    const childTransactions = await Transaction.find({ performedBy: { $in: childUsernames } });
+
+    // 3. Aggregate net distributed amount for each child
+    const childSpentMap = {};
+    childTransactions.forEach(tx => {
+      // If the child performed the transaction, it's their "distribution"
+      // Note: We only care about distributions to their own downline. 
+      // Since 'performedBy' is only set for managers, and managers only manage their downline,
+      // this correctly captures their spent amount.
+      childSpentMap[tx.performedBy] = (childSpentMap[tx.performedBy] || 0) + tx.amount;
+    });
+
+    const profit = []; // Green Side (Accounts Balance)
+    const loss = [];   // Red Side (Deducted/Distributed by account)
+
+    // Build 1-to-1 mapping for each child
+    downlineUsers.forEach(user => {
+      // Green Side: What the child has currently in their wallet
+      profit.push({ 
+        name: user.username, 
+        amount: user.walletBalance,
+        role: user.role 
+      });
+
+      // Red Side: What the child has distributed to their own downline
+      loss.push({ 
+        name: user.username, 
+        amount: childSpentMap[user.username] || 0 
+      });
+    });
+
+    res.json({ profit, loss });
+  } catch (err) {
+    console.error("Final Sheet Error:", err);
+    res.status(500).json({ error: 'Server error fetching final sheet' });
+  }
+});
+
 module.exports = router;
+

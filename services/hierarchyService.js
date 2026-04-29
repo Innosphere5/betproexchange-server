@@ -14,77 +14,65 @@ async function distributeProfitLoss(username, amount) {
         if (!bettor) return;
 
         let current = bettor;
-        let totalDistributedAmount = 0;
-        let rootUser = null;
-
-        console.log(`[HIERARCHY] Starting Absolute Share distribution of ${amount} from bettor ${username}`);
+        let remaining = amount;
+        
+        console.log(`[HIERARCHY] Starting Chain Distribution of ${amount} from bettor ${username}`);
 
         // Traverse up the parent chain
-        while (current.parentId) {
+        while (current.parentId && remaining !== 0) {
             const parent = await User.findById(current.parentId);
             if (!parent) break;
 
-            // In this Absolute Share system:
-            // Every manager gets exactly their parent.share % of the original amount.
-            // Example: Master (50%), Admin (30%), SuperAdmin (Remainder)
-            // Bettor loses 1000 -> Master gets 500, Admin gets 300, SuperAdmin gets 200.
-            
-            const isRoot = !parent.parentId;
-            if (isRoot) {
-                rootUser = parent;
-                break; // Root is handled last with the remainder
-            }
+            // Chain Logic:
+            // shareAmount = remaining * (current.share / 100)
+            const currentSharePercent = current.share || 0;
+            const shareAmount = (currentSharePercent / 100) * remaining;
 
-            const parentSharePercent = parent.share || 0;
-            
-            if (parentSharePercent > 0) {
-                const netAmountForParent = (parentSharePercent / 100) * amount;
-
-                if (netAmountForParent !== 0) {
-                    await User.findByIdAndUpdate(
-                        parent._id,
-                        { $inc: { walletBalance: netAmountForParent } }
-                    );
-
-                    totalDistributedAmount += netAmountForParent;
-
-                    // Record transaction for the parent
-                    await Transaction.create({
-                        userId: parent.username,
-                        amount: netAmountForParent,
-                        type: 'COMMISSION_SHARE',
-                        description: `Commission from ${username} (${parentSharePercent}% share)`,
-                        performedBy: 'SYSTEM'
-                    });
-
-                    console.log(`[HIERARCHY] Distributed ${netAmountForParent.toFixed(2)} to ${parent.role} ${parent.username} (${parentSharePercent}% share)`);
-                }
-            }
-
-            current = parent;
-        }
-
-        // The root (SuperAdmin) gets the remainder
-        if (rootUser) {
-            const remainder = amount - totalDistributedAmount;
-            
-            if (remainder !== 0) {
+            if (shareAmount !== 0) {
                 await User.findByIdAndUpdate(
-                    rootUser._id,
-                    { $inc: { walletBalance: remainder } }
+                    parent._id,
+                    { $inc: { walletBalance: shareAmount } }
                 );
 
-                // Record transaction for the root
+                // Record transaction for the parent
                 await Transaction.create({
-                    userId: rootUser.username,
-                    amount: remainder,
+                    userId: parent.username,
+                    amount: shareAmount,
                     type: 'COMMISSION_SHARE',
-                    description: `House Remainder from ${username}`,
+                    description: `Share from ${current.role} ${current.username} (${currentSharePercent}%)`,
                     performedBy: 'SYSTEM'
                 });
 
-                console.log(`[HIERARCHY] Distributed remainder ${remainder.toFixed(2)} to SuperAdmin ${rootUser.username}`);
+                console.log(`[HIERARCHY] Distributed ${shareAmount.toFixed(2)} to ${parent.role} ${parent.username} (${currentSharePercent}% of remaining)`);
+                
+                remaining -= shareAmount;
             }
+
+            // Move up
+            current = parent;
+
+            // If the next parent is the top-level (SuperAdmin), they get the final remainder
+            if (!current.parentId) {
+                break;
+            }
+        }
+
+        // The final remaining amount goes to the top-level user (SuperAdmin)
+        if (remaining !== 0) {
+            await User.findByIdAndUpdate(
+                current._id,
+                { $inc: { walletBalance: remaining } }
+            );
+
+            await Transaction.create({
+                userId: current.username,
+                amount: remaining,
+                type: 'COMMISSION_SHARE',
+                description: `Final House Remainder from ${username}`,
+                performedBy: 'SYSTEM'
+            });
+
+            console.log(`[HIERARCHY] Distributed final remainder ${remaining.toFixed(2)} to ${current.role} ${current.username}`);
         }
     } catch (err) {
         console.error('[HIERARCHY ERROR] Failed to distribute P/L:', err);

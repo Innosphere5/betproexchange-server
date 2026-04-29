@@ -12,6 +12,7 @@ const matchSchema = new mongoose.Schema({
     teamA_runs: { type: String, default: "0/0" },
     teamB_runs: { type: String, default: "0/0" },
     overs: { type: String, default: "0.0" },
+    wickets: { type: Number, default: 0 },
     lastUpdated: { type: Date, default: Date.now }
   },
   startTime: { type: Date, required: true },

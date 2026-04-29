@@ -7,8 +7,8 @@ const { processMatchResults } = require('../services/resultSettlementService');
  * Runs every 5 minutes to check for completed matches and settle bets.
  */
 const initSettlementJob = (io) => {
-    // Schedule for every 30 seconds
-    cron.schedule('*/30 * * * * *', () => {
+    // Schedule for every 15 seconds
+    cron.schedule('*/15 * * * * *', () => {
         console.log('[SettlementJob] Triggering result check...');
         processMatchResults(io);
     });
