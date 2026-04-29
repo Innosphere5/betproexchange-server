@@ -439,46 +439,52 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
   }
 });
 
-// Get Final Sheet (Profit/Loss Ledger)
+// Get Final Sheet (Profit/Loss Ledger with simplified account view)
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   try {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    // 1. Fetch all downline users (children)
-    const downlineUsers = await User.find({ parentId: currentUser._id });
-    const childUsernames = downlineUsers.map(u => u.username);
+    // 1. Fetch all betting-related share transactions for the current user
+    const txs = await Transaction.find({ 
+      userId: currentUser.username,
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
+    }).sort({ createdAt: -1 });
 
-    // 2. Fetch all transactions performed by these children (to see what they distributed)
-    const childTransactions = await Transaction.find({ performedBy: { $in: childUsernames } });
+    const accountSummary = {}; // { username: totalAmount }
 
-    // 3. Aggregate net distributed amount for each child
-    const childSpentMap = {};
-    childTransactions.forEach(tx => {
-      // If the child performed the transaction, it's their "distribution"
-      // Note: We only care about distributions to their own downline. 
-      // Since 'performedBy' is only set for managers, and managers only manage their downline,
-      // this correctly captures their spent amount.
-      childSpentMap[tx.performedBy] = (childSpentMap[tx.performedBy] || 0) + tx.amount;
+    txs.forEach(tx => {
+      // "Cricket Share from bettor (25%)"
+      const match = tx.description.match(/from (.*?) \(/);
+      const sourceName = match ? match[1] : (tx.type === 'PLATFORM_COMMISSION' ? 'Commission' : 'Unknown');
+
+      // tx.amount is positive for House Profit (Bettor Loss)
+      // tx.amount is negative for House Loss (Bettor Win)
+      if (!accountSummary[sourceName]) {
+        accountSummary[sourceName] = 0;
+      }
+      accountSummary[sourceName] += tx.amount;
     });
 
-    const profit = []; // Green Side (Accounts Balance)
-    const loss = [];   // Red Side (Deducted/Distributed by account)
+    const profit = []; // Green Side (Bettor Wins)
+    const loss = [];   // Red Side (Bettor Loses)
 
-    // Build 1-to-1 mapping for each child
-    downlineUsers.forEach(user => {
-      // Green Side: What the child has currently in their wallet
-      profit.push({ 
-        name: user.username, 
-        amount: user.walletBalance,
-        role: user.role 
-      });
-
-      // Red Side: What the child has distributed to their own downline
-      loss.push({ 
-        name: user.username, 
-        amount: childSpentMap[user.username] || 0 
-      });
+    Object.keys(accountSummary).forEach(name => {
+      const netHouseAmount = accountSummary[name];
+      
+      if (netHouseAmount < 0) {
+        // House Loss means User Win -> Green Side
+        profit.push({ 
+          name, 
+          amount: Math.abs(netHouseAmount) 
+        });
+      } else if (netHouseAmount > 0) {
+        // House Profit means User Loss -> Red Side
+        loss.push({ 
+          name, 
+          amount: netHouseAmount 
+        });
+      }
     });
 
     res.json({ profit, loss });
