@@ -27,7 +27,16 @@ router.get('/:id', async (req, res) => {
     try {
         const match = await Match.findOne({ matchId: req.params.id });
         if (!match) return res.status(404).json({ message: 'Match not found' });
-        res.json(match);
+        
+        const response = match.toObject();
+        if (match.status === 'completed') {
+            response.api_message = "Match is completed and result has been declared.";
+            response.isCompleted = true;
+        } else {
+            response.isCompleted = false;
+        }
+
+        res.json(response);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

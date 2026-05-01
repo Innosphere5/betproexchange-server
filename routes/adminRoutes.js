@@ -144,6 +144,7 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
 
     if (type === 'credit') {
       target.credit = (target.credit || 0) + addAmount;
+      target.walletBalance = (target.walletBalance || 0) + addAmount;
     } else {
       if (req.user.role !== 'superadmin') {
         if (parent.walletBalance < addAmount) {
@@ -199,6 +200,7 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
         return res.status(400).json({ error: 'User has insufficient credit to withdraw this amount' });
       }
       target.credit -= withdrawAmount;
+      target.walletBalance -= withdrawAmount;
     } else {
       // Default: Cash
       if (target.walletBalance < withdrawAmount) {
@@ -496,6 +498,81 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   } catch (err) {
     console.error("Final Sheet Error:", err);
     res.status(500).json({ error: 'Server error fetching final sheet' });
+  }
+});
+
+// Get Daily Report (Similar to Final Sheet but filtered by date)
+router.get('/daily-report', auth, isAuthorized, async (req, res) => {
+  try {
+    const { date } = req.query;
+    const currentUser = await User.findOne({ username: req.user.userId });
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+
+    let query = { 
+      userId: currentUser.username,
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
+    };
+
+    let startOfDay, endOfDay;
+    if (date) {
+      // date is "YYYY-MM-DD"
+      const [year, month, day] = date.split('-').map(Number);
+      startOfDay = new Date(year, month - 1, day, 0, 0, 0, 0);
+      endOfDay = new Date(year, month - 1, day, 23, 59, 59, 999);
+    } else {
+      startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      endOfDay = new Date();
+      endOfDay.setHours(23, 59, 59, 999);
+    }
+    
+    console.log(`[DAILY-REPORT] Date: ${date || 'Today'}, Range: ${startOfDay.toISOString()} - ${endOfDay.toISOString()}`);
+    
+    query.createdAt = { $gte: startOfDay, $lte: endOfDay };
+
+    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+
+    const accountSummary = {}; // { username: { wins: 0, losses: 0 } }
+
+    txs.forEach(tx => {
+      let sourceName = 'Unknown';
+      const match = tx.description.match(/from (.*?)(?: \(|$)/);
+      if (match) {
+        sourceName = match[1].trim();
+      }
+
+      if (!accountSummary[sourceName]) {
+        accountSummary[sourceName] = { wins: 0, losses: 0 };
+      }
+
+      // tx.amount is positive for House Profit (Bettor Loss)
+      // tx.amount is negative for House Loss (Bettor Win)
+      if (tx.amount < 0) {
+        // House Loss means User Win -> Green Side
+        accountSummary[sourceName].wins += Math.abs(tx.amount);
+      } else if (tx.amount > 0) {
+        // House Profit means User Loss -> Red Side
+        accountSummary[sourceName].losses += tx.amount;
+      }
+    });
+
+    const profit = []; // Green Side (Bettor Wins)
+    const loss = [];   // Red Side (Bettor Loses)
+
+    Object.keys(accountSummary).forEach(name => {
+      const { wins, losses } = accountSummary[name];
+      if (wins > 0) {
+        profit.push({ name, amount: wins });
+      }
+      if (losses > 0) {
+        loss.push({ name, amount: losses });
+      }
+    });
+
+    res.json({ profit, loss });
+  } catch (err) {
+    console.error("Daily Report Error:", err);
+    res.status(500).json({ error: 'Server error fetching daily report' });
   }
 });
 

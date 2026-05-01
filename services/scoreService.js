@@ -45,16 +45,21 @@ const updateLiveScores = async (io) => {
             const teamB_score = teamBRunsObj ? `${teamBRunsObj.score}/${teamBRunsObj.wickets}` : matchInDb.score?.teamB_runs;
 
             // Determine if match is finished
-            const isFinished = liveData.status === 'Finished';
+            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned'];
+            const isFinished = completedStatuses.includes(liveData.status);
             let winner = matchInDb.winner;
 
             if (isFinished) {
-                // Determine winner by higher score as requested
-                const rA = teamARunsObj?.score || 0;
-                const rB = teamBRunsObj?.score || 0;
-                if (rA > rB) winner = matchInDb.teamA;
-                else if (rB > rA) winner = matchInDb.teamB;
-                else winner = 'TIE';
+                // Determine winner by higher score as requested if it's Finished
+                if (liveData.status === 'Finished') {
+                    const rA = teamARunsObj?.score || 0;
+                    const rB = teamBRunsObj?.score || 0;
+                    if (rA > rB) winner = matchInDb.teamA;
+                    else if (rB > rA) winner = matchInDb.teamB;
+                    else winner = 'TIE';
+                } else {
+                    winner = 'VOID';
+                }
             }
 
             const hasChanged = 
@@ -86,12 +91,16 @@ const updateLiveScores = async (io) => {
             }
 
             // Emit the specific payload requested by the user for real-time updates
-            if (io && !isFinished) {
+            if (io) {
+                // Always emit live_score_update to keep frontend synced
                 io.emit('live_score_update', {
                     matchId: matchId,
                     score:   currentScore,
                     overs:   currentOvers,
-                    wickets: currentWickets
+                    wickets: currentWickets,
+                    status:  isFinished ? 'completed' : 'live',
+                    teamA_runs: teamA_score,
+                    teamB_runs: teamB_score
                 });
             }
             
@@ -99,7 +108,11 @@ const updateLiveScores = async (io) => {
                 io.emit('match_result', {
                     matchId: matchId,
                     status: 'completed',
-                    winner: winner
+                    winner: winner,
+                    finalScore: {
+                        teamA: teamA_score,
+                        teamB: teamB_score
+                    }
                 });
             }
         }

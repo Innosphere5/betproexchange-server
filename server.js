@@ -68,7 +68,10 @@ app.get('/', (req, res) => {
 app.get('/api/user/wallet', auth, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.userId });
-    res.json({ balance: user ? user.walletBalance : 0 });
+    res.json({ 
+      balance: user ? user.walletBalance : 0,
+      credit: user ? (user.credit || 0) : 0
+    });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
