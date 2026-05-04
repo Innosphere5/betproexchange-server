@@ -57,14 +57,17 @@ const fetchUpcomingMatches = async (io) => {
                 lastUpdated: new Date()
             }));
 
-        // 4. Sort and Limit (Top 5-6 matches)
-        matches.sort((a, b) => a.startTime - b.startTime);
-        const topMatches = matches.slice(0, 6);
+        // 4. Sort and Limit (Top 5-6 upcoming/live matches)
+        const upcomingOrLive = matches.filter(m => m.status !== 'completed');
+        upcomingOrLive.sort((a, b) => a.startTime - b.startTime);
+        const topMatches = upcomingOrLive.slice(0, 6);
 
-        const activeIds = [];
+        // Keep completed matches too (we'll fetch them separately or they exist in DB)
+        // For now, let's just make sure we don't delete them if they were recently completed.
+        
+        const activeIds = topMatches.map(m => m.matchId);
+        
         for (const m of topMatches) {
-            activeIds.push(m.matchId);
-            
             // Upsert with default score if new
             await Match.findOneAndUpdate(
                 { matchId: m.matchId },
@@ -83,16 +86,21 @@ const fetchUpcomingMatches = async (io) => {
             );
         }
 
-        // 5. Prune matches not in the top 6 active list
+        // 5. Prune matches not in the top 6 active list AND not completed recently
+        // We keep completed matches for 24 hours
         const deleteResult = await Match.deleteMany({
-            matchId: { $nin: activeIds }
+            matchId: { $nin: activeIds },
+            $or: [
+                { status: { $ne: 'completed' } },
+                { status: 'completed', lastUpdated: { $lt: twentyFourHoursAgo } }
+            ]
         });
 
         if (deleteResult.deletedCount > 0) {
-            console.log(`[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} matches to maintain limit.`);
+            console.log(`[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} old or inactive matches.`);
         }
 
-        console.log(`[MatchService] ✅ Sync complete. Stored matches: ${activeIds.length}`);
+        console.log(`[MatchService] ✅ Sync complete. Top Matches: ${activeIds.length}`);
 
         if (io) {
             const allMatches = await Match.find().sort({ startTime: 1 });

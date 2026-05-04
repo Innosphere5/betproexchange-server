@@ -66,7 +66,7 @@ async function distributePL(username, amount, isCasino = false) {
                     userId: user.username,
                     amount: commissionAmount,
                     type: 'PLATFORM_COMMISSION',
-                    description: `Casino Platform Commission from ${downlineName}`,
+                    description: `Casino Platform Commission from ${username} | ${downlineName}`,
                     performedBy: 'SYSTEM'
                 });
             }
@@ -78,7 +78,7 @@ async function distributePL(username, amount, isCasino = false) {
                     userId: user.username,
                     amount: earnings,
                     type: 'COMMISSION_SHARE',
-                    description: `${isCasino ? 'Casino' : 'Cricket'} Share from ${downlineName} (${shareDiff}%)`,
+                    description: `${isCasino ? 'Casino' : 'Cricket'} Share from ${username} | ${downlineName} (${shareDiff}%)`,
                     performedBy: 'SYSTEM'
                 });
 

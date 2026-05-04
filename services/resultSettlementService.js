@@ -35,15 +35,17 @@ const processMatchResults = async (io) => {
         console.log(`[ResultSettlement] Found ${allIdsToCheck.length} unique match IDs to check result status.`);
 
         // Sportmonks allows fetching multiple fixtures by ID if separated by comma in some versions, 
-        // but for safety and v2 compatibility, we'll try a date-based bulk fetch first for a wider window (7 days).
+        // but for safety and v2 compatibility, we'll try a date-based bulk fetch first for a wider window (yesterday to tomorrow).
         const d = new Date();
-        const today = d.toISOString().split('T')[0];
-        d.setDate(d.getDate() - 7); // Increased to 7 days
-        const sevenDaysAgo = d.toISOString().split('T')[0];
+        const tomorrow = new Date(d.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        d.setDate(d.getDate() - 1); 
+        const yesterday = d.toISOString().split('T')[0];
+
+        console.log(`[ResultSettlement] Fetching fixtures between ${yesterday} and ${tomorrow}`);
 
         const response = await getData('fixtures', {
             filter: {
-                'filter[starts_between]': `${sevenDaysAgo},${today}`,
+                'filter[starts_between]': `${yesterday},${tomorrow}`,
             },
             include: 'runs,localteam,visitorteam'
         });

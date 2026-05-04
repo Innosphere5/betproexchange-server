@@ -45,16 +45,18 @@ const updateLiveScores = async (io) => {
             const teamB_score = teamBRunsObj ? `${teamBRunsObj.score}/${teamBRunsObj.wickets}` : matchInDb.score?.teamB_runs;
 
             // Determine if match is finished
-            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned'];
+            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Completed', 'Ended'];
             const isFinished = completedStatuses.includes(liveData.status);
             let winner = matchInDb.winner;
 
             if (isFinished) {
                 // Determine winner by higher score as requested if it's Finished
-                if (liveData.status === 'Finished') {
+                if (['Finished', 'Completed', 'Ended'].includes(liveData.status)) {
                     const rA = teamARunsObj?.score || 0;
                     const rB = teamBRunsObj?.score || 0;
-                    if (rA > rB) winner = matchInDb.teamA;
+                    if (liveData.winner_team_id === liveData.localteam_id) winner = matchInDb.teamA;
+                    else if (liveData.winner_team_id === liveData.visitorteam_id) winner = matchInDb.teamB;
+                    else if (rA > rB) winner = matchInDb.teamA;
                     else if (rB > rA) winner = matchInDb.teamB;
                     else winner = 'TIE';
                 } else {

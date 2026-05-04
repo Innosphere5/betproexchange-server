@@ -536,13 +536,24 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     txs.forEach(tx => {
       let sourceName = 'Unknown';
-      const match = tx.description.match(/from (.*?)(?: \(|$)/);
+      let parentName = 'Unknown';
+      
+      // New format: "... from bettor | parent (X%)"
+      const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
       if (match) {
         sourceName = match[1].trim();
+        parentName = match[2].trim();
+      } else {
+        // Fallback for old format: "... from name (X%)"
+        const oldMatch = tx.description.match(/from (.*?)(?: \(|$)/);
+        if (oldMatch) {
+          sourceName = oldMatch[1].trim();
+          parentName = 'Legacy';
+        }
       }
 
       if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = { wins: 0, losses: 0 };
+        accountSummary[sourceName] = { wins: 0, losses: 0, parent: parentName };
       }
 
       // tx.amount is positive for House Profit (Bettor Loss)
@@ -560,12 +571,12 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
     const loss = [];   // Red Side (Bettor Loses)
 
     Object.keys(accountSummary).forEach(name => {
-      const { wins, losses } = accountSummary[name];
+      const { wins, losses, parent } = accountSummary[name];
       if (wins > 0) {
-        profit.push({ name, amount: wins });
+        profit.push({ name, amount: wins, parent });
       }
       if (losses > 0) {
-        loss.push({ name, amount: losses });
+        loss.push({ name, amount: losses, parent });
       }
     });
 
@@ -573,6 +584,38 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
   } catch (err) {
     console.error("Daily Report Error:", err);
     res.status(500).json({ error: 'Server error fetching daily report' });
+  }
+});
+
+// Clear Daily Report Data (SuperAdmin only)
+router.post('/clear-daily-report', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Only SuperAdmin can clear report data' });
+    }
+
+    const { date } = req.body;
+    let startOfDay, endOfDay;
+    if (date) {
+      const [year, month, day] = date.split('-').map(Number);
+      startOfDay = new Date(year, month - 1, day, 0, 0, 0, 0);
+      endOfDay = new Date(year, month - 1, day, 23, 59, 59, 999);
+    } else {
+      startOfDay = new Date();
+      startOfDay.setHours(0, 0, 0, 0);
+      endOfDay = new Date();
+      endOfDay.setHours(23, 59, 59, 999);
+    }
+
+    const result = await Transaction.deleteMany({
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] },
+      createdAt: { $gte: startOfDay, $lte: endOfDay }
+    });
+
+    res.json({ success: true, message: `Cleared ${result.deletedCount} records for ${date || 'today'}` });
+  } catch (err) {
+    console.error("Clear Daily Report Error:", err);
+    res.status(500).json({ error: 'Server error clearing daily report' });
   }
 });
 
