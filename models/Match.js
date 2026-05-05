@@ -17,7 +17,12 @@ const matchSchema = new mongoose.Schema({
   },
   startTime: { type: Date, required: true },
   winner: { type: String, default: null }, // Team name that won
+  backOddsA: { type: Number, default: null },
+  layOddsA: { type: Number, default: null },
+  backOddsB: { type: Number, default: null },
+  layOddsB: { type: Number, default: null },
   lastUpdated: { type: Date, default: Date.now }
+
 });
 
 module.exports = mongoose.model('Match', matchSchema);
