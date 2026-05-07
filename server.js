@@ -57,8 +57,10 @@ mongoose.connect(process.env.MONGO_URI)
     initLiveScoreJob(io);
     const { initSettlementJob } = require('./jobs/settlementJob');
     initSettlementJob(io);
-    const { initOddsJob } = require('./jobs/oddsUpdate.job');
-    initOddsJob(io);
+    // Initialize Real-Time Odds Engine (WebSocket + REST)
+    const { initOddsEngine } = require('./services/oddsEngine');
+    initOddsEngine(io);
+
   })
   .catch(err => console.error('❌ MongoDB Error:', err.message));
 
