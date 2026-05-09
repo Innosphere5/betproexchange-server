@@ -1,16 +1,14 @@
-const axios = require('axios');
 const Match = require('../models/Match');
 const MarketOdds = require('../models/MarketOdds');
+const oddsApiService = require('./oddsApiService');
 require('dotenv').config();
-
-const API_KEY = process.env.ODDS_API_KEY?.trim();
-const BASE_URL = 'https://api.odds-api.io/v3';
 
 // ALLOWED BOOKMAKERS FOR THIS STARTER PLAN KEY
 const ALLOWED_BOOKMAKERS = 'SingBet,Betfair Exchange,Bet365,1xbet,Stake';
 
 let ioInstance = null;
 const STALE_TIMEOUT_MS = 60000;
+const pendingFetches = new Set();
 
 // ─── Normalization & Mapping ───────────────────────────────────────────────────
 
@@ -210,32 +208,43 @@ async function pollAllActiveOdds() {
             const match = activeMatches.find(m => m.matchId === market.matchId);
             if (!match) continue;
 
-            const now = Date.now();
-            const lastUpdate = new Date(market.updatedAt).getTime();
+            const now = new Date();
+            const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+            const matchStartTime = new Date(match.startTime);
+
             const isLive = match.status === 'live';
+            const isToday = matchStartTime >= todayStart && matchStartTime < todayEnd;
+
+            // Only poll if the match is LIVE or starts TODAY
+            if (!isLive && !isToday) continue;
+
+            const lastUpdate = new Date(market.updatedAt).getTime();
             const waitTime = isLive ? 5000 : 30000; 
 
-            if (now - lastUpdate < waitTime) continue;
+            if (now.getTime() - lastUpdate < waitTime) continue;
+            if (pendingFetches.has(market.matchId)) continue;
 
-            console.log(`[Odds Engine] 🔄 Polling ${match.status} odds for ${match.teamA} v ${match.teamB}...`);
-            try {
-                const response = await axios.get(`${BASE_URL}/odds`, {
-                    params: { 
-                        apiKey: API_KEY, 
-                        eventId: market.oddsApiEventId,
-                        bookmakers: ALLOWED_BOOKMAKERS
-                    },
-                    timeout: 8000
-                });
-
-                if (response.data) {
-                    const eventData = response.data;
+            console.log(`[Odds Engine] 🔄 Queuing ${match.status} odds poll for ${match.teamA} v ${match.teamB}...`);
+            
+            pendingFetches.add(market.matchId);
+            oddsApiService.fetch('odds', { 
+                eventId: market.oddsApiEventId,
+                bookmakers: ALLOWED_BOOKMAKERS
+            }, isLive ? 10 : 1)
+            .then(async (data) => {
+                if (data) {
+                    const eventData = data;
                     if (!eventData.id) eventData.id = market.oddsApiEventId;
                     await handleOddsUpdate(eventData);
                 }
-            } catch (err) {
-                console.error(`[Odds Engine] Polling failed for ${market.matchId}:`, err.message);
-            }
+            })
+            .catch(err => {
+                console.error(`[Odds Engine] Polling failed for ${market.matchId}: ${err.message}`);
+            })
+            .finally(() => {
+                pendingFetches.delete(market.matchId);
+            });
         }
     } catch (err) {
         console.error('[Odds Engine] Odds Polling cycle failed:', err.message);
@@ -245,12 +254,13 @@ async function pollAllActiveOdds() {
 async function syncEvents() {
     try {
         console.log('[Odds Engine] 🔄 Syncing fixtures from Odds API...');
-        const response = await axios.get(`${BASE_URL}/events`, {
-            params: { apiKey: API_KEY, sport: 'cricket', status: 'pending,live' }
-        });
+        const data = await oddsApiService.fetch('events', { 
+            sport: 'cricket', 
+            status: 'pending,live' 
+        }, 5); // Priority 5 for global sync
 
-        if (response.data && Array.isArray(response.data)) {
-            for (const event of response.data) {
+        if (data && Array.isArray(data)) {
+            for (const event of data) {
                 await handleOddsUpdate(event);
             }
         }

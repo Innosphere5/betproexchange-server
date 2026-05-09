@@ -13,11 +13,17 @@ const fetchUpcomingMatches = async (io) => {
     try {
         console.log('[MatchService] Syncing fixtures from Sportmonks v2 API...');
 
-        // 1. Cleanup: Remove matches older than 24 hours
-        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const prunedOldCount = await Match.deleteMany({ startTime: { $lt: twentyFourHoursAgo } });
+        // 1. Midnight Reset: Remove all matches from previous days (except LIVE)
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+
+        const prunedOldCount = await Match.deleteMany({
+            startTime: { $lt: todayStart },
+            status: { $ne: 'live' }
+        });
+
         if (prunedOldCount.deletedCount > 0) {
-            console.log(`[MatchService] 🗑️ Cleaned ${prunedOldCount.deletedCount} matches older than 24h.`);
+            console.log(`[MatchService] 🗑️ Midnight Reset: Cleaned ${prunedOldCount.deletedCount} previous matches.`);
         }
 
         const today = new Date().toISOString().split('T')[0];
@@ -41,44 +47,49 @@ const fetchUpcomingMatches = async (io) => {
         }
 
         const allowedLeagueIds = [1, 8, 2, 3, 4, 11, 17, 18, 41];
-        
+
         // 3. Filter and Map
         let matches = response.data
             .filter(f => allowedLeagueIds.includes(f.league_id))
             .map(f => ({
-                matchId:   f.id.toString(),
-                leagueId:  f.league_id,
-                teamA:     f.localteam?.name || 'Local Team',
-                teamB:     f.visitorteam?.name || 'Visitor Team',
-                league:    f.league?.name || 'Cricket',
+                matchId: f.id.toString(),
+                leagueId: f.league_id,
+                teamA: f.localteam?.name || 'Local Team',
+                teamB: f.visitorteam?.name || 'Visitor Team',
+                league: f.league?.name || 'Cricket',
                 startTime: new Date(f.starting_at),
-                status:    f.status === 'Live' ? 'live' : 'upcoming',
-                sportKey:  'cricket_international', // Unified key for cricket
+                status: f.status === 'Live' ? 'live' : 'upcoming',
+                sportKey: 'cricket_international', // Unified key for cricket
                 lastUpdated: new Date()
             }));
 
-        // 4. Sort and Limit (Top 5-6 upcoming/live matches)
+        // 4. Sort and Store (All today's matches + next 10 upcoming)
         const upcomingOrLive = matches.filter(m => m.status !== 'completed');
         upcomingOrLive.sort((a, b) => a.startTime - b.startTime);
-        const topMatches = upcomingOrLive.slice(0, 6);
+
+        const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
+        const todayMatches = upcomingOrLive.filter(m => m.startTime < todayEnd);
+        const futureMatches = upcomingOrLive.filter(m => m.startTime >= todayEnd).slice(0, 10);
+
+        const topMatches = [...todayMatches, ...futureMatches];
 
         // Keep completed matches too (we'll fetch them separately or they exist in DB)
         // For now, let's just make sure we don't delete them if they were recently completed.
-        
+
         const activeIds = topMatches.map(m => m.matchId);
-        
+
         for (const m of topMatches) {
             // Upsert with default score if new
             await Match.findOneAndUpdate(
                 { matchId: m.matchId },
-                { 
+                {
                     $set: m,
                     $setOnInsert: {
-                        score: { 
-                            teamA_runs: '0/0', 
-                            teamB_runs: '0/0', 
-                            overs: '0.0', 
-                            lastUpdated: new Date() 
+                        score: {
+                            teamA_runs: '0/0',
+                            teamB_runs: '0/0',
+                            overs: '0.0',
+                            lastUpdated: new Date()
                         }
                     }
                 },
@@ -86,13 +97,14 @@ const fetchUpcomingMatches = async (io) => {
             );
         }
 
-        // 5. Prune matches not in the top 6 active list AND not completed recently
-        // We keep completed matches for 24 hours
+        // 5. Final Pruning: Remove matches not in the fresh fetch
+        // We keep them if they are for today/future or if they are currently live.
         const deleteResult = await Match.deleteMany({
             matchId: { $nin: activeIds },
+            status: { $ne: 'live' },
             $or: [
-                { status: { $ne: 'completed' } },
-                { status: 'completed', lastUpdated: { $lt: twentyFourHoursAgo } }
+                { startTime: { $lt: todayStart } }, // Yesterday's matches
+                { status: 'completed' }             // Any completed match not in the fresh list
             ]
         });
 

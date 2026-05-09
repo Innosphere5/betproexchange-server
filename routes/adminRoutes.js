@@ -356,16 +356,17 @@ router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => 
 
 // Get Dashboard Stats (Match-wise exposure)
 router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
+  console.log(`[API] Dashboard Stats called by: ${req.user.userId} | Role: ${req.user.role}`);
   try {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
     // 1. Get all scheduled/live matches
-    const activeMatches = await Match.find({ status: { $in: ['scheduled', 'live'] } }).select('matchId teamA teamB');
+    const activeMatches = await Match.find({ status: { $in: ['scheduled', 'live', 'upcoming'] } }).select('matchId teamA teamB backOddsA backOddsB layOddsA layOddsB').lean();
     const matchIds = activeMatches.map(m => m.matchId);
 
     // 2. Prepare Match Stake Query
-    let matchStatsQuery = { matchId: { $in: matchIds }, status: 'MATCHED' };
+    let matchStatsQuery = { matchId: { $in: matchIds }, status: { $in: ['MATCHED', 'pending'] } };
     
     if (req.user.role === 'master') {
       // Find direct downline for Master
@@ -382,20 +383,93 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
     }
     // Superadmin sees all bets by default (no userId filter)
 
-    // 3. Aggregate Stakes
-    const stakesByMatch = await Bet.aggregate([
-      { $match: matchStatsQuery },
-      { $group: { _id: "$matchId", totalStake: { $sum: "$stake" } } }
-    ]);
+    // 3. Get all relevant bets for these matches
+    const bets = await Bet.find(matchStatsQuery).lean();
+    console.log(`[API] Found ${bets.length} bets for ${activeMatches.length} matches. Role: ${req.user.role}`);
 
-    const stakeMap = {};
-    stakesByMatch.forEach(s => stakeMap[s._id] = s.totalStake);
+    // Fetch all users involved in these bets and their parents
+    const uniqueUserIds = [...new Set(bets.map(b => b.userId))];
+    const betUsers = await User.find({ username: { $in: uniqueUserIds } }).lean();
+    
+    // Get unique parent IDs
+    const parentIds = [...new Set(betUsers.filter(u => u.parentId).map(u => u.parentId))];
+    const parentUsers = await User.find({ _id: { $in: parentIds } }).lean();
+    
+    const parentMap = {};
+    parentUsers.forEach(p => { parentMap[p._id.toString()] = p.username; });
 
-    const results = activeMatches.map(m => ({
-      matchId: m.matchId,
-      name: `${m.teamA} v ${m.teamB} / Match Odds`,
-      amount: stakeMap[m.matchId] || 0
-    }));
+    const userMap = {};
+    betUsers.forEach(u => {
+      const parent = parentUsers.find(p => p._id.toString() === u.parentId?.toString());
+      userMap[u.username] = {
+        ...u,
+        parentName: parent ? parent.username : 'Direct',
+        parentShare: parent ? parent.share : 0
+      };
+    });
+
+    // 4. Calculate runner-wise exposure and stats
+    const results = [];
+    for (const m of activeMatches) {
+      const runners = [m.teamA, m.teamB];
+      const matchBets = bets.filter(b => b.matchId === m.matchId);
+      console.log(`[API] Match ${m.matchId} (${m.teamA} v ${m.teamB}) has ${matchBets.length} bets.`);
+
+      runners.forEach(r => {
+        let netStake = 0;
+        const normalizedR = r?.trim().toLowerCase();
+
+        matchBets.forEach(b => {
+          const { runner, odds, stake, type, userId } = b;
+          const normalizedRunner = runner?.trim().toLowerCase();
+          
+          if (normalizedRunner !== normalizedR) return; // Only count bets on this specific runner
+
+          // Get the share for this user/bet
+          const u = userMap[userId];
+          let effectiveShare = 100; // Default for SuperAdmin
+
+          if (req.user.role === 'master') {
+            effectiveShare = req.user.share || 0;
+          } else if (req.user.role === 'admin') {
+            // Admin gets the remaining share of their master's downline
+            // For now, simplify: Admin takes (100 - MasterShare)
+            effectiveShare = 100 - (u?.parentShare || 0);
+          }
+
+          const shareMultiplier = effectiveShare / 100;
+
+          if (type === 'back') {
+            netStake += stake * shareMultiplier;
+          } else { // lay
+            netStake -= (odds - 1) * stake * shareMultiplier;
+          }
+        });
+
+        const runnerBets = matchBets.filter(b => b.runner?.trim().toLowerCase() === r?.trim().toLowerCase()).map(b => {
+          const u = userMap[b.userId];
+          return {
+            stake: b.stake,
+            odds: b.odds,
+            type: b.type,
+            bettor: b.userId,
+            master: u?.parentName || 'Direct'
+          };
+        });
+
+        console.log(`[API] Runner ${r}: netStake=${netStake}, bets=${runnerBets.length}`);
+
+        results.push({
+          matchId: m.matchId,
+          name: r,
+          matchName: `${m.teamA} v ${m.teamB}`,
+          amount: netStake,
+          back: r === m.teamA ? m.backOddsA : m.backOddsB,
+          lay: r === m.teamA ? m.layOddsA : m.layOddsB,
+          bets: runnerBets
+        });
+      });
+    }
 
     res.json(results);
   } catch (err) {
@@ -619,5 +693,230 @@ router.post('/clear-daily-report', auth, async (req, res) => {
   }
 });
 
+// Get Match Exposure (Runners P/L and Matched Bets)
+router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    
+    // 1. Get Match Details
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const runners = [match.teamA, match.teamB];
+    if (match.league.toLowerCase().includes('test') || match.league.toLowerCase().includes('first class')) {
+        // runners.push('Draw'); // Optional: Add Draw if applicable
+    }
+
+    // 2. Prepare Bet Query based on role
+    let betQuery = { matchId, status: 'MATCHED' };
+    
+    const parent = await User.findOne({ username: req.user.userId });
+    
+    if (req.user.role === 'master') {
+      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    } else if (req.user.role === 'admin') {
+      const masters = await User.find({ parentId: parent._id }).select('_id');
+      const masterIds = masters.map(m => m._id);
+      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    }
+    // Superadmin sees all bets
+
+    // 3. Get all MATCHED bets for this match
+    const bets = await Bet.find(betQuery).lean();
+
+    // 3. Get all relevant users to find their parents (Master/Admin)
+    const userIds = [...new Set(bets.map(b => b.userId))];
+    const users = await User.find({ username: { $in: userIds } }).lean();
+    
+    // Get parents for those users
+    const parentIds = [...new Set(users.map(u => u.parentId).filter(id => id))];
+    const parents = await User.find({ _id: { $in: parentIds } }).lean();
+
+    const userMap = {};
+    users.forEach(u => {
+        const parent = parents.find(p => p._id.toString() === u.parentId?.toString());
+        userMap[u.username] = {
+            username: u.username,
+            parentName: parent ? parent.username : 'Direct'
+        };
+    });
+
+    // 4. Calculate Exposure for Super Admin
+    // For each runner, calculate what happens if THEY win
+    const exposure = {};
+    runners.forEach(r => exposure[r] = 0);
+
+    bets.forEach(b => {
+        const { runner, odds, stake, type } = b;
+        
+        runners.forEach(winRunner => {
+            let adminProfit = 0;
+            if (type === 'back') {
+                if (runner === winRunner) {
+                    // Bettor wins (Odds-1)*Stake, Admin loses it
+                    adminProfit = -(odds - 1) * stake;
+                } else {
+                    // Bettor loses Stake, Admin wins it
+                    adminProfit = stake;
+                }
+            } else { // lay
+                if (runner === winRunner) {
+                    // Bettor loses (Odds-1)*Stake, Admin wins it
+                    adminProfit = (odds - 1) * stake;
+                } else {
+                    // Bettor wins Stake, Admin loses it
+                    adminProfit = -stake;
+                }
+            }
+            exposure[winRunner] += adminProfit;
+        });
+    });
+
+    // 5. Format Matched Bets for UI
+    const matchedBets = bets.map(b => ({
+        id: b._id,
+        runner: b.runner,
+        price: b.odds,
+        size: b.stake,
+        better: b.userId,
+        master: userMap[b.userId]?.parentName || 'Unknown',
+        type: b.type
+    }));
+
+    res.json({
+        matchName: `${match.teamA} v ${match.teamB}`,
+        exposure,
+        matchedBets
+    });
+
+  } catch (err) {
+    console.error("Match Exposure Error:", err);
+    res.status(500).json({ error: 'Server error calculating exposure' });
+  }
+});
+
+// Get Global Matched Bets (Recent bets across all matches in downline)
+router.get('/global-matched-bets', auth, isAuthorized, async (req, res) => {
+  try {
+    const parent = await User.findOne({ username: req.user.userId });
+    if (!parent) return res.status(404).json({ error: 'User not found' });
+
+    let betQuery = { status: { $in: ['MATCHED', 'pending'] } };
+    
+    if (req.user.role === 'master') {
+      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    } else if (req.user.role === 'admin') {
+      const masters = await User.find({ parentId: parent._id }).select('_id');
+      const masterIds = masters.map(m => m._id);
+      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    }
+
+    // Get 50 most recent matched bets
+    const bets = await Bet.find(betQuery).sort({ createdAt: -1 }).limit(50).lean();
+
+    // Map user data
+    const userIds = [...new Set(bets.map(b => b.userId))];
+    const users = await User.find({ username: { $in: userIds } }).lean();
+    const parentIds = [...new Set(users.map(u => u.parentId).filter(id => id))];
+    const parents = await User.find({ _id: { $in: parentIds } }).lean();
+
+    const userMap = {};
+    users.forEach(u => {
+        const parentDoc = parents.find(p => p._id.toString() === u.parentId?.toString());
+        userMap[u.username.toLowerCase()] = {
+            username: u.username,
+            parentName: parentDoc ? parentDoc.username : 'Direct'
+        };
+    });
+
+    const matchedBets = bets.map(b => {
+        const u = userMap[b.userId?.toLowerCase()];
+        return {
+            id: b._id,
+            runner: b.runner,
+            price: b.odds,
+            size: b.stake,
+            better: b.userId,
+            master: u?.parentName || 'Direct',
+            type: b.type,
+            matchId: b.matchId,
+            createdAt: b.createdAt
+        };
+    });
+
+    res.json(matchedBets);
+  } catch (err) {
+    console.error("Global Matched Bets Error:", err);
+    res.status(500).json({ error: 'Server error fetching global bets' });
+  }
+});
+
+// Get Global Open (Pending) Bets
+router.get('/global-open-bets', auth, isAuthorized, async (req, res) => {
+  try {
+    const parent = await User.findOne({ username: req.user.userId });
+    if (!parent) return res.status(404).json({ error: 'User not found' });
+
+    let betQuery = { status: 'pending' };
+    
+    if (req.user.role === 'master') {
+      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    } else if (req.user.role === 'admin') {
+      const masters = await User.find({ parentId: parent._id }).select('_id');
+      const masterIds = masters.map(m => m._id);
+      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
+      const usernames = downlineUsers.map(u => u.username);
+      betQuery.userId = { $in: usernames };
+    }
+
+    const bets = await Bet.find(betQuery).sort({ createdAt: -1 }).limit(50).lean();
+
+    const userIds = [...new Set(bets.map(b => b.userId))];
+    const users = await User.find({ username: { $in: userIds } }).lean();
+    const parentIds = [...new Set(users.map(u => u.parentId).filter(id => id))];
+    const parents = await User.find({ _id: { $in: parentIds } }).lean();
+
+    const userMap = {};
+    users.forEach(u => {
+        const parentDoc = parents.find(p => p._id.toString() === u.parentId?.toString());
+        userMap[u.username] = {
+            username: u.username,
+            parentName: parentDoc ? parentDoc.username : 'Direct'
+        };
+    });
+
+    const openBets = bets.map(b => {
+        const u = userMap[b.userId];
+        return {
+            id: b._id,
+            runner: b.runner,
+            price: b.odds,
+            size: b.stake,
+            better: b.userId,
+            master: u?.parentName || 'Direct',
+            type: b.type,
+            matchId: b.matchId,
+            createdAt: b.createdAt
+        };
+    });
+
+    res.json(openBets);
+  } catch (err) {
+    console.error("Global Open Bets Error:", err);
+    res.status(500).json({ error: 'Server error fetching global open bets' });
+  }
+});
+
 module.exports = router;
+
 

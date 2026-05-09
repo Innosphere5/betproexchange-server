@@ -35,9 +35,11 @@ app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 
 // MongoDB Connection Options
-mongoose.set('bufferCommands', false);
+mongoose.set('bufferCommands', true); 
 
-mongoose.connect(process.env.MONGO_URI)
+mongoose.connect(process.env.MONGO_URI, {
+  autoIndex: true,
+})
   .then(async () => {
     console.log('✅ MongoDB connected successfully');
     
@@ -60,6 +62,11 @@ mongoose.connect(process.env.MONGO_URI)
     // Initialize Real-Time Odds Engine (WebSocket + REST)
     const { initOddsEngine } = require('./services/oddsEngine');
     initOddsEngine(io);
+
+    // START SERVER ONLY AFTER DB IS READY
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
+    });
 
   })
   .catch(err => console.error('❌ MongoDB Error:', err.message));
@@ -176,6 +183,4 @@ app.use((err, req, res, next) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Backend server running on port ${PORT}`);
-});
+
