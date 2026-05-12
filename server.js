@@ -27,7 +27,12 @@ const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const auth = require('./middleware/auth');
 
-app.use(cors());
+app.use(cors({
+  origin: true, // Reflects the origin of the request (safe for dev)
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
 app.use(express.json());
 app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
@@ -35,17 +40,17 @@ app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 
 // MongoDB Connection Options
-mongoose.set('bufferCommands', true); 
+mongoose.set('bufferCommands', true);
 
 mongoose.connect(process.env.MONGO_URI, {
   autoIndex: true,
 })
   .then(async () => {
     console.log('✅ MongoDB connected successfully');
-    
+
     // Initialize Casino Round Manager with Socket.io
     initRoundManager(io);
-    
+
     // Initial fetch
     const { fetchUpcomingMatches } = require('./services/matchService');
     fetchUpcomingMatches(io);
@@ -59,9 +64,9 @@ mongoose.connect(process.env.MONGO_URI, {
     initLiveScoreJob(io);
     const { initSettlementJob } = require('./jobs/settlementJob');
     initSettlementJob(io);
-    // Initialize Real-Time Odds Engine (WebSocket + REST)
-    const { initOddsEngine } = require('./services/oddsEngine');
-    initOddsEngine(io);
+    // Initialize Real-Time Odds Engine (WebSocket)
+    const oddsWebsocketService = require('./services/oddsWebsocketService');
+    oddsWebsocketService.init(io);
 
     // START SERVER ONLY AFTER DB IS READY
     server.listen(PORT, '0.0.0.0', () => {
@@ -69,7 +74,10 @@ mongoose.connect(process.env.MONGO_URI, {
     });
 
   })
-  .catch(err => console.error('❌ MongoDB Error:', err.message));
+  .catch(err => {
+    console.error('❌ MongoDB Connection/Init Error:');
+    console.error(err.stack);
+  });
 
 app.get('/', (req, res) => {
   res.send('server working');
@@ -79,7 +87,7 @@ app.get('/', (req, res) => {
 app.get('/api/user/wallet', auth, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.userId });
-    res.json({ 
+    res.json({
       balance: user ? user.walletBalance : 0,
       credit: user ? (user.credit || 0) : 0
     });
@@ -96,26 +104,26 @@ app.post('/api/user/bet', auth, async (req, res) => {
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
 
     const user = await User.findOneAndUpdate(
-       { username: req.user.userId, walletBalance: { $gte: stake } },
-       { $inc: { walletBalance: -stake } },
-       { new: true }
+      { username: req.user.userId, walletBalance: { $gte: stake } },
+      { $inc: { walletBalance: -stake } },
+      { new: true }
     );
 
     if (!user) return res.status(400).json({ error: 'Insufficient balance' });
 
-    const newBet = new Bet({ 
-        userId: req.user.userId, 
-        matchId, 
-        matchName, 
-        runner, 
-        stake, 
-        odds, 
-        isLive,
-        type: type || 'back',
-        status: 'pending'
+    const newBet = new Bet({
+      userId: req.user.userId,
+      matchId,
+      matchName,
+      runner,
+      stake,
+      odds,
+      isLive,
+      type: type || 'back',
+      status: 'pending'
     });
     await newBet.save();
-    
+
     res.json({ success: true, balance: user.walletBalance });
   } catch (err) {
     res.status(500).json({ error: 'Bet placement failed' });
@@ -138,21 +146,21 @@ app.post('/api/casino/bet', auth, async (req, res) => {
 
     // Atomic update to deduct wallet
     const user = await User.findOneAndUpdate(
-       { username: req.user.userId, walletBalance: { $gte: amount } },
-       { $inc: { walletBalance: -amount } },
-       { new: true }
+      { username: req.user.userId, walletBalance: { $gte: amount } },
+      { $inc: { walletBalance: -amount } },
+      { new: true }
     );
 
     if (!user) return res.status(400).json({ error: 'Insufficient balance' });
 
     // Record the casino bet
     const newBet = new CasinoBet({
-        userId: req.user.userId,
-        roundId: currentRound.roundId,
-        choice,
-        amount,
-        odds: 2.0, // Default for Solitaire/TeenPatti styles
-        status: 'PENDING'
+      userId: req.user.userId,
+      roundId: currentRound.roundId,
+      choice,
+      amount,
+      odds: 2.0, // Default for Solitaire/TeenPatti styles
+      status: 'PENDING'
     });
     await newBet.save();
 
@@ -171,7 +179,7 @@ app.use((req, res) => {
 // Global Error Handler
 app.use((err, req, res, next) => {
   console.error('SERVER ERROR:', err);
-  
+
   // Handle specific body-parser errors
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Invalid JSON payload' });
@@ -181,6 +189,21 @@ app.use((err, req, res, next) => {
     error: err.message || 'Internal Server Error',
     details: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
+});
+
+// Capture uncaught exceptions to prevent silent crashes
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('💥 UNHANDLED REJECTION! Shutting down...');
+  console.error(err.name, err.message);
+  console.error(err.stack);
+  process.exit(1);
 });
 
 

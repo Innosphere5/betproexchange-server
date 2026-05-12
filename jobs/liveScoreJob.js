@@ -9,7 +9,7 @@ const { updateLiveScores } = require('../services/scoreService');
  */
 const initLiveScoreJob = (io) => {
     // Cron schedule: every 5 seconds
-    cron.schedule('*/5 * * * * *', async () => {
+    cron.schedule('*/1 * * * * *', async () => {
         try {
             await updateLiveScores(io);
         } catch (error) {
@@ -17,7 +17,7 @@ const initLiveScoreJob = (io) => {
         }
     });
 
-    console.log('✅ LiveScoreJob initialized (5s interval)');
+    console.log('✅ LiveScoreJob initialized (1s interval)');
 };
 
 module.exports = { initLiveScoreJob };

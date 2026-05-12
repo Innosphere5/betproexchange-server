@@ -69,8 +69,8 @@ const processMatchResults = async (io) => {
                 continue;
             }
 
-            // Sportmonks statuses: 'Finished', 'Aborted', 'No Result', 'Abandoned'
-            const isCompleted = ['Finished', 'Aborted', 'No Result', 'Abandoned'].includes(apiMatch.status);
+            // Sportmonks statuses: 'Finished', 'Aborted', 'No Result', 'Abandoned', 'Aban.', 'Canc.'
+            const isCompleted = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Aban.', 'Canc.'].includes(apiMatch.status);
 
             if (isCompleted) {
                 console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status}.`);

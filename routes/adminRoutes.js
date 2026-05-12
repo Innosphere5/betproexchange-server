@@ -356,117 +356,179 @@ router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => 
 
 // Get Dashboard Stats (Match-wise exposure)
 router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
-  console.log(`[API] Dashboard Stats called by: ${req.user.userId} | Role: ${req.user.role}`);
   try {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
-    // 1. Get all scheduled/live matches
-    const activeMatches = await Match.find({ status: { $in: ['scheduled', 'live', 'upcoming'] } }).select('matchId teamA teamB backOddsA backOddsB layOddsA layOddsB').lean();
+    // 1. Get all scheduled/live matches + recently resulted matches (last 24h)
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const activeMatches = await Match.find({ 
+      $or: [
+        { status: { $in: ['scheduled', 'live', 'upcoming'] } },
+        { status: 'resulted', updatedAt: { $gte: twentyFourHoursAgo } }
+      ]
+    }).select('matchId teamA teamB status backOddsA backOddsB layOddsA layOddsB').lean();
+    
     const matchIds = activeMatches.map(m => m.matchId);
 
-    // 2. Prepare Match Stake Query
-    let matchStatsQuery = { matchId: { $in: matchIds }, status: { $in: ['MATCHED', 'pending'] } };
+    // 2. Prepare Match Stake Query (Include WON/LOST for resulted matches)
+    let matchStatsQuery = { 
+      matchId: { $in: matchIds }, 
+      status: { $in: ['MATCHED', 'pending', 'WIN', 'LOSE', 'won', 'lost'] } 
+    };
     
     if (req.user.role === 'master') {
-      // Find direct downline for Master
       const downlineUsers = await User.find({ parentId: parent._id }).select('username');
       const usernames = downlineUsers.map(u => u.username);
       matchStatsQuery.userId = { $in: usernames };
     } else if (req.user.role === 'admin') {
-      // Find all downline (masters and their users) for Admin
       const masters = await User.find({ parentId: parent._id }).select('_id');
       const masterIds = masters.map(m => m._id);
       const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
       const usernames = downlineUsers.map(u => u.username);
       matchStatsQuery.userId = { $in: usernames };
     }
-    // Superadmin sees all bets by default (no userId filter)
 
-    // 3. Get all relevant bets for these matches
     const bets = await Bet.find(matchStatsQuery).lean();
-    console.log(`[API] Found ${bets.length} bets for ${activeMatches.length} matches. Role: ${req.user.role}`);
 
-    // Fetch all users involved in these bets and their parents
+    // Map users for share calculation
     const uniqueUserIds = [...new Set(bets.map(b => b.userId))];
     const betUsers = await User.find({ username: { $in: uniqueUserIds } }).lean();
     
-    // Get unique parent IDs
-    const parentIds = [...new Set(betUsers.filter(u => u.parentId).map(u => u.parentId))];
-    const parentUsers = await User.find({ _id: { $in: parentIds } }).lean();
+    // Get immediate parents (Masters)
+    const immediateParentIds = [...new Set(betUsers.filter(u => u.parentId).map(u => u.parentId))];
+    const immediateParents = await User.find({ _id: { $in: immediateParentIds } }).lean();
     
-    const parentMap = {};
-    parentUsers.forEach(p => { parentMap[p._id.toString()] = p.username; });
-
+    // Get their parents (Admins)
+    const adminIds = [...new Set(immediateParents.filter(u => u.parentId).map(u => u.parentId))];
+    const adminUsers = await User.find({ _id: { $in: adminIds } }).lean();
+    
+    const allParents = [...immediateParents, ...adminUsers];
+    
     const userMap = {};
     betUsers.forEach(u => {
-      const parent = parentUsers.find(p => p._id.toString() === u.parentId?.toString());
+      const parent = allParents.find(p => p._id.toString() === u.parentId?.toString());
       userMap[u.username] = {
         ...u,
-        parentName: parent ? parent.username : 'Direct',
         parentShare: parent ? parent.share : 0
       };
     });
 
-    // 4. Calculate runner-wise exposure and stats
     const results = [];
     for (const m of activeMatches) {
       const runners = [m.teamA, m.teamB];
       const matchBets = bets.filter(b => b.matchId === m.matchId);
-      console.log(`[API] Match ${m.matchId} (${m.teamA} v ${m.teamB}) has ${matchBets.length} bets.`);
+      const isResulted = m.status === 'resulted';
 
       runners.forEach(r => {
-        let netStake = 0;
+        let exposure = 0;
+        let totalStake = 0;
         const normalizedR = r?.trim().toLowerCase();
 
+        // 3% Platform Commission Logic: 
+        // If user wins, house takes 3% of their net win. 
+        // This 3% is added to the house profit and distributed.
+        
         matchBets.forEach(b => {
-          const { runner, odds, stake, type, userId } = b;
+          const { runner, odds, stake, type, userId, status } = b;
           const normalizedRunner = runner?.trim().toLowerCase();
           
-          if (normalizedRunner !== normalizedR) return; // Only count bets on this specific runner
+          // Get the robust hierarchical net share
+          const getNetShare = () => {
+            const user = userMap[userId];
+            if (!user) return 0;
 
-          // Get the share for this user/bet
-          const u = userMap[userId];
-          let effectiveShare = 100; // Default for SuperAdmin
+            let mShare = 0;
+            let aShare = 0;
 
-          if (req.user.role === 'master') {
-            effectiveShare = req.user.share || 0;
-          } else if (req.user.role === 'admin') {
-            // Admin gets the remaining share of their master's downline
-            // For now, simplify: Admin takes (100 - MasterShare)
-            effectiveShare = 100 - (u?.parentShare || 0);
-          }
+            // Find Master and Admin in hierarchy
+            let master = allParents.find(p => p._id.toString() === user.parentId?.toString() && p.role === 'master');
+            if (master) {
+                mShare = master.share || 0;
+                let admin = allParents.find(p => p._id.toString() === master.parentId?.toString() && p.role === 'admin');
+                if (admin) aShare = admin.share || 0;
+            } else {
+                let admin = allParents.find(p => p._id.toString() === user.parentId?.toString() && p.role === 'admin');
+                if (admin) aShare = admin.share || 0;
+            }
 
-          const shareMultiplier = effectiveShare / 100;
-
-          if (type === 'back') {
-            netStake += stake * shareMultiplier;
-          } else { // lay
-            netStake -= (odds - 1) * stake * shareMultiplier;
-          }
-        });
-
-        const runnerBets = matchBets.filter(b => b.runner?.trim().toLowerCase() === r?.trim().toLowerCase()).map(b => {
-          const u = userMap[b.userId];
-          return {
-            stake: b.stake,
-            odds: b.odds,
-            type: b.type,
-            bettor: b.userId,
-            master: u?.parentName || 'Direct'
+            if (req.user.role === 'master') return mShare;
+            if (req.user.role === 'admin') return aShare - mShare;
+            if (req.user.role === 'superadmin') return 100 - Math.max(mShare, aShare);
+            return 0;
           };
-        });
 
-        console.log(`[API] Runner ${r}: netStake=${netStake}, bets=${runnerBets.length}`);
+          const netShare = getNetShare();
+          const adminStake = stake * (netShare / 100);
+
+          if (normalizedRunner === normalizedR) {
+            totalStake += adminStake;
+          }
+
+          const COMMISSION_RATE = 0.03;
+
+          if (isResulted) {
+             if (normalizedRunner === normalizedR) {
+                if (status.toUpperCase() === 'WIN') {
+                    // House loses (Odds-1)*Stake, but gains 3% commission on that win
+                    const userWin = (odds - 1) * stake;
+                    const commission = userWin * COMMISSION_RATE;
+                    exposure -= (userWin - commission) * (netShare / 100);
+                } else if (status.toUpperCase() === 'LOSE') {
+                    // House wins Stake
+                    exposure += adminStake;
+                }
+             } else {
+                if (status.toUpperCase() === 'WIN') {
+                    // House wins Stake from losing bettor (who bet on OTHER runner)
+                    // Wait, if other runner won, then this runner lost.
+                    // Bettor lost stake. House wins it.
+                    exposure += adminStake;
+                } else if (status.toUpperCase() === 'LOSE') {
+                    // House loses to winning bettor (who bet on OTHER runner)
+                    // But gains commission.
+                    const userWin = (odds - 1) * stake;
+                    const commission = userWin * COMMISSION_RATE;
+                    exposure -= (userWin - commission) * (netShare / 100);
+                }
+             }
+          } else {
+            // Live match exposure calculation with commission projection
+            if (type === 'back') {
+              if (normalizedRunner === normalizedR) {
+                  // If this runner wins, house loses user win - commission
+                  const userWin = (odds - 1) * stake;
+                  const commission = userWin * COMMISSION_RATE;
+                  exposure -= (userWin - commission) * (netShare / 100);
+              } else {
+                  // If this runner wins, house wins the stake from the losing bet on other runner
+                  exposure += adminStake;
+              }
+            } else { // lay
+              if (normalizedRunner === normalizedR) {
+                  // If this runner wins, house wins the liability (user loss)
+                  exposure += (odds - 1) * adminStake;
+              } else {
+                  // If this runner wins, house loses the stake - commission
+                  const userWin = stake;
+                  const commission = userWin * COMMISSION_RATE;
+                  exposure -= (userWin - commission) * (netShare / 100);
+              }
+            }
+          }
+        });
 
         results.push({
-          matchId: m.matchId,
           name: r,
           matchName: `${m.teamA} v ${m.teamB}`,
-          amount: netStake,
-          back: r === m.teamA ? m.backOddsA : m.backOddsB,
-          lay: r === m.teamA ? m.layOddsA : m.layOddsB,
-          bets: runnerBets
+          matchId: m.matchId,
+          amount: exposure,
+          totalStake: totalStake,
+          isResulted: isResulted,
+          back: normalizedR === m.teamA?.toLowerCase() ? m.backOddsA : m.backOddsB,
+          lay: normalizedR === m.teamA?.toLowerCase() ? m.layOddsA : m.layOddsB,
+          backStake: "0.0", // Placeholder or calculate if needed
+          layStake: "0.0"
         });
       });
     }
@@ -575,10 +637,10 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   }
 });
 
-// Get Daily Report (Similar to Final Sheet but filtered by date)
+// Get Daily/Monthly/Yearly Report (Similar to Final Sheet but filtered by date range)
 router.get('/daily-report', auth, isAuthorized, async (req, res) => {
   try {
-    const { date } = req.query;
+    const { date, month, year, reportType = 'daily' } = req.query;
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
@@ -587,22 +649,42 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
     };
 
-    let startOfDay, endOfDay;
-    if (date) {
-      // date is "YYYY-MM-DD"
-      const [year, month, day] = date.split('-').map(Number);
-      startOfDay = new Date(year, month - 1, day, 0, 0, 0, 0);
-      endOfDay = new Date(year, month - 1, day, 23, 59, 59, 999);
+    let startDate, endDate;
+    
+    if (reportType === 'monthly' && month) {
+      // month is "YYYY-MM"
+      const [y, m] = month.split('-').map(Number);
+      startDate = new Date(y, m - 1, 1, 0, 0, 0, 0);
+      endDate = new Date(y, m, 0, 23, 59, 59, 999); // Last day of month
+    } else if (reportType === 'yearly' && year) {
+      // year is "YYYY"
+      const y = parseInt(year);
+      startDate = new Date(y, 0, 1, 0, 0, 0, 0);
+      endDate = new Date(y, 11, 31, 23, 59, 59, 999);
+    } else if (reportType === 'range' && req.query.startDate && req.query.endDate) {
+      // custom range
+      const [sy, sm, sd] = req.query.startDate.split('-').map(Number);
+      const [ey, em, ed] = req.query.endDate.split('-').map(Number);
+      startDate = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+      endDate = new Date(ey, em - 1, ed, 23, 59, 59, 999);
     } else {
-      startOfDay = new Date();
-      startOfDay.setHours(0, 0, 0, 0);
-      endOfDay = new Date();
-      endOfDay.setHours(23, 59, 59, 999);
+      // default: daily
+      if (date) {
+        // date is "YYYY-MM-DD"
+        const [y, m, d] = date.split('-').map(Number);
+        startDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+        endDate = new Date(y, m - 1, d, 23, 59, 59, 999);
+      } else {
+        startDate = new Date();
+        startDate.setHours(0, 0, 0, 0);
+        endDate = new Date();
+        endDate.setHours(23, 59, 59, 999);
+      }
     }
     
-    console.log(`[DAILY-REPORT] Date: ${date || 'Today'}, Range: ${startOfDay.toISOString()} - ${endOfDay.toISOString()}`);
+    console.log(`[REPORT] Type: ${reportType}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
     
-    query.createdAt = { $gte: startOfDay, $lte: endOfDay };
+    query.createdAt = { $gte: startDate, $lte: endDate };
 
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
 
@@ -656,8 +738,8 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     res.json({ profit, loss });
   } catch (err) {
-    console.error("Daily Report Error:", err);
-    res.status(500).json({ error: 'Server error fetching daily report' });
+    console.error("Report Error:", err);
+    res.status(500).json({ error: 'Server error fetching report' });
   }
 });
 
@@ -736,40 +818,92 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     const parentIds = [...new Set(users.map(u => u.parentId).filter(id => id))];
     const parents = await User.find({ _id: { $in: parentIds } }).lean();
 
+    // Map to quickly find hierarchy and shares
     const userMap = {};
     users.forEach(u => {
         const parent = parents.find(p => p._id.toString() === u.parentId?.toString());
         userMap[u.username] = {
             username: u.username,
+            role: u.role,
+            share: u.share || 0,
+            parentId: u.parentId,
             parentName: parent ? parent.username : 'Direct'
         };
     });
 
-    // 4. Calculate Exposure for Super Admin
-    // For each runner, calculate what happens if THEY win
+    // Helper to get net share for a specific admin on a specific user's bet
+    const getAdminNetShare = (userId, requesterId, requesterRole) => {
+        const user = users.find(u => u.username === userId);
+        if (!user) return 0;
+
+        // Trace the hierarchy: User -> ?Master -> ?Admin -> SuperAdmin
+        let master = null;
+        let admin = null;
+
+        let currentParentId = user.parentId;
+        while (currentParentId) {
+            const parent = parents.find(p => p._id.toString() === currentParentId.toString());
+            if (!parent) break;
+            if (parent.role === 'master') master = parent;
+            if (parent.role === 'admin') admin = parent;
+            currentParentId = parent.parentId;
+        }
+
+        const mShare = master ? (master.share || 0) : 0;
+        const aShare = admin ? (admin.share || 0) : 0;
+
+        if (requesterRole === 'master') {
+            return mShare;
+        } else if (requesterRole === 'admin') {
+            // Admin gets their share minus what they gave to the master
+            return aShare - mShare;
+        } else if (requesterRole === 'superadmin') {
+            // Superadmin gets what's left after Admin/Master
+            const highestChildShare = Math.max(mShare, aShare);
+            return 100 - highestChildShare;
+        }
+        return 0;
+    };
+
+    const requester = await User.findOne({ username: req.user.userId });
+    const requesterId = requester._id.toString();
+    const requesterRole = requester.role;
+
+    const COMMISSION_RATE = 0.03;
+
+    // 4. Calculate Exposure for Requester
     const exposure = {};
     runners.forEach(r => exposure[r] = 0);
 
     bets.forEach(b => {
-        const { runner, odds, stake, type } = b;
+        const { runner, odds, stake, type, userId } = b;
+        const netShare = getAdminNetShare(userId, requesterId, requesterRole);
+        const adminStake = stake * (netShare / 100);
         
         runners.forEach(winRunner => {
             let adminProfit = 0;
+            const normalizedRunner = runner?.trim().toLowerCase();
+            const normalizedWinRunner = winRunner?.trim().toLowerCase();
+
             if (type === 'back') {
-                if (runner === winRunner) {
-                    // Bettor wins (Odds-1)*Stake, Admin loses it
-                    adminProfit = -(odds - 1) * stake;
+                if (normalizedRunner === normalizedWinRunner) {
+                    // Bettor wins (Odds-1)*Stake. House loses it but gains 3% commission
+                    const userWin = (odds - 1) * stake;
+                    const commission = userWin * COMMISSION_RATE;
+                    adminProfit = -(userWin - commission) * (netShare / 100);
                 } else {
-                    // Bettor loses Stake, Admin wins it
-                    adminProfit = stake;
+                    // Bettor loses Stake, Admin wins it proportional to share
+                    adminProfit = adminStake;
                 }
             } else { // lay
-                if (runner === winRunner) {
-                    // Bettor loses (Odds-1)*Stake, Admin wins it
-                    adminProfit = (odds - 1) * stake;
+                if (normalizedRunner === normalizedWinRunner) {
+                    // Bettor loses (Odds-1)*Stake (Liability). Admin wins it
+                    adminProfit = (odds - 1) * adminStake;
                 } else {
-                    // Bettor wins Stake, Admin loses it
-                    adminProfit = -stake;
+                    // Bettor wins Stake. Admin loses it but gains 3% commission
+                    const userWin = stake;
+                    const commission = userWin * COMMISSION_RATE;
+                    adminProfit = -(userWin - commission) * (netShare / 100);
                 }
             }
             exposure[winRunner] += adminProfit;
@@ -777,15 +911,21 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     });
 
     // 5. Format Matched Bets for UI
-    const matchedBets = bets.map(b => ({
-        id: b._id,
-        runner: b.runner,
-        price: b.odds,
-        size: b.stake,
-        better: b.userId,
-        master: userMap[b.userId]?.parentName || 'Unknown',
-        type: b.type
-    }));
+    const matchedBets = bets.map(b => {
+        const netShare = getAdminNetShare(b.userId, requesterId, requesterRole);
+        const parentStake = b.stake * (netShare / 100);
+
+        return {
+            id: b._id,
+            runner: b.runner,
+            price: b.odds,
+            size: b.stake,
+            parentStake: Number(parentStake.toFixed(2)),
+            better: b.userId,
+            master: userMap[b.userId]?.parentName || 'Unknown',
+            type: b.type
+        };
+    });
 
     res.json({
         matchName: `${match.teamA} v ${match.teamB}`,

@@ -97,7 +97,7 @@ const updateLiveScores = async (io) => {
             const teamB_score = teamBRunsObj ? `${teamBRunsObj.score}/${teamBRunsObj.wickets}` : (matchInDb.score?.teamB_runs || "0/0");
 
             // Determine if match is finished
-            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Completed', 'Ended'];
+            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Completed', 'Ended', 'Aban.', 'Canc.'];
             const isFinished = completedStatuses.includes(liveData.status);
             let winner = matchInDb.winner;
 
