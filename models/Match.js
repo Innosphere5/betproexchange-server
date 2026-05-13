@@ -27,6 +27,10 @@ const matchSchema = new mongoose.Schema({
   layOddsA: { type: Number, default: null },
   backOddsB: { type: Number, default: null },
   layOddsB: { type: Number, default: null },
+  depthBackA: { type: String, default: null },
+  depthLayA: { type: String, default: null },
+  depthBackB: { type: String, default: null },
+  depthLayB: { type: String, default: null },
   isPriority: { type: Boolean, default: false }, // Pin IPL, PSL, Int'l matches
   lastUpdated: { type: Date, default: Date.now }
 

@@ -164,6 +164,23 @@ const updateLiveScores = async (io) => {
                 });
             }
         }
+        
+        // 2. Handle matches marked 'live' in DB but NOT in the current API response
+        const liveMatchIdsFromApi = response.data.map(m => m.id.toString());
+        const staleMatches = await Match.find({ 
+            status: 'live', 
+            matchId: { $nin: liveMatchIdsFromApi } 
+        });
+
+        for (const match of staleMatches) {
+            // If match started more than 8 hours ago and is not in live feed, mark as completed
+            const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
+            if (match.startTime < eightHoursAgo) {
+                console.log(`[ScoreService] 🏁 Marking stale live match as completed: ${match.teamA} v ${match.teamB}`);
+                await Match.updateOne({ matchId: match.matchId }, { $set: { status: 'completed' } });
+                updatedCount++;
+            }
+        }
 
         if (updatedCount > 0 && io) {
             console.log(`[ScoreService] Updated detailed scores for ${updatedCount} matches.`);

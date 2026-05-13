@@ -46,7 +46,7 @@ const fetchUpcomingMatches = async (io) => {
             console.log(`[MatchService] Sample Data (First 3):`, response.data.slice(0, 3).map(f => ({ id: f.id, league: f.league?.name, status: f.status })));
         }
 
-        const allowedLeagueIds = [1, 8, 2, 3, 4, 11, 17, 18, 41];
+        const allowedLeagueIds = [1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 17, 18, 23, 41, 138, 201, 258, 261];
 
         // 3. Filter and Map
         let matches = response.data
@@ -98,13 +98,16 @@ const fetchUpcomingMatches = async (io) => {
         }
 
         // 5. Final Pruning: Remove matches not in the fresh fetch
-        // We keep them if they are for today/future or if they are currently live.
+        // We remove them if they are for yesterday/past or if they are NOT in the fresh active list.
+        // Special case: If a match is 'live' in DB but NOT in the activeIds, and it's old, prune it.
+        const staleLiveTime = new Date(Date.now() - 12 * 60 * 60 * 1000); // 12 hours ago
+        
         const deleteResult = await Match.deleteMany({
             matchId: { $nin: activeIds },
-            status: { $ne: 'live' },
             $or: [
                 { startTime: { $lt: todayStart } }, // Yesterday's matches
-                { status: 'completed' }             // Any completed match not in the fresh list
+                { status: 'completed' },             // Any completed match not in the fresh list
+                { status: 'live', startTime: { $lt: staleLiveTime } } // Ghost matches like Romania v Bulgaria
             ]
         });
 

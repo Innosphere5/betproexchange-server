@@ -4,7 +4,7 @@ const oddsApiService = require('./oddsApiService');
 require('dotenv').config();
 
 // ALLOWED BOOKMAKERS FOR THIS STARTER PLAN KEY
-const ALLOWED_BOOKMAKERS = 'SingBet,Betfair Exchange,Bet365,1xbet,Stake';
+const ALLOWED_BOOKMAKERS = 'Betfair Exchange,SingBet,Bet365,1xbet,Stake';
 
 let ioInstance = null;
 const STALE_TIMEOUT_MS = 60000;
@@ -15,6 +15,16 @@ const pendingFetches = new Set();
 const normalize = (name) => {
     if (!name) return "";
     let n = name.toLowerCase().trim();
+    
+    // Remove common suffixes and descriptors that cause mismatches
+    n = n.replace(/\bwomen\b/g, "");
+    n = n.replace(/\bw\b/g, "");
+    n = n.replace(/\bteam\b/g, "");
+    n = n.replace(/\bcricket\b/g, "");
+    n = n.replace(/\bnational\b/g, "");
+    n = n.replace(/\bmen\b/g, "");
+    n = n.replace(/\bxi\b/g, "");
+    
     n = n.replace(/[^a-z0-9\s]/g, ""); 
     n = n.replace(/\s+/g, ""); 
     
@@ -24,13 +34,22 @@ const normalize = (name) => {
         "bangalore": "rcb",
         "lucknow": "lsg",
         "sunrisers": "srh",
+        "hyderabad": "srh",
         "mumbaiindians": "mi",
+        "mumbai": "mi",
         "chennaisuperkings": "csk",
+        "chennai": "csk",
         "delhicapitals": "dc",
+        "delhi": "dc",
         "rajasthanroyals": "rr",
+        "rajasthan": "rr",
         "gujarattitans": "gt",
+        "gujarat": "gt",
         "kolkataknightriders": "kkr",
-        "punjabkings": "pbks"
+        "kolkata": "kkr",
+        "punjabkings": "pbks",
+        "kingsxi": "pbks",
+        "punjab": "pbks"
     };
     
     for (const [key, value] of Object.entries(aliases)) {
@@ -69,29 +88,51 @@ async function findMatchesForEvent(apiEvent) {
 // ─── Back/Lay Logic ────────────────────────────────────────────────────────────
 
 function getSpread(isLive) {
-    return isLive ? 0.03 : 0.01;
+    // Keep spreads extremely tight to match competitive exchange rates
+    return isLive ? 0.01 : 0.01;
 }
 
-function processRunnerOdds(back, lay, isLive) {
+const formatDepth = (val) => {
+    if (!val) return "100";
+    const n = Number(val);
+    if (isNaN(n)) return val;
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return Math.floor(n).toString();
+};
+
+function processRunnerOdds(back, lay, depthBack, depthLay, isLive) {
     const b = Number(back);
-    if (lay) {
-        return { back: b, lay: Number(lay) };
+    const db = formatDepth(depthBack);
+    let l, dl;
+    
+    if (lay && Number(lay) > 0) {
+        l = Number(lay);
+        dl = formatDepth(depthLay);
+    } else {
+        const spread = getSpread(isLive);
+        l = Number((b + spread).toFixed(2));
+        dl = (Math.random() * 500 + 100).toFixed(0); // Synthetic depth
     }
-    const spread = getSpread(isLive);
-    return {
-        back: b,
-        lay: Number((b + spread).toFixed(2))
-    };
+    
+    return { back: b, lay: l, depthBack: db, depthLay: dl };
 }
 
 // ─── Core Engine ───────────────────────────────────────────────────────────────
 
-async function handleOddsUpdate(eventData) {
+async function handleOddsUpdate(eventData, providedMatchId = null) {
     try {
         const { id, home, away, date, status, bookmakers } = eventData;
         const isLive = status === 'live';
 
-        const dbMatches = await findMatchesForEvent(eventData);
+        let dbMatches = [];
+        if (providedMatchId) {
+            const match = await Match.findOne({ matchId: providedMatchId });
+            if (match) dbMatches = [match];
+        } else {
+            dbMatches = await findMatchesForEvent(eventData);
+        }
+        
         if (dbMatches.length === 0) return;
 
         for (const dbMatch of dbMatches) {
@@ -106,40 +147,48 @@ async function handleOddsUpdate(eventData) {
 
             // Find best bookmaker that HAS ML market
             const preferred = ALLOWED_BOOKMAKERS.split(',');
-            let selectedBM = null;
-            let mlMarket = null;
+            let bestA = 0;
+            let bestB = 0;
+            let layA = 0;
+            let layB = 0;
+            let depthBackA = 0;
+            let depthBackB = 0;
+            let depthLayA = 0;
+            let depthLayB = 0;
+            let selectedBM = 'Multiple';
 
             for (const bmName of preferred) {
                 if (bookmakers[bmName]) {
-                    const found = bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner');
+                    const found = bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h' || m.name === 'Winner');
                     if (found && found.odds && found.odds[0]) {
-                        selectedBM = bmName;
-                        mlMarket = found;
-                        break;
-                    }
-                }
-            }
-
-            // Fallback to first available BM with ML if preferred ones don't have it
-            if (!mlMarket) {
-                for (const bmName in bookmakers) {
-                    const found = bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner');
-                    if (found && found.odds && found.odds[0]) {
-                        selectedBM = bmName;
-                        mlMarket = found;
-                        break;
+                        const odds = found.odds[0];
+                        const backA = Number(odds.home || odds.back || 0);
+                        const backB = Number(odds.away || odds.backAway || 0);
+                        
+                        if (backA > bestA) {
+                            bestA = backA;
+                            layA = Number(odds.layHome || odds.lay || 0);
+                            depthBackA = odds.depthHome || odds.depthBack || 0;
+                            depthLayA = odds.depthLayHome || odds.depthLay || 0;
+                            selectedBM = bmName;
+                        }
+                        if (backB > bestB) {
+                            bestB = backB;
+                            layB = Number(odds.layAway || odds.lay || 0);
+                            depthBackB = odds.depthAway || odds.depthBackAway || 0;
+                            depthLayB = odds.depthLayAway || odds.depthLay || 0;
+                        }
                     }
                 }
             }
             
-            if (!mlMarket) {
+            if (bestA === 0) {
                 console.log(`[Odds Engine] ⚠️ No ML market found for ${dbMatch.teamA} v ${dbMatch.teamB}`);
                 continue;
             }
 
-            const oddsData = mlMarket.odds[0];
-            const teamA_odds = processRunnerOdds(oddsData.home, oddsData.layHome, isLive);
-            const teamB_odds = processRunnerOdds(oddsData.away, oddsData.layAway, isLive);
+            const teamA_odds = processRunnerOdds(bestA, layA, depthBackA, depthLayA, isLive);
+            const teamB_odds = processRunnerOdds(bestB, layB, depthBackB, depthLayB, isLive);
 
             const updateData = {
                 matchId: dbMatch.matchId,
@@ -161,6 +210,10 @@ async function handleOddsUpdate(eventData) {
                     layOddsA: teamA_odds.lay, 
                     backOddsB: teamB_odds.back, 
                     layOddsB: teamB_odds.lay,
+                    depthBackA: teamA_odds.depthBack,
+                    depthLayA: teamA_odds.depthLay,
+                    depthBackB: teamB_odds.depthBack,
+                    depthLayB: teamB_odds.depthLay,
                     marketStatus: 'OPEN',
                     lastUpdated: new Date()
                 }
@@ -172,8 +225,20 @@ async function handleOddsUpdate(eventData) {
                 ioInstance.emit('market_odds_update', {
                     matchId: dbMatch.matchId,
                     runners: [
-                        { name: dbMatch.teamA, back: teamA_odds.back, lay: teamA_odds.lay },
-                        { name: dbMatch.teamB, back: teamB_odds.back, lay: teamB_odds.lay }
+                        { 
+                            name: dbMatch.teamA, 
+                            back: teamA_odds.back, 
+                            lay: teamA_odds.lay,
+                            depthBack: teamA_odds.depthBack,
+                            depthLay: teamA_odds.depthLay
+                        },
+                        { 
+                            name: dbMatch.teamB, 
+                            back: teamB_odds.back, 
+                            lay: teamB_odds.lay,
+                            depthBack: teamB_odds.depthBack,
+                            depthLay: teamB_odds.depthLay
+                        }
                     ],
                     marketStatus: 'OPEN',
                     updatedAt: updateData.updatedAt
@@ -220,7 +285,7 @@ async function pollAllActiveOdds() {
             if (!isLive && !isToday) continue;
 
             const lastUpdate = new Date(market.updatedAt).getTime();
-            const waitTime = isLive ? 5000 : 30000; 
+            const waitTime = isLive ? 1000 : 5000; 
 
             if (now.getTime() - lastUpdate < waitTime) continue;
             if (pendingFetches.has(market.matchId)) continue;
@@ -235,8 +300,8 @@ async function pollAllActiveOdds() {
             .then(async (data) => {
                 if (data) {
                     const eventData = data;
-                    if (!eventData.id) eventData.id = market.oddsApiEventId;
-                    await handleOddsUpdate(eventData);
+                    // For polling, we already know the matchId
+                    await handleOddsUpdate(eventData, market.matchId);
                 }
             })
             .catch(err => {
@@ -289,7 +354,7 @@ async function checkStaleOdds() {
 function initOddsEngine(io) {
     ioInstance = io;
     syncEvents();
-    setInterval(pollAllActiveOdds, 5000); 
+    setInterval(pollAllActiveOdds, 1000); 
     setInterval(syncEvents, 120000); 
     setInterval(checkStaleOdds, 20000);
 }

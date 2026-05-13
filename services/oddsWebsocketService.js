@@ -134,12 +134,12 @@ class OddsWebsocketService {
             let selectedBM = event.bookie || 'Unknown';
 
             if (event.markets && Array.isArray(event.markets)) {
-                mlMarket = event.markets.find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h');
+                mlMarket = event.markets.find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h' || m.name === 'Winner');
             } else if (event.bookmakers) {
                 // Handle nested format if it still exists
                 for (const bmName of ALLOWED_BOOKMAKERS) {
                     if (event.bookmakers[bmName]) {
-                        const found = event.bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h');
+                        const found = event.bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h' || m.name === 'Winner');
                         if (found) {
                             mlMarket = found;
                             selectedBM = bmName;
@@ -172,21 +172,34 @@ class OddsWebsocketService {
 
             // 3. Parse Odds
             const oddsData = mlMarket.odds[0];
-            const isLive = event.status === 'live';
-            
-            // BACK/LAY LOGIC
-            const processRunner = (back, lay) => {
-                const b = Number(back);
-                let l = Number(lay);
-                if (isNaN(l) || !l) {
-                    const spread = isLive ? 0.02 : 0.01;
-                    l = Number((b + spread).toFixed(2));
-                }
-                return { back: b, lay: l };
+            const formatDepth = (val) => {
+                if (!val) return "100";
+                const n = Number(val);
+                if (isNaN(n)) return val;
+                if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+                if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+                return Math.floor(n).toString();
             };
 
-            const teamA_odds = processRunner(oddsData.home, oddsData.layHome);
-            const teamB_odds = processRunner(oddsData.away, oddsData.layAway);
+            // BACK/LAY LOGIC
+            const processRunner = (back, lay, depthBack, depthLay) => {
+                const b = Number(back);
+                let l = Number(lay);
+                let db = formatDepth(depthBack);
+                let dl;
+
+                if (isNaN(l) || !l) {
+                    const spread = 0.01;
+                    l = Number((b + spread).toFixed(2));
+                    dl = (Math.random() * 500 + 100).toFixed(0);
+                } else {
+                    dl = formatDepth(depthLay);
+                }
+                return { back: b, lay: l, depthBack: db, depthLay: dl };
+            };
+
+            const teamA_odds = processRunner(oddsData.home, oddsData.layHome, oddsData.depthHome, oddsData.depthLayHome);
+            const teamB_odds = processRunner(oddsData.away, oddsData.layAway, oddsData.depthAway, oddsData.depthLayAway);
 
             const payload = {
                 matchId: sportmonksMatchId,
@@ -194,6 +207,10 @@ class OddsWebsocketService {
                 teamALay: teamA_odds.lay,
                 teamBBack: teamB_odds.back,
                 teamBLay: teamB_odds.lay,
+                depthBackA: teamA_odds.depthBack,
+                depthLayA: teamA_odds.depthLay,
+                depthBackB: teamB_odds.depthBack,
+                depthLayB: teamB_odds.depthLay,
                 updatedAt: new Date()
             };
 
@@ -214,8 +231,20 @@ class OddsWebsocketService {
                         matchId: sportmonksMatchId,
                         updatedAt: payload.updatedAt,
                         runners: [
-                            { name: event.home, back: payload.teamABack, lay: payload.teamALay },
-                            { name: event.away, back: payload.teamBBack, lay: payload.teamBLay }
+                            { 
+                                name: event.home || '', 
+                                back: payload.teamABack, 
+                                lay: payload.teamALay,
+                                depthBack: payload.depthBackA,
+                                depthLay: payload.depthLayA
+                            },
+                            { 
+                                name: event.away || '', 
+                                back: payload.teamBBack, 
+                                lay: payload.teamBLay,
+                                depthBack: payload.depthBackB,
+                                depthLay: payload.depthLayB
+                            }
                         ]
                     });
                 }
@@ -289,6 +318,16 @@ class OddsWebsocketService {
         const normalize = (name) => {
             if (!name) return "";
             let n = name.toLowerCase().trim();
+
+            // Remove common suffixes and descriptors that cause mismatches
+            n = n.replace(/\bwomen\b/g, "");
+            n = n.replace(/\bw\b/g, "");
+            n = n.replace(/\bteam\b/g, "");
+            n = n.replace(/\bcricket\b/g, "");
+            n = n.replace(/\bnational\b/g, "");
+            n = n.replace(/\bmen\b/g, "");
+            n = n.replace(/\bxi\b/g, "");
+
             n = n.replace(/[^a-z0-9\s]/g, ""); 
             n = n.replace(/\s+/g, ""); 
             
@@ -298,13 +337,22 @@ class OddsWebsocketService {
                 "bangalore": "rcb",
                 "lucknow": "lsg",
                 "sunrisers": "srh",
+                "hyderabad": "srh",
                 "mumbaiindians": "mi",
+                "mumbai": "mi",
                 "chennaisuperkings": "csk",
+                "chennai": "csk",
                 "delhicapitals": "dc",
+                "delhi": "dc",
                 "rajasthanroyals": "rr",
+                "rajasthan": "rr",
                 "gujarattitans": "gt",
+                "gujarat": "gt",
                 "kolkataknightriders": "kkr",
-                "punjabkings": "pbks"
+                "kolkata": "kkr",
+                "punjabkings": "pbks",
+                "kingsxi": "pbks",
+                "punjab": "pbks"
             };
             
             for (const [key, value] of Object.entries(aliases)) {
