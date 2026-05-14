@@ -39,6 +39,18 @@ class OddsApiService {
         }
 
         return new Promise((resolve, reject) => {
+            // DEDUPLICATION LOGIC:
+            // If we are fetching 'odds' for a specific 'eventId', and it's already in the queue, 
+            // we remove the old one and replace it with the new one.
+            if (endpoint === 'odds' && params.eventId) {
+                const existingIdx = this.queue.findIndex(q => q.endpoint === 'odds' && q.params.eventId === params.eventId);
+                if (existingIdx !== -1) {
+                    // Resolve the old promise with null or a special value so it doesn't hang
+                    this.queue[existingIdx].resolve(null); 
+                    this.queue.splice(existingIdx, 1);
+                }
+            }
+
             this.queue.push({
                 endpoint,
                 params: { ...params, apiKey },

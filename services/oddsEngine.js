@@ -285,7 +285,7 @@ async function pollAllActiveOdds() {
             if (!isLive && !isToday) continue;
 
             const lastUpdate = new Date(market.updatedAt).getTime();
-            const waitTime = isLive ? 1000 : 5000; 
+            const waitTime = isLive ? 3000 : 10000; 
 
             if (now.getTime() - lastUpdate < waitTime) continue;
             if (pendingFetches.has(market.matchId)) continue;
@@ -354,7 +354,7 @@ async function checkStaleOdds() {
 function initOddsEngine(io) {
     ioInstance = io;
     syncEvents();
-    setInterval(pollAllActiveOdds, 1000); 
+    setInterval(pollAllActiveOdds, 2000); 
     setInterval(syncEvents, 120000); 
     setInterval(checkStaleOdds, 20000);
 }
