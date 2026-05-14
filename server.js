@@ -1,4 +1,7 @@
 const express = require('express');
+console.log("==========================================");
+console.log("!!! ANTIGRAVITY BACKEND CODE LOADED !!!");
+console.log("==========================================");
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');

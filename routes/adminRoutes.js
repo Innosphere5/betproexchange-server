@@ -589,44 +589,68 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
     }).sort({ createdAt: -1 });
 
-    const accountSummary = {}; // { username: { wins: 0, losses: 0 } }
+    console.log(`[FINAL SHEET DEBUG] User: ${currentUser.username}, Found: ${txs.length} transactions`);
+    if (txs.length > 0) {
+      const sample = txs.find(t => t.amount === 250);
+      if (sample) console.log(`[FINAL SHEET DEBUG] Found the 250 tx! Category: ${sample.category}`);
+      else console.log(`[FINAL SHEET DEBUG] 250 tx NOT found in the result set for ${currentUser.username}`);
+    }
+
+    const accountSummary = {}; // { "parentName": { wins: 0, losses: 0, name: '' } }
 
     txs.forEach(tx => {
-      // Extract source name from description:
-      // "Cricket Share from name (25%)" OR "Casino Platform Commission from name"
-      let sourceName = 'Unknown';
-      const match = tx.description.match(/from (.*?)(?: \(|$)/);
-      if (match) {
-        sourceName = match[1].trim();
+      // Extract source name and parent from description:
+      // "Cricket Share from bettor | parent (25%)"
+      let parentName = tx.bettor || 'Unknown';
+
+      if (!tx.bettor) {
+        const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
+        if (match) {
+          parentName = match[2].trim();
+        } else {
+          const fallbackMatch = tx.description.match(/from (.*?)(?: \(|$)/);
+          if (fallbackMatch) {
+            parentName = fallbackMatch[1].trim();
+          }
+        }
       }
 
-      if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = { wins: 0, losses: 0 };
+      if (!accountSummary[parentName]) {
+        accountSummary[parentName] = { wins: 0, losses: 0, name: parentName };
       }
 
-      // tx.amount is positive for House Profit (Bettor Loss)
-      // tx.amount is negative for House Loss (Bettor Win)
-      if (tx.amount < 0) {
-        // House Loss means User Win -> Green Side
-        accountSummary[sourceName].wins += Math.abs(tx.amount);
-      } else if (tx.amount > 0) {
-        // House Profit means User Loss -> Red Side
-        accountSummary[sourceName].losses += tx.amount;
+      const amount = Math.abs(tx.amount);
+      if (tx.amount > 0) {
+        // Master receives money -> Master Profit (Red Side)
+        accountSummary[parentName].losses += amount;
+      } else if (tx.amount < 0) {
+        // Master pays money -> Master Loss (Green Side)
+        accountSummary[parentName].wins += amount;
       }
     });
 
-    const profit = []; // Green Side (Bettor Wins)
-    const loss = [];   // Red Side (Bettor Loses)
+    // 2. Fetch roles for all users in accountSummary to allow frontend filtering
+    const uniqueUsernames = Object.keys(accountSummary);
+    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role').lean();
+    const roleMap = {};
+    usersWithRoles.forEach(u => roleMap[u.username] = u.role);
+
+    const profit = []; // Green Side (Bettor Wins / Master Loss)
+    const loss = [];   // Red Side (Bettor Losses / Master Profit)
 
     Object.keys(accountSummary).forEach(name => {
       const { wins, losses } = accountSummary[name];
+      const role = roleMap[name] || 'user'; // Default to user if not found
       
-      if (wins > 0) {
-        profit.push({ name, amount: wins });
-      }
-      
-      if (losses > 0) {
-        loss.push({ name, amount: losses });
+      // Netting Logic: green (loss) - red (profit)
+      const net = wins - losses;
+
+      if (net > 0) {
+        // Net Green (Master Loss)
+        profit.push({ name, amount: net, role });
+      } else if (net < 0) {
+        // Net Red (Master Profit)
+        loss.push({ name, amount: Math.abs(net), role });
       }
     });
 
@@ -682,57 +706,103 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
       }
     }
     
+    console.log(`[REPORT DEBUG] User: ${req.user.userId}, Role: ${req.user.role}, reportType: ${reportType}, date: ${date}`);
     console.log(`[REPORT] Type: ${reportType}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
     
     query.createdAt = { $gte: startDate, $lte: endDate };
 
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    console.log(`[DAILY REPORT DEBUG] User: ${req.user.userId}, Found: ${txs.length} transactions`);
+    const found250 = txs.find(t => t.amount === 250);
+    if (found250) console.log(`[DAILY REPORT DEBUG] Found 250 tx! category: ${found250.category}, bettor: ${found250.bettor}`);
+    else console.log(`[DAILY REPORT DEBUG] 250 tx NOT found in results for ${req.user.userId}`);
 
-    const accountSummary = {}; // { username: { wins: 0, losses: 0 } }
+    const accountSummary = {}; 
+    // { username: { wins: 0, losses: 0, parent: '', cricketWins: 0, cricketLosses: 0, casinoWins: 0, casinoLosses: 0 } }
 
     txs.forEach(tx => {
-      let sourceName = 'Unknown';
-      let parentName = 'Unknown';
-      
-      // New format: "... from bettor | parent (X%)"
-      const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
-      if (match) {
-        sourceName = match[1].trim();
-        parentName = match[2].trim();
-      } else {
-        // Fallback for old format: "... from name (X%)"
-        const oldMatch = tx.description.match(/from (.*?)(?: \(|$)/);
-        if (oldMatch) {
-          sourceName = oldMatch[1].trim();
-          parentName = 'Legacy';
+      console.log(`[DEBUG REPORT] tx: ${tx._id}, category: ${tx.category}, desc: ${tx.description}`);
+      let sourceName = tx.bettor || 'Unknown';
+      let parentName = 'Hierarchy';
+
+      if (!tx.bettor) {
+        const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
+        if (match) {
+          sourceName = match[1].trim();
+          parentName = match[2].trim();
+        } else {
+          const oldMatch = tx.description.match(/from (.*?)(?: \(|$)/);
+          if (oldMatch) {
+            sourceName = oldMatch[1].trim();
+            parentName = 'Legacy';
+          }
         }
       }
 
+      const isCasino = tx.category === 'casino';
+
       if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = { wins: 0, losses: 0, parent: parentName };
+        accountSummary[sourceName] = { 
+          wins: 0, 
+          losses: 0, 
+          parent: parentName,
+          cricketWins: 0,
+          cricketLosses: 0,
+          casinoWins: 0,
+          casinoLosses: 0
+        };
       }
 
-      // tx.amount is positive for House Profit (Bettor Loss)
-      // tx.amount is negative for House Loss (Bettor Win)
+      const amount = Math.abs(tx.amount);
       if (tx.amount < 0) {
-        // House Loss means User Win -> Green Side
-        accountSummary[sourceName].wins += Math.abs(tx.amount);
+        // Master pays money -> Master Loss (Bettor Win -> Green Side)
+        accountSummary[sourceName].wins += amount;
+        if (isCasino) accountSummary[sourceName].casinoWins += amount;
+        else accountSummary[sourceName].cricketWins += amount;
       } else if (tx.amount > 0) {
-        // House Profit means User Loss -> Red Side
-        accountSummary[sourceName].losses += tx.amount;
+        // Master receives money -> Master Profit (Bettor Loss -> Red Side)
+        accountSummary[sourceName].losses += amount;
+        if (isCasino) accountSummary[sourceName].casinoLosses += amount;
+        else accountSummary[sourceName].cricketLosses += amount;
       }
     });
 
-    const profit = []; // Green Side (Bettor Wins)
-    const loss = [];   // Red Side (Bettor Loses)
+    // Fetch roles for all users in accountSummary
+    const uniqueUsernames = Object.keys(accountSummary);
+    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role').lean();
+    const roleMap = {};
+    usersWithRoles.forEach(u => roleMap[u.username] = u.role);
+
+    const profit = []; // Green Side (Bettor Wins / Master Loss)
+    const loss = [];   // Red Side (Bettor Losses / Master Profit)
 
     Object.keys(accountSummary).forEach(name => {
-      const { wins, losses, parent } = accountSummary[name];
-      if (wins > 0) {
-        profit.push({ name, amount: wins, parent });
-      }
-      if (losses > 0) {
-        loss.push({ name, amount: losses, parent });
+      const s = accountSummary[name];
+      const role = roleMap[name] || 'user';
+      
+      // Netting Logic: Bettor Win - Bettor Loss
+      const totalNet = s.wins - s.losses;
+      const cricketNet = s.cricketWins - s.cricketLosses;
+      const casinoNet = s.casinoWins - s.casinoLosses;
+
+      const reportObj = {
+        name,
+        role,
+        parent: s.parent,
+        amount: Math.abs(totalNet),
+        breakdown: {
+          cricket: { wins: s.cricketWins, losses: s.cricketLosses, net: cricketNet },
+          casino: { wins: s.casinoWins, losses: s.casinoLosses, net: casinoNet },
+          totalNet: totalNet
+        }
+      };
+
+      if (totalNet > 0) {
+        // Net Bettor Win
+        profit.push(reportObj);
+      } else if (totalNet < 0) {
+        // Net Bettor Loss
+        loss.push(reportObj);
       }
     });
 
@@ -740,6 +810,56 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
   } catch (err) {
     console.error("Report Error:", err);
     res.status(500).json({ error: 'Server error fetching report' });
+  }
+});
+
+router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
+  try {
+    const { bettor, type, reportType, date, month, year, startDate: sDate, endDate: eDate } = req.query;
+    
+    if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
+
+    let start, end;
+    if (reportType === 'monthly') {
+      const [y, m] = month.split('-').map(Number);
+      start = new Date(y, m - 1, 1);
+      end = new Date(y, m, 0, 23, 59, 59, 999);
+    } else if (reportType === 'yearly') {
+      const y = parseInt(year);
+      start = new Date(y, 0, 1);
+      end = new Date(y, 11, 31, 23, 59, 59, 999);
+    } else if (reportType === 'range') {
+      start = new Date(sDate);
+      start.setHours(0, 0, 0, 0);
+      end = new Date(eDate);
+      end.setHours(23, 59, 59, 999);
+    } else {
+      const [y, m, d] = date.split('-').map(Number);
+      start = new Date(y, m - 1, d, 0, 0, 0, 0);
+      end = new Date(y, m - 1, d, 23, 59, 59, 999);
+    }
+
+    const query = {
+      userId: req.user.userId,
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] },
+      createdAt: { $gte: start, $lte: end }
+    };
+
+    if (type === 'cricket') {
+      query.category = 'cricket';
+      query.bettor = bettor;
+    } else if (type === 'casino') {
+      query.category = 'casino';
+      query.bettor = bettor;
+    } else {
+      query.bettor = bettor;
+    }
+
+    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    res.json(txs);
+  } catch (err) {
+    console.error("Daily Report Details Error:", err);
+    res.status(500).json({ error: 'Server error' });
   }
 });
 

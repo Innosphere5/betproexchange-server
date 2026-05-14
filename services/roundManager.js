@@ -204,7 +204,7 @@ async function declareResult() {
           );
 
           // Distribute House Loss up the chain
-          await distributeCasinoPL(bet.userId, -netProfit);
+          await distributeCasinoPL(bet.userId, -netProfit, { matchName: currentRound.roundId, selection: bet.choice });
 
           if (user) {
             console.log(`[WINNER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: ${netPayout}`);
@@ -216,7 +216,7 @@ async function declareResult() {
           bet.status = 'LOSE';
           
           // Distribute House Profit up the chain
-          await distributeCasinoPL(bet.userId, bet.amount);
+          await distributeCasinoPL(bet.userId, bet.amount, { matchName: currentRound.roundId, selection: bet.choice });
 
           console.log(`[LOSER] User: ${bet.userId} | Choice: ${bet.choice} | Bet: ${bet.amount} | Payout: 0`);
           io.emit('casino_wallet_payout', { userId: bet.userId, amount: bet.amount, choice: bet.choice, result: 'LOSE' });

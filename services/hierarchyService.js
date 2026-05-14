@@ -6,8 +6,9 @@ const Transaction = require('../models/Transaction');
  * @param {string} username - The username of the bettor.
  * @param {number} amount - Total amount to distribute (House Profit +ve, House Loss -ve).
  * @param {boolean} isCasino - Whether this is a casino bet (affects commission logic).
+ * @param {object} matchDetails - { matchName, selection }
  */
-async function distributePL(username, amount, isCasino = false) {
+async function distributePL(username, amount, isCasino = false, matchDetails = null) {
     if (amount === 0) return;
 
     try {
@@ -62,11 +63,20 @@ async function distributePL(username, amount, isCasino = false) {
                 console.log(`[HIERARCHY] Deducting commission from SuperAdmin ${user.username} (${earnings.toFixed(2)} -> ${(earnings - commissionAmount).toFixed(2)})`);
                 earnings -= commissionAmount;
                 
+                let pDesc = isCasino ? 'Casino Game' : 'Cricket Match';
+                if (matchDetails && matchDetails.matchName) {
+                    pDesc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
+                }
+
                 await Transaction.create({
                     userId: user.username,
                     amount: commissionAmount,
                     type: 'PLATFORM_COMMISSION',
-                    description: `Casino Platform Commission from ${username} | ${downlineName}`,
+                    description: pDesc,
+                    matchName: matchDetails?.matchName || (isCasino ? 'Casino Game' : 'Cricket Match'),
+                    selection: matchDetails?.selection,
+                    category: isCasino ? 'casino' : 'cricket',
+                    bettor: username,
                     performedBy: 'SYSTEM'
                 });
             }
@@ -74,11 +84,20 @@ async function distributePL(username, amount, isCasino = false) {
             if (earnings !== 0) {
                 await User.findByIdAndUpdate(user._id, { $inc: { walletBalance: earnings } });
                 
+                let desc = isCasino ? 'Casino Game' : 'Cricket Match';
+                if (matchDetails && matchDetails.matchName) {
+                    desc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
+                }
+
                 await Transaction.create({
                     userId: user.username,
                     amount: earnings,
                     type: 'COMMISSION_SHARE',
-                    description: `${isCasino ? 'Casino' : 'Cricket'} Share from ${username} | ${downlineName} (${shareDiff}%)`,
+                    description: desc,
+                    matchName: matchDetails?.matchName || (isCasino ? 'Casino Game' : 'Cricket Match'),
+                    selection: matchDetails?.selection,
+                    category: isCasino ? 'casino' : 'cricket',
+                    bettor: username,
                     performedBy: 'SYSTEM'
                 });
 
@@ -98,15 +117,15 @@ async function distributePL(username, amount, isCasino = false) {
 /**
  * distributeProfitLoss - Legacy wrapper for Cricket/General
  */
-async function distributeProfitLoss(username, amount) {
-    return distributePL(username, amount, false);
+async function distributeProfitLoss(username, amount, matchDetails = null) {
+    return distributePL(username, amount, false, matchDetails);
 }
 
 /**
  * distributeCasinoPL - Specific wrapper for Casino
  */
-async function distributeCasinoPL(username, amount) {
-    return distributePL(username, amount, true);
+async function distributeCasinoPL(username, amount, matchDetails = null) {
+    return distributePL(username, amount, true, matchDetails);
 }
 
 module.exports = { distributeProfitLoss, distributeCasinoPL };

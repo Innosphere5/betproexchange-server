@@ -82,7 +82,7 @@ const settleMatch = async (matchId, winningTeam, io) => {
 
                 // House Loss = (Net Win for user) - (Initial Stake already deducted)
                 const houseLoss = -(netWin - bet.stake);
-                await distributeProfitLoss(bet.userId, houseLoss);
+                await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner });
 
                 console.log(`[BET WIN] User: ${bet.userId} won ${netWin.toFixed(2)} (Gross: ${grossWin}, Comm: ${commission.toFixed(2)})`);
 
@@ -107,7 +107,7 @@ const settleMatch = async (matchId, winningTeam, io) => {
                 await bet.save();
 
                 // House Profit = Initial Stake
-                await distributeProfitLoss(bet.userId, bet.stake);
+                await distributeProfitLoss(bet.userId, bet.stake, { matchName: bet.matchName, selection: bet.runner });
 
                 console.log(`[BET LOSE] User: ${bet.userId} lost stake of ${bet.stake}`);
 

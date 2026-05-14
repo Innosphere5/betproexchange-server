@@ -1,11 +1,15 @@
 const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
-  userId: { type: String, required: true }, // Using username consistent with other models
+  userId: { type: String, required: true }, // The user who gets/loses the money
   amount: { type: Number, required: true },
   type: { type: String, default: 'LOAD_BALANCE' },
   description: { type: String },
-  performedBy: { type: String }, // Username of the admin/master
+  matchName: { type: String },    // For Cricket/Casino event name
+  selection: { type: String },    // For Team/Choice (A/B)
+  category: { type: String, enum: ['cricket', 'casino', 'wallet'], default: 'cricket' },
+  bettor: { type: String },       // The original user who placed the bet
+  performedBy: { type: String },  // Username of the admin/master
   createdAt: { type: Date, default: Date.now }
 });
 
