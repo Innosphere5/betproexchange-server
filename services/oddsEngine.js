@@ -4,7 +4,7 @@ const oddsApiService = require('./oddsApiService');
 require('dotenv').config();
 
 // ALLOWED BOOKMAKERS FOR THIS STARTER PLAN KEY
-const ALLOWED_BOOKMAKERS = 'Betfair Exchange,SingBet,Bet365,1xbet,Stake';
+const ALLOWED_BOOKMAKERS = 'Betfair Exchange,Bet365,12bet,Orbit Exchange,SkyExchange';
 
 let ioInstance = null;
 const STALE_TIMEOUT_MS = 60000;
@@ -162,22 +162,16 @@ async function handleOddsUpdate(eventData, providedMatchId = null) {
                     const found = bookmakers[bmName].find(m => m.name === 'ML' || m.name === 'Match Winner' || m.name === 'h2h' || m.name === 'Winner');
                     if (found && found.odds && found.odds[0]) {
                         const odds = found.odds[0];
-                        const backA = Number(odds.home || odds.back || 0);
-                        const backB = Number(odds.away || odds.backAway || 0);
-                        
-                        if (backA > bestA) {
-                            bestA = backA;
-                            layA = Number(odds.layHome || odds.lay || 0);
-                            depthBackA = odds.depthHome || odds.depthBack || 0;
-                            depthLayA = odds.depthLayHome || odds.depthLay || 0;
-                            selectedBM = bmName;
-                        }
-                        if (backB > bestB) {
-                            bestB = backB;
-                            layB = Number(odds.layAway || odds.lay || 0);
-                            depthBackB = odds.depthAway || odds.depthBackAway || 0;
-                            depthLayB = odds.depthLayAway || odds.depthLay || 0;
-                        }
+                        bestA = Number(odds.home || odds.back || 0);
+                        bestB = Number(odds.away || odds.backAway || 0);
+                        layA = Number(odds.layHome || odds.lay || 0);
+                        layB = Number(odds.layAway || odds.lay || 0);
+                        depthBackA = odds.depthHome || odds.depthBack || 0;
+                        depthLayA = odds.depthLayHome || odds.depthLay || 0;
+                        depthBackB = odds.depthAway || odds.depthBackAway || 0;
+                        depthLayB = odds.depthLayAway || odds.depthLay || 0;
+                        selectedBM = bmName;
+                        break; // Stop immediately to avoid mixing odds from different bookmakers
                     }
                 }
             }

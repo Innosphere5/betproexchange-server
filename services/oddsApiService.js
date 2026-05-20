@@ -89,6 +89,7 @@ class OddsApiService {
             try {
                 // Log request for monitoring
                 console.log(`[OddsAPI] 🚀 Fetching ${request.endpoint} | Priority: ${request.priority} | Queue: ${this.queue.length}`);
+                console.log(`[OddsAPI] Params:`, JSON.stringify({ ...request.params, apiKey: '***' }));
                 
                 const response = await axios.get(url, {
                     params: request.params,

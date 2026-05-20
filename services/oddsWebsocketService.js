@@ -6,7 +6,7 @@ require('dotenv').config();
 // CONFIGURATION
 const API_KEY = process.env.ODDS_API_KEY;
 const WS_URL = `wss://api.odds-api.io/v3/ws?apiKey=${API_KEY}&sport=cricket&markets=ML&status=live&status=prematch`;
-const ALLOWED_BOOKMAKERS = ['Betfair Exchange', 'Bet365', 'Stake', '1xBet', 'SBOBET'];
+const ALLOWED_BOOKMAKERS = ['Betfair Exchange', 'Bet365', '12bet', 'Orbit Exchange', 'SkyExchange'];
 
 class OddsWebsocketService {
     constructor() {
