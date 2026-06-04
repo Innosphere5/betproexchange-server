@@ -1,3 +1,8 @@
+/**
+ * @deprecated — This service used the old odds-api.io v3 WebSocket API.
+ * It has been replaced by oddsPapiService.js which uses OddsPapi v5.
+ * Kept for reference only. Do NOT import this file.
+ */
 const WebSocket = require('ws');
 const Match = require('../models/Match');
 const OddsMarket = require('../models/OddsMarket');
@@ -13,11 +18,13 @@ class OddsWebsocketService {
         this.ws = null;
         this.io = null;
         this.reconnectAttempts = 0;
-        this.maxReconnectDelay = 30000; // 30 seconds
-        this.cache = new Map(); // matchId -> { odds, timestamp }
-        this.eventMapping = new Map(); // oddsApiEventId -> sportmonksMatchId
-        this.writeQueue = new Map(); // matchId -> updateData
-        this.writeInterval = setInterval(() => this.flushWriteQueue(), 1000); // Throttle DB writes to every 1 second
+        this.maxReconnectAttempts = 3;
+        this.maxReconnectDelay = 30000;
+        this.wsDisabled = false;
+        this.cache = new Map();
+        this.eventMapping = new Map();
+        this.writeQueue = new Map();
+        this.writeInterval = setInterval(() => this.flushWriteQueue(), 1000);
     }
 
     init(io) {
@@ -88,6 +95,12 @@ class OddsWebsocketService {
     }
 
     reconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            console.warn('[OddsWS] ⛔ Max reconnect attempts reached. WebSocket disabled — your plan may not include WS access. REST polling will handle all odds updates.');
+            this.wsDisabled = true;
+            clearInterval(this.writeInterval);
+            return;
+        }
         const delay = Math.min(Math.pow(2, this.reconnectAttempts) * 1000, this.maxReconnectDelay);
         this.reconnectAttempts++;
         setTimeout(() => this.connect(), delay);

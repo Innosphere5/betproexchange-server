@@ -1,3 +1,8 @@
+/**
+ * @deprecated — This engine used the old odds-api.io v3 REST polling.
+ * It has been replaced by oddsPapiService.js which uses OddsPapi v5.
+ * Kept for reference only. Do NOT import this file.
+ */
 const Match = require('../models/Match');
 const MarketOdds = require('../models/MarketOdds');
 const oddsApiService = require('./oddsApiService');
@@ -9,6 +14,9 @@ const ALLOWED_BOOKMAKERS = 'Betfair Exchange,Bet365,12bet,Orbit Exchange,SkyExch
 let ioInstance = null;
 const STALE_TIMEOUT_MS = 60000;
 const pendingFetches = new Set();
+
+// Priority leagues get faster polling: IPL, PSL, International cricket
+const PRIORITY_LEAGUE_IDS = [1, 2, 3, 5, 10, 11, 12, 13, 17, 258];
 
 // ─── Normalization & Mapping ───────────────────────────────────────────────────
 
@@ -171,7 +179,7 @@ async function handleOddsUpdate(eventData, providedMatchId = null) {
                         depthBackB = odds.depthAway || odds.depthBackAway || 0;
                         depthLayB = odds.depthLayAway || odds.depthLay || 0;
                         selectedBM = bmName;
-                        break; // Stop immediately to avoid mixing odds from different bookmakers
+                        break;
                     }
                 }
             }
@@ -275,31 +283,32 @@ async function pollAllActiveOdds() {
             const isLive = match.status === 'live';
             const isToday = matchStartTime >= todayStart && matchStartTime < todayEnd;
 
-            // Only poll if the match is LIVE or starts TODAY
             if (!isLive && !isToday) continue;
 
+            // Priority-based polling: IPL/PSL/International get fast updates
+            const isPriority = PRIORITY_LEAGUE_IDS.includes(match.leagueId);
             const lastUpdate = new Date(market.updatedAt).getTime();
-            const waitTime = isLive ? 1000 : 5000; 
+
+            // Live: 1s all matches | Upcoming priority: 2s | Upcoming others: 15s
+            const waitTime = isLive ? 1000 : (isPriority ? 2000 : 15000);
+            // Live: highest priority | Priority upcoming: medium | Others: low
+            const queuePriority = isLive ? 10 : (isPriority ? 5 : 1);
 
             if (now.getTime() - lastUpdate < waitTime) continue;
             if (pendingFetches.has(market.matchId)) continue;
 
-            console.log(`[Odds Engine] 🔄 Queuing ${match.status} odds poll for ${match.teamA} v ${match.teamB}...`);
-            
             pendingFetches.add(market.matchId);
             oddsApiService.fetch('odds', { 
                 eventId: market.oddsApiEventId,
                 bookmakers: ALLOWED_BOOKMAKERS
-            }, isLive ? 10 : 1)
+            }, queuePriority)
             .then(async (data) => {
                 if (data) {
-                    const eventData = data;
-                    // For polling, we already know the matchId
-                    await handleOddsUpdate(eventData, market.matchId);
+                    await handleOddsUpdate(data, market.matchId);
                 }
             })
             .catch(err => {
-                console.error(`[Odds Engine] Polling failed for ${market.matchId}: ${err.message}`);
+                console.error(`[Odds Engine] Poll failed for ${market.matchId}: ${err.message}`);
             })
             .finally(() => {
                 pendingFetches.delete(market.matchId);
@@ -312,11 +321,11 @@ async function pollAllActiveOdds() {
 
 async function syncEvents() {
     try {
-        console.log('[Odds Engine] 🔄 Syncing fixtures from Odds API...');
         const data = await oddsApiService.fetch('events', { 
             sport: 'cricket', 
-            status: 'pending,live' 
-        }, 5); // Priority 5 for global sync
+            status: 'pending,live',
+            bookmakers: ALLOWED_BOOKMAKERS
+        }, 5);
 
         if (data && Array.isArray(data)) {
             for (const event of data) {
@@ -349,7 +358,7 @@ function initOddsEngine(io) {
     ioInstance = io;
     syncEvents();
     setInterval(pollAllActiveOdds, 1000); 
-    setInterval(syncEvents, 120000); 
+    setInterval(syncEvents, 180000); // Event discovery every 3 min (individual polling handles freshness)
     setInterval(checkStaleOdds, 20000);
 }
 

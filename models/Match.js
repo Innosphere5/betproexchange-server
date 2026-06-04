@@ -31,7 +31,8 @@ const matchSchema = new mongoose.Schema({
   depthLayA: { type: String, default: null },
   depthBackB: { type: String, default: null },
   depthLayB: { type: String, default: null },
-  isPriority: { type: Boolean, default: false }, // Pin IPL, PSL, Int'l matches
+  marketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
+  isPriority: { type: Boolean, default: false },
   lastUpdated: { type: Date, default: Date.now }
 
 });

@@ -67,12 +67,9 @@ mongoose.connect(process.env.MONGO_URI, {
     initLiveScoreJob(io);
     const { initSettlementJob } = require('./jobs/settlementJob');
     initSettlementJob(io);
-    // Initialize Real-Time Odds Engine (WebSocket & Polling)
-    const oddsWebsocketService = require('./services/oddsWebsocketService');
-    oddsWebsocketService.init(io);
-
-    const oddsEngine = require('./services/oddsEngine');
-    oddsEngine.initOddsEngine(io);
+    // Initialize OddsPapi v5 Real-Time Odds (WebSocket + REST recovery)
+    const oddsPapiService = require('./services/oddsPapiService');
+    oddsPapiService.init(io);
 
     // START SERVER ONLY AFTER DB IS READY
     server.listen(PORT, '0.0.0.0', () => {

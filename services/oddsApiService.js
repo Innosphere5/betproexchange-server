@@ -19,9 +19,10 @@ class OddsApiService {
         
         // BUDGET CALCULATION:
         // 5000 requests / 3600 seconds = 1.38 requests per second.
-        // We target 1.25 requests per second (4500/hour) for a safety margin.
-        // Interval = 1000ms / 1.25 = 800ms.
-        this.minIntervalMs = 800; 
+        // We target ~1.42 requests per second (~5140/hour).
+        // Interval = 1000ms / 1.42 = 700ms.
+        // Safe because not all slots are used (polling checks waitTime before queuing).
+        this.minIntervalMs = 700; 
         this.lastRequestTime = 0;
     }
 
@@ -75,13 +76,9 @@ class OddsApiService {
             const url = `${baseUrl}/${request.endpoint}`;
 
             try {
-                // Log request for monitoring
-                console.log(`[OddsAPI] 🚀 Fetching ${request.endpoint} | Priority: ${request.priority} | Queue: ${this.queue.length}`);
-                console.log(`[OddsAPI] Params:`, JSON.stringify({ ...request.params, apiKey: '***' }));
-                
                 const response = await axios.get(url, {
                     params: request.params,
-                    timeout: 10000
+                    timeout: 5000
                 });
 
                 request.resolve(response.data);
