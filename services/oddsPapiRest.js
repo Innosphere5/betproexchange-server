@@ -64,6 +64,11 @@ class OddsPapiRest {
         return this.request('fixtures', params);
     }
 
+    async getFixturesForDate(dateStr, params = {}) {
+        // dateStr: 'YYYY-MM-DD' — fetches all fixtures scheduled on that date
+        return this.request('fixtures', { date: dateStr, ...params });
+    }
+
     async getFixturesLive(params = {}) {
         return this.request('fixtures/live', params);
     }

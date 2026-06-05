@@ -61,11 +61,15 @@ class OddsPapiService {
         // Periodic REST poll: re-fetch odds for all linked live fixtures every 30s
         // This acts as a safety net when the WebSocket misses fixtures
         this.restPollInterval = setInterval(() => this.pollLinkedFixtures(), 30000);
+        // Periodic poll for upcoming (pre-game) fixtures every 5 minutes
+        // Keeps pre-match odds fresh and links new upcoming matches as they appear
+        this.upcomingPollInterval = setInterval(() => this.pollUpcomingFixtures(), 5 * 60 * 1000);
 
         console.log('[OddsPapi] 🚀 Initializing OddsPapi v5 integration...');
         console.log(`[OddsPapi] 📌 Cricket sportId: ${CRICKET_SPORT_ID}`);
         console.log(`[OddsPapi] 📌 Bookmakers: ${BOOKMAKERS.join(', ')}`);
         console.log(`[OddsPapi] 📌 Primary: betfair-ex (exchange) | Fallback: pinnacle`);
+        console.log(`[OddsPapi] 📌 Upcoming odds poll: every 5 minutes`);
 
         this.connect();
     }
@@ -272,45 +276,117 @@ class OddsPapiService {
 
             if (!fixtures || !Array.isArray(fixtures)) {
                 console.warn('[OddsPapi] ⚠️ No fixtures returned for bootstrap');
-                return;
-            }
+            } else {
+                let linked = 0;
+                for (const fixture of fixtures) {
+                    if (!fixture.fixtureId) continue;
 
-            let linked = 0;
-            for (const fixture of fixtures) {
-                if (!fixture.fixtureId) continue;
+                    // Store metadata from REST response
+                    await this.handleFixtureUpdate(fixture);
 
-                // Store metadata from REST response
-                await this.handleFixtureUpdate(fixture);
-
-                // Try to link to DB match
-                const matchId = await this.linkFixtureToMatch(fixture.fixtureId);
-                if (matchId) linked++;
-            }
-
-            console.log(`[OddsPapi] 📸 Bootstrap complete: ${fixtures.length} fixtures loaded, ${linked} linked to DB matches`);
-
-            // Also fetch initial odds snapshot for linked fixtures
-            for (const [fixtureId, matchId] of this.fixtureToMatchId.entries()) {
-                try {
-                    const oddsData = await oddsPapiRest.getFixtureOdds(fixtureId, BOOKMAKERS);
-                    if (oddsData && oddsData.odds) {
-                        await this.handleOddsUpdate({
-                            fixtureId: fixtureId,
-                            odds: oddsData.odds
-                        });
-                    }
-                } catch (err) {
-                    // Non-fatal: WebSocket will deliver live updates
+                    // Try to link to DB match
+                    const matchId = await this.linkFixtureToMatch(fixture.fixtureId);
+                    if (matchId) linked++;
                 }
+
+                console.log(`[OddsPapi] 📸 Today bootstrap complete: ${fixtures.length} fixtures loaded, ${linked} linked to DB matches`);
+
+                // Fetch initial odds snapshot for linked fixtures
+                for (const [fixtureId] of this.fixtureToMatchId.entries()) {
+                    try {
+                        const oddsData = await oddsPapiRest.getFixtureOdds(fixtureId, BOOKMAKERS);
+                        if (oddsData && oddsData.odds) {
+                            await this.handleOddsUpdate({
+                                fixtureId,
+                                odds: oddsData.odds
+                            });
+                        }
+                    } catch (err) {
+                        // Non-fatal: WebSocket will deliver live updates
+                    }
+                }
+
+                console.log('[OddsPapi] 📸 Initial odds snapshot complete');
             }
 
-            console.log('[OddsPapi] 📸 Initial odds snapshot complete');
+            // Also bootstrap upcoming (next 2 days) fixtures for pre-match odds
+            await this.bootstrapUpcomingFixtures();
 
             // Also recover fixtures already linked in DB (MarketOdds/OddsMarket)
             // These might not appear in fixtures/today but still have valid odds
             await this.recoverLinkedFixtures();
         } catch (err) {
             console.error('[OddsPapi] ❌ Bootstrap failed:', err.message);
+        }
+    }
+
+    async bootstrapUpcomingFixtures() {
+        console.log('[OddsPapi] 📅 Bootstrapping upcoming fixtures (next 2 days) for pre-match odds...');
+
+        try {
+            // Build date range: today + next 2 days
+            const dates = [];
+            for (let i = 0; i <= 2; i++) {
+                const d = new Date(Date.now() + i * 24 * 60 * 60 * 1000);
+                dates.push(d.toISOString().split('T')[0]);
+            }
+
+            // Fetch upcoming DB matches so we know what to look for
+            const upcomingMatches = await Match.find({ status: 'upcoming' });
+            if (upcomingMatches.length === 0) {
+                console.log('[OddsPapi] 📅 No upcoming DB matches to link — skipping upcoming bootstrap');
+                return;
+            }
+
+            console.log(`[OddsPapi] 📅 ${upcomingMatches.length} upcoming DB matches to link`);
+
+            let totalLinked = 0;
+
+            for (const dateStr of dates) {
+                try {
+                    const fixtures = await oddsPapiRest.getFixturesForDate(dateStr, {
+                        sportId: CRICKET_SPORT_ID,
+                        bookmakers: BOOKMAKERS.join(',')
+                    });
+
+                    const fixtureList = Array.isArray(fixtures)
+                        ? fixtures
+                        : (fixtures && Array.isArray(fixtures.data) ? fixtures.data : []);
+
+                    for (const fixture of fixtureList) {
+                        if (!fixture || !fixture.fixtureId) continue;
+                        if (fixture.sport && fixture.sport.sportId !== CRICKET_SPORT_ID) continue;
+
+                        // Store fixture metadata
+                        await this.handleFixtureUpdate(fixture);
+
+                        // Try to link to a DB upcoming match
+                        const matchId = await this.linkFixtureToMatch(fixture.fixtureId);
+                        if (matchId) {
+                            totalLinked++;
+
+                            // Fetch pre-match odds immediately
+                            try {
+                                const oddsData = await oddsPapiRest.getFixtureOdds(fixture.fixtureId, BOOKMAKERS);
+                                if (oddsData && oddsData.odds) {
+                                    await this.handleOddsUpdate({
+                                        fixtureId: fixture.fixtureId,
+                                        odds: oddsData.odds
+                                    });
+                                }
+                            } catch (err) {
+                                // Non-fatal: odds may not yet be available for far-future matches
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`[OddsPapi] ⚠️ Could not fetch fixtures for date ${dateStr}:`, err.message);
+                }
+            }
+
+            console.log(`[OddsPapi] 📅 Upcoming bootstrap complete: ${totalLinked} fixtures linked`);
+        } catch (err) {
+            console.error('[OddsPapi] ❌ Upcoming bootstrap failed:', err.message);
         }
     }
 
@@ -1013,7 +1089,7 @@ class OddsPapiService {
 
     async pollLinkedFixtures() {
         try {
-            // Re-fetch odds for all linked live fixtures via REST
+            // Re-fetch odds for all linked LIVE fixtures via REST
             // This is a safety net for when the WebSocket doesn't stream certain fixtures
             const liveMatches = await Match.find({ status: 'live' });
             if (liveMatches.length === 0) return;
@@ -1035,7 +1111,52 @@ class OddsPapiService {
                 }
             }
         } catch (err) {
-            console.error('[OddsPapi] ❌ REST poll failed:', err.message);
+            console.error('[OddsPapi] ❌ REST live poll failed:', err.message);
+        }
+    }
+
+    async pollUpcomingFixtures() {
+        try {
+            // Re-fetch pre-match odds for all linked UPCOMING fixtures
+            // Runs every 5 minutes — pre-game odds change slowly
+            const upcomingMatches = await Match.find({ status: 'upcoming' });
+            if (upcomingMatches.length === 0) return;
+
+            const upcomingMatchIds = new Set(upcomingMatches.map(m => m.matchId));
+            let polled = 0;
+
+            for (const [fixtureId, matchId] of this.fixtureToMatchId.entries()) {
+                if (!upcomingMatchIds.has(matchId)) continue;
+
+                try {
+                    const oddsData = await oddsPapiRest.getFixtureOdds(fixtureId, BOOKMAKERS);
+                    if (oddsData && oddsData.odds) {
+                        await this.handleOddsUpdate({
+                            fixtureId,
+                            odds: oddsData.odds
+                        });
+                        polled++;
+                    }
+                } catch (err) {
+                    // Non-fatal
+                }
+            }
+
+            // Also try to link any unlinked upcoming matches (new ones added since bootstrap)
+            const unlinkedUpcoming = upcomingMatches.filter(
+                m => !Array.from(this.fixtureToMatchId.values()).includes(m.matchId)
+            );
+
+            if (unlinkedUpcoming.length > 0) {
+                console.log(`[OddsPapi] 📅 Attempting to link ${unlinkedUpcoming.length} unlinked upcoming matches...`);
+                await this.bootstrapUpcomingFixtures();
+            }
+
+            if (polled > 0) {
+                console.log(`[OddsPapi] 📅 Polled pre-match odds for ${polled} upcoming fixtures`);
+            }
+        } catch (err) {
+            console.error('[OddsPapi] ❌ REST upcoming poll failed:', err.message);
         }
     }
 
@@ -1045,6 +1166,7 @@ class OddsPapiService {
         if (this.writeInterval) clearInterval(this.writeInterval);
         if (this.staleCheckInterval) clearInterval(this.staleCheckInterval);
         if (this.restPollInterval) clearInterval(this.restPollInterval);
+        if (this.upcomingPollInterval) clearInterval(this.upcomingPollInterval);
         if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
         if (this.ws) {
             this.ws.removeAllListeners();
