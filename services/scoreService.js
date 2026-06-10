@@ -12,7 +12,7 @@ const updateLiveScores = async (io) => {
     try {
         // 1. Fetch live scores from API with balls for "This Over" logic
         const response = await getData('livescores', {
-            include: 'runs,balls,scoreboards,localteam,visitorteam'
+            include: 'runs,balls,scoreboards,localteam,visitorteam,league'
         });
 
         if (!response || !Array.isArray(response.data) || response.data.length === 0) {
@@ -23,9 +23,23 @@ const updateLiveScores = async (io) => {
 
         for (const liveData of response.data) {
             const matchId = liveData.id.toString();
-            const matchInDb = await Match.findOne({ matchId });
+            let matchInDb = await Match.findOne({ matchId });
 
-            if (!matchInDb) continue;
+            if (!matchInDb) {
+                // Upsert new live match if it was missed by matchService filtering
+                matchInDb = await Match.create({
+                    matchId: matchId,
+                    leagueId: liveData.league_id,
+                    teamA: liveData.localteam?.name || 'Local Team',
+                    teamB: liveData.visitorteam?.name || 'Visitor Team',
+                    league: liveData.league?.name || 'Unknown League',
+                    startTime: new Date(liveData.starting_at || Date.now()),
+                    status: 'live',
+                    sportKey: 'cricket_international',
+                    lastUpdated: new Date()
+                });
+                console.log(`[ScoreService] Automatically added missing LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
+            }
 
             const runs = liveData.runs || [];
             const balls = liveData.balls || [];

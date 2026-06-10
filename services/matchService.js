@@ -28,11 +28,12 @@ const fetchUpcomingMatches = async (io) => {
         }
 
         const today = new Date().toISOString().split('T')[0];
-        const twoDaysLater = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        const lookaheadDays = 7;
+        const endDate = new Date(Date.now() + lookaheadDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
         const response = await getData('fixtures', {
             filter: {
-                'filter[starts_between]': `${today},${twoDaysLater}`,
+                'filter[starts_between]': `${today},${endDate}`,
             },
             include: 'localteam,visitorteam,league'
         });
@@ -48,7 +49,7 @@ const fetchUpcomingMatches = async (io) => {
         }
 
         // Focused on International (Men and Women)
-        const allowedLeagueIds = [2, 3, 4, 11, 12, 16, 17, 18, 35, 41, 86, 201, 258, 261];
+        const allowedLeagueIds = [2, 3, 4, 11, 12, 16, 17, 18, 19, 35, 41, 86, 141, 201, 258, 261];
 
         // 3. Filter and Map
         let matches = response.data
@@ -71,7 +72,7 @@ const fetchUpcomingMatches = async (io) => {
 
         const todayEnd = new Date(todayStart.getTime() + 24 * 60 * 60 * 1000);
         const todayMatches = upcomingOrLive.filter(m => m.startTime < todayEnd);
-        const futureMatches = upcomingOrLive.filter(m => m.startTime >= todayEnd).slice(0, 10);
+        const futureMatches = upcomingOrLive.filter(m => m.startTime >= todayEnd).slice(0, 30);
 
         const topMatches = [...todayMatches, ...futureMatches];
 
