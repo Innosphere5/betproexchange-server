@@ -6,7 +6,8 @@ const { getData } = require('./apiManager');
  * 
  * Migrated to Sportmonks Cricket API v2.0.
  * Fetches fixtures for today and next 2 days.
- * Filters for IPL (5), PSL (3), and International (10, 11, 12).
+ * Filters for International Matches (Men/Women, ODI/T20/Test/World Cups/Asia Cup).
+ * Removed IPL and PSL focus.
  * Keeps only top 6 matches sorted by start time.
  */
 const fetchUpcomingMatches = async (io) => {
@@ -46,7 +47,8 @@ const fetchUpcomingMatches = async (io) => {
             console.log(`[MatchService] Sample Data (First 3):`, response.data.slice(0, 3).map(f => ({ id: f.id, league: f.league?.name, status: f.status })));
         }
 
-        const allowedLeagueIds = [1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 17, 18, 23, 41, 138, 201, 258, 261];
+        // Focused on International (Men and Women)
+        const allowedLeagueIds = [2, 3, 4, 11, 12, 16, 17, 18, 35, 41, 86, 201, 258, 261];
 
         // 3. Filter and Map
         let matches = response.data

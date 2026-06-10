@@ -84,9 +84,11 @@ const updateLiveScores = async (io) => {
                 .filter(b => b.ball >= (currentOverNumber - 1) && b.ball < currentOverNumber)
                 .sort((a, b) => a.ball - b.ball)
                 .map(b => {
-                    if (b.wicket_id) return 'W';
-                    if (b.extra_runs > 0) return `${b.runs + b.extra_runs} (Ex)`;
-                    return String(b.runs);
+                    if (b.score?.is_wicket || b.batsmanout_id) return 'W';
+                    const runs = b.score?.runs || 0;
+                    const isExtra = b.score?.bye > 0 || b.score?.leg_bye > 0 || b.score?.noball > 0 || (b.score?.name && b.score.name.toLowerCase().includes('wide'));
+                    if (isExtra) return `${runs} (Ex)`;
+                    return String(runs);
                 });
 
             // Map runs to teams for DB storage
