@@ -10,14 +10,15 @@ router.post('/register', async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    let user = await User.findOne({ username });
+    const normalizedUsername = username.toLowerCase();
+    let user = await User.findOne({ username: normalizedUsername });
     if (user) return res.status(400).json({ error: 'User already exists' });
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
     user = new User({
-      username,
+      username: normalizedUsername,
       password: hashedPassword
     });
 
@@ -38,8 +39,8 @@ router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Case-insensitive username lookup
-    const user = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    // Exact lookup using lowercase
+    const user = await User.findOne({ username: username.toLowerCase() });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
     if (user.status === 'inactive') {

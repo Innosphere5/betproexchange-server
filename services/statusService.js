@@ -25,8 +25,10 @@ const updateMatchStatuses = async (io) => {
 
                 // Immediately sync with UI so "LIVE" badge appears
                 if (io) {
-                    const allMatches = await Match.find().sort({ startTime: 1 });
-                    io.emit('matches_updated', allMatches);
+                    io.emit('live_score_update', {
+                        matchId: match.matchId,
+                        status: newStatus
+                    });
                 }
             }
         }

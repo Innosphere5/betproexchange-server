@@ -46,7 +46,12 @@ app.use('/api/admin', adminRoutes);
 mongoose.set('bufferCommands', true);
 
 mongoose.connect(process.env.MONGO_URI, {
-  autoIndex: true,
+  autoIndex: false,
+  maxPoolSize: 10,
+  minPoolSize: 2,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000,
+  heartbeatFrequencyMS: 10000,
 })
   .then(async () => {
     console.log('✅ MongoDB connected successfully');
@@ -67,9 +72,9 @@ mongoose.connect(process.env.MONGO_URI, {
     initLiveScoreJob(io);
     const { initSettlementJob } = require('./jobs/settlementJob');
     initSettlementJob(io);
-    // Initialize OddsPapi v5 Real-Time Odds (WebSocket + REST recovery)
-    const oddsPapiService = require('./services/oddsPapiService');
-    oddsPapiService.init(io);
+    // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)
+    const oddsApiLiveService = require('./services/oddsApiLiveService');
+    oddsApiLiveService.init(io);
 
     // START SERVER ONLY AFTER DB IS READY
     server.listen(PORT, '0.0.0.0', () => {

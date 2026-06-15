@@ -11,7 +11,7 @@ require('dotenv').config();
 // CONFIGURATION
 const API_KEY = process.env.ODDS_API_KEY;
 const WS_URL = `wss://api.odds-api.io/v3/ws?apiKey=${API_KEY}&sport=cricket&markets=ML&status=live&status=prematch`;
-const ALLOWED_BOOKMAKERS = ['Betfair Exchange', 'Bet365', '12bet', 'Orbit Exchange', 'SkyExchange'];
+const ALLOWED_BOOKMAKERS = ['Betfair Exchange', 'Bet365'];
 
 class OddsWebsocketService {
     constructor() {
@@ -211,6 +211,7 @@ class OddsWebsocketService {
                 return { back: b, lay: l, depthBack: db, depthLay: dl };
             };
 
+            const isLive = event.status === 'live';
             const teamA_odds = processRunner(oddsData.home, oddsData.layHome, oddsData.depthHome, oddsData.depthLayHome);
             const teamB_odds = processRunner(oddsData.away, oddsData.layAway, oddsData.depthAway, oddsData.depthLayAway);
 
@@ -240,6 +241,7 @@ class OddsWebsocketService {
                 
                 // Emit to UI instantly via Socket.IO (Matching Frontend Format)
                 if (this.io) {
+                    console.log(`[OddsWS] ⚡ Broadcasting update for ${event.home} v ${event.away} (${sportmonksMatchId})`);
                     this.io.emit('market_odds_update', {
                         matchId: sportmonksMatchId,
                         updatedAt: payload.updatedAt,

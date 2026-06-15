@@ -42,7 +42,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     }
     // superadmin can create admin, master, user (no restriction needed here as role is in enum)
 
-    let existingUser = await User.findOne({ username: { $regex: new RegExp(`^${username}$`, 'i') } });
+    const lowerUsername = username.toLowerCase();
+    let existingUser = await User.findOne({ username: lowerUsername });
     if (existingUser) return res.status(400).json({ error: 'Username already exists' });
 
     const parent = await User.findOne({ username: req.user.userId });
@@ -60,7 +61,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, salt);
 
     const newUser = new User({
-      username,
+      username: lowerUsername,
       password: hashedPassword,
       role,
       share: (role === 'master' || role === 'admin') ? masterShare : 0,
@@ -357,17 +358,17 @@ router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => 
 // Get Dashboard Stats (Match-wise exposure)
 router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
   try {
-    const parent = await User.findOne({ username: req.user.userId });
-    if (!parent) return res.status(404).json({ error: 'User not found' });
-
-    // 1. Get all scheduled/live matches + recently resulted matches (last 24h)
     const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    const activeMatches = await Match.find({ 
-      $or: [
-        { status: { $in: ['scheduled', 'live', 'upcoming'] } },
-        { status: 'resulted', updatedAt: { $gte: twentyFourHoursAgo } }
-      ]
-    }).select('matchId teamA teamB status backOddsA backOddsB layOddsA layOddsB').lean();
+    const [parent, activeMatches] = await Promise.all([
+      User.findOne({ username: req.user.userId }),
+      Match.find({ 
+        $or: [
+          { status: { $in: ['scheduled', 'live', 'upcoming'] } },
+          { status: 'resulted', updatedAt: { $gte: twentyFourHoursAgo } }
+        ]
+      }).select('matchId teamA teamB status backOddsA backOddsB layOddsA layOddsB').lean()
+    ]);
+    if (!parent) return res.status(404).json({ error: 'User not found' });
     
     const matchIds = activeMatches.map(m => m.matchId);
 
@@ -589,13 +590,6 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
     }).sort({ createdAt: -1 });
 
-    console.log(`[FINAL SHEET DEBUG] User: ${currentUser.username}, Found: ${txs.length} transactions`);
-    if (txs.length > 0) {
-      const sample = txs.find(t => t.amount === 250);
-      if (sample) console.log(`[FINAL SHEET DEBUG] Found the 250 tx! Category: ${sample.category}`);
-      else console.log(`[FINAL SHEET DEBUG] 250 tx NOT found in the result set for ${currentUser.username}`);
-    }
-
     const accountSummary = {}; // { "parentName": { wins: 0, losses: 0, name: '' } }
 
     txs.forEach(tx => {
@@ -706,22 +700,14 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
       }
     }
     
-    console.log(`[REPORT DEBUG] User: ${req.user.userId}, Role: ${req.user.role}, reportType: ${reportType}, date: ${date}`);
-    console.log(`[REPORT] Type: ${reportType}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
-    
     query.createdAt = { $gte: startDate, $lte: endDate };
 
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
-    console.log(`[DAILY REPORT DEBUG] User: ${req.user.userId}, Found: ${txs.length} transactions`);
-    const found250 = txs.find(t => t.amount === 250);
-    if (found250) console.log(`[DAILY REPORT DEBUG] Found 250 tx! category: ${found250.category}, bettor: ${found250.bettor}`);
-    else console.log(`[DAILY REPORT DEBUG] 250 tx NOT found in results for ${req.user.userId}`);
 
     const accountSummary = {}; 
     // { username: { wins: 0, losses: 0, parent: '', cricketWins: 0, cricketLosses: 0, casinoWins: 0, casinoLosses: 0 } }
 
     txs.forEach(tx => {
-      console.log(`[DEBUG REPORT] tx: ${tx._id}, category: ${tx.category}, desc: ${tx.description}`);
       let sourceName = tx.bettor || 'Unknown';
       let parentName = 'Hierarchy';
 

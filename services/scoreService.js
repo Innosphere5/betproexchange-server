@@ -133,7 +133,12 @@ const updateLiveScores = async (io) => {
                 }
             }
 
-            const hasChanged = true; // Forcing update to ensure all fields are populated initially
+            const hasChanged = (
+                matchInDb.score?.teamA_runs !== teamA_score ||
+                matchInDb.score?.teamB_runs !== teamB_score ||
+                String(matchInDb.score?.overs) !== String(currentOvers) ||
+                matchInDb.status !== (isFinished ? 'completed' : 'live')
+            );
 
             if (hasChanged) {
                 await Match.updateOne(
@@ -200,8 +205,6 @@ const updateLiveScores = async (io) => {
 
         if (updatedCount > 0 && io) {
             console.log(`[ScoreService] Updated detailed scores for ${updatedCount} matches.`);
-            const allMatches = await Match.find().sort({ startTime: 1 });
-            io.emit('matches_updated', allMatches);
         }
 
     } catch (error) {

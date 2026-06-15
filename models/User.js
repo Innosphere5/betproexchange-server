@@ -22,4 +22,6 @@ const userSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 });
 
+userSchema.index({ parentId: 1 });
+
 module.exports = mongoose.model('User', userSchema);

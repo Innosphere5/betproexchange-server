@@ -9,7 +9,7 @@ const oddsApiService = require('./oddsApiService');
 require('dotenv').config();
 
 // ALLOWED BOOKMAKERS FOR THIS STARTER PLAN KEY
-const ALLOWED_BOOKMAKERS = 'Betfair Exchange,Bet365,12bet,Orbit Exchange,SkyExchange';
+const ALLOWED_BOOKMAKERS = 'Betfair Exchange, Bet365';
 
 let ioInstance = null;
 const STALE_TIMEOUT_MS = 60000;
@@ -289,10 +289,14 @@ async function pollAllActiveOdds() {
             const isPriority = PRIORITY_LEAGUE_IDS.includes(match.leagueId);
             const lastUpdate = new Date(market.updatedAt).getTime();
 
+
             // Live: 1s all matches | Upcoming priority: 2s | Upcoming others: 15s
             const waitTime = isLive ? 1000 : (isPriority ? 2000 : 15000);
             // Live: highest priority | Priority upcoming: medium | Others: low
             const queuePriority = isLive ? 10 : (isPriority ? 5 : 1);
+
+
+ 
 
             if (now.getTime() - lastUpdate < waitTime) continue;
             if (pendingFetches.has(market.matchId)) continue;
@@ -357,9 +361,9 @@ async function checkStaleOdds() {
 function initOddsEngine(io) {
     ioInstance = io;
     syncEvents();
+
     setInterval(pollAllActiveOdds, 1000); 
     setInterval(syncEvents, 180000); // Event discovery every 3 min (individual polling handles freshness)
-    setInterval(checkStaleOdds, 20000);
 }
 
 module.exports = { initOddsEngine };
