@@ -49,6 +49,13 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'Parent user not found' });
 
+    // Share Hierarchy Validation
+    if (req.user.role === 'admin' && role === 'master') {
+      if (masterShare >= parent.share) {
+        return res.status(400).json({ error: `Master share must be less than your share (${parent.share}%)` });
+      }
+    }
+
     // Initial Balance Check
     const balance = parseFloat(initialBalance) || 0;
     // Initial Balance Check (Only SuperAdmin has unlimited spending)
@@ -250,14 +257,11 @@ router.post('/update-user', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only edit Bettors' });
     }
 
-    // Update Share if Master
-    if (target.role === 'master') {
+    // Share is immutable for admin and master roles after creation
+    if ((target.role === 'admin' || target.role === 'master') && share !== undefined) {
       const upShare = parseFloat(share);
-      if (!isNaN(upShare)) {
-        if (upShare < 0 || upShare > 85) {
-          return res.status(400).json({ error: 'Share must be between 0 and 85' });
-        }
-        target.share = upShare;
+      if (!isNaN(upShare) && upShare !== target.share) {
+        return res.status(400).json({ error: 'Share cannot be changed after account creation' });
       }
     }
 
@@ -466,7 +470,7 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
             totalStake += adminStake;
           }
 
-          const COMMISSION_RATE = 0.03;
+          const COMMISSION_RATE = 0.05;
 
           if (isResulted) {
              if (normalizedRunner === normalizedR) {
@@ -578,7 +582,7 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
   }
 });
 
-// Get Final Sheet (Profit/Loss Ledger with simplified account view)
+// Get Final Sheet (Green/Red/Net Ledger - cumulative running totals)
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   try {
     const currentUser = await User.findOne({ username: req.user.userId });
@@ -590,65 +594,80 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
     }).sort({ createdAt: -1 });
 
-    const accountSummary = {}; // { "parentName": { wins: 0, losses: 0, name: '' } }
+    const accountSummary = {}; // { "downlineName": { green: 0, red: 0 } }
 
     txs.forEach(tx => {
-      // Extract source name and parent from description:
-      // "Cricket Share from bettor | parent (25%)"
-      let parentName = tx.bettor || 'Unknown';
+      let sourceName = tx.downline || tx.bettor || 'Unknown';
 
       if (!tx.bettor) {
         const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
         if (match) {
-          parentName = match[2].trim();
+          sourceName = match[1].trim();
         } else {
           const fallbackMatch = tx.description.match(/from (.*?)(?: \(|$)/);
           if (fallbackMatch) {
-            parentName = fallbackMatch[1].trim();
+            sourceName = fallbackMatch[1].trim();
           }
         }
       }
 
-      if (!accountSummary[parentName]) {
-        accountSummary[parentName] = { wins: 0, losses: 0, name: parentName };
+      if (!accountSummary[sourceName]) {
+        accountSummary[sourceName] = { green: 0, red: 0, name: sourceName };
       }
 
-      const amount = Math.abs(tx.amount);
       if (tx.amount > 0) {
-        // Master receives money -> Master Profit (Red Side)
-        accountSummary[parentName].losses += amount;
+        // Positive amount = house profit (bettor lost) = RED side (bettor owes)
+        accountSummary[sourceName].red += tx.amount;
       } else if (tx.amount < 0) {
-        // Master pays money -> Master Loss (Green Side)
-        accountSummary[parentName].wins += amount;
+        // Negative amount = house loss (bettor won) = GREEN side (bettor earned)
+        accountSummary[sourceName].green += Math.abs(tx.amount);
       }
     });
 
-    // 2. Fetch roles for all users in accountSummary to allow frontend filtering
+    // 2. Fetch roles and shares for all users in accountSummary
     const uniqueUsernames = Object.keys(accountSummary);
-    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role').lean();
+    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
     const roleMap = {};
-    usersWithRoles.forEach(u => roleMap[u.username] = u.role);
-
-    const profit = []; // Green Side (Bettor Wins / Master Loss)
-    const loss = [];   // Red Side (Bettor Losses / Master Profit)
-
-    Object.keys(accountSummary).forEach(name => {
-      const { wins, losses } = accountSummary[name];
-      const role = roleMap[name] || 'user'; // Default to user if not found
-      
-      // Netting Logic: green (loss) - red (profit)
-      const net = wins - losses;
-
-      if (net > 0) {
-        // Net Green (Master Loss)
-        profit.push({ name, amount: net, role });
-      } else if (net < 0) {
-        // Net Red (Master Profit)
-        loss.push({ name, amount: Math.abs(net), role });
-      }
+    const shareMap = {};
+    usersWithRoles.forEach(u => {
+      roleMap[u.username] = u.role;
+      shareMap[u.username] = u.share || 0;
     });
 
-    res.json({ profit, loss });
+    const pShare = currentUser.role === 'superadmin' ? 100 : (currentUser.share || 0);
+
+    const accounts = Object.keys(accountSummary).map(name => {
+      const { green: baseGreen, red: baseRed } = accountSummary[name];
+      const role = roleMap[name] || 'user';
+      const childShare = shareMap[name] || 0;
+
+      let green = 0;
+      let red = 0;
+
+      if (pShare > childShare) {
+        green = baseGreen * (100 - childShare) / (pShare - childShare);
+        red = baseRed * (100 - childShare) / (pShare - childShare);
+      } else if (pShare === 100) {
+        green = baseGreen;
+        red = baseRed;
+      }
+
+      return {
+        name,
+        role,
+        green: Math.round(green * 100) / 100,
+        red: Math.round(red * 100) / 100,
+        net: Math.round((green - red) * 100) / 100, // Net = Green(bettor won) - Red(bettor lost). Positive = bettor net win, Negative = bettor net loss
+        myProfit: Math.round((baseGreen - baseRed) * 100) / 100
+      };
+    }).filter(a => {
+      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user'].includes(a.role);
+      if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
+      if (currentUser.role === 'master') return a.role === 'user';
+      return false;
+    });
+
+    res.json({ accounts });
   } catch (err) {
     console.error("Final Sheet Error:", err);
     res.status(500).json({ error: 'Server error fetching final sheet' });
@@ -705,10 +724,10 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
 
     const accountSummary = {}; 
-    // { username: { wins: 0, losses: 0, parent: '', cricketWins: 0, cricketLosses: 0, casinoWins: 0, casinoLosses: 0 } }
+    // { username: { green: 0, red: 0, parent: '', cricketGreen: 0, cricketRed: 0, casinoGreen: 0, casinoRed: 0 } }
 
     txs.forEach(tx => {
-      let sourceName = tx.bettor || 'Unknown';
+      let sourceName = tx.downline || tx.bettor || 'Unknown';
       let parentName = 'Hierarchy';
 
       if (!tx.bettor) {
@@ -729,68 +748,126 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
       if (!accountSummary[sourceName]) {
         accountSummary[sourceName] = { 
-          wins: 0, 
-          losses: 0, 
+          green: 0, 
+          red: 0, 
           parent: parentName,
-          cricketWins: 0,
-          cricketLosses: 0,
-          casinoWins: 0,
-          casinoLosses: 0
+          cricketGreen: 0,
+          cricketRed: 0,
+          casinoGreen: 0,
+          casinoRed: 0
         };
       }
 
       const amount = Math.abs(tx.amount);
-      if (tx.amount < 0) {
-        // Master pays money -> Master Loss (Bettor Win -> Green Side)
-        accountSummary[sourceName].wins += amount;
-        if (isCasino) accountSummary[sourceName].casinoWins += amount;
-        else accountSummary[sourceName].cricketWins += amount;
-      } else if (tx.amount > 0) {
-        // Master receives money -> Master Profit (Bettor Loss -> Red Side)
-        accountSummary[sourceName].losses += amount;
-        if (isCasino) accountSummary[sourceName].casinoLosses += amount;
-        else accountSummary[sourceName].cricketLosses += amount;
+      if (tx.amount > 0) {
+        // Bettor lost = RED side
+        accountSummary[sourceName].red += amount;
+        if (isCasino) accountSummary[sourceName].casinoRed += amount;
+        else accountSummary[sourceName].cricketRed += amount;
+      } else if (tx.amount < 0) {
+        // Bettor won = GREEN side
+        accountSummary[sourceName].green += amount;
+        if (isCasino) accountSummary[sourceName].casinoGreen += amount;
+        else accountSummary[sourceName].cricketGreen += amount;
       }
     });
 
-    // Fetch roles for all users in accountSummary
+    // Fetch roles and shares for all users in accountSummary
     const uniqueUsernames = Object.keys(accountSummary);
-    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role').lean();
+    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
     const roleMap = {};
-    usersWithRoles.forEach(u => roleMap[u.username] = u.role);
+    const shareMap = {};
+    usersWithRoles.forEach(u => {
+      roleMap[u.username] = u.role;
+      shareMap[u.username] = u.share || 0;
+    });
 
-    const profit = []; // Green Side (Bettor Wins / Master Loss)
-    const loss = [];   // Red Side (Bettor Losses / Master Profit)
+    const pShare = currentUser.role === 'superadmin' ? 100 : (currentUser.share || 0);
 
-    Object.keys(accountSummary).forEach(name => {
+    const accounts = Object.keys(accountSummary).map(name => {
       const s = accountSummary[name];
       const role = roleMap[name] || 'user';
+      const childShare = shareMap[name] || 0;
       
-      // Netting Logic: Bettor Win - Bettor Loss
-      const totalNet = s.wins - s.losses;
-      const cricketNet = s.cricketWins - s.cricketLosses;
-      const casinoNet = s.casinoWins - s.casinoLosses;
+      let green = 0; let red = 0;
+      let cricketGreen = 0; let cricketRed = 0;
+      let casinoGreen = 0; let casinoRed = 0;
 
-      const reportObj = {
+      if (pShare > childShare) {
+        const factor = (100 - childShare) / (pShare - childShare);
+        green = s.green * factor;
+        red = s.red * factor;
+        cricketGreen = s.cricketGreen * factor;
+        cricketRed = s.cricketRed * factor;
+        casinoGreen = s.casinoGreen * factor;
+        casinoRed = s.casinoRed * factor;
+      } else if (pShare === 100) {
+        green = s.green; red = s.red;
+        cricketGreen = s.cricketGreen; cricketRed = s.cricketRed;
+        casinoGreen = s.casinoGreen; casinoRed = s.casinoRed;
+      }
+
+      const greenRounded = Math.round(green * 100) / 100;
+      const redRounded = Math.round(red * 100) / 100;
+      const netRounded = Math.round((green - red) * 100) / 100; // Green(bettor won) - Red(bettor lost)
+      const myProfit = Math.round((s.green - s.red) * 100) / 100;
+
+      const cricketGreenR = Math.round(cricketGreen * 100) / 100;
+      const cricketRedR = Math.round(cricketRed * 100) / 100;
+      const cricketNetR = Math.round((cricketGreen - cricketRed) * 100) / 100;
+
+      const casinoGreenR = Math.round(casinoGreen * 100) / 100;
+      const casinoRedR = Math.round(casinoRed * 100) / 100;
+      const casinoNetR = Math.round((casinoGreen - casinoRed) * 100) / 100;
+
+      return {
         name,
         role,
         parent: s.parent,
-        amount: Math.abs(totalNet),
+        green: greenRounded,
+        red: redRounded,
+        net: netRounded,
+        myProfit,
         breakdown: {
-          cricket: { wins: s.cricketWins, losses: s.cricketLosses, net: cricketNet },
-          casino: { wins: s.casinoWins, losses: s.casinoLosses, net: casinoNet },
-          totalNet: totalNet
+          cricket: { green: cricketGreenR, red: cricketRedR, net: cricketNetR },
+          casino: { green: casinoGreenR, red: casinoRedR, net: casinoNetR }
         }
       };
-
-      if (totalNet > 0) {
-        // Net Bettor Win
-        profit.push(reportObj);
-      } else if (totalNet < 0) {
-        // Net Bettor Loss
-        loss.push(reportObj);
-      }
+    }).filter(a => {
+      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user'].includes(a.role);
+      if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
+      if (currentUser.role === 'master') return a.role === 'user';
+      return false;
     });
+
+    // Split into profit and loss arrays for frontend
+    const profit = accounts
+      .filter(a => a.net >= 0)
+      .map(a => ({
+        name: a.name,
+        amount: a.net,
+        role: a.role,
+        parent: a.parent,
+        breakdown: {
+          cricket: a.breakdown.cricket,
+          casino: a.breakdown.casino,
+          totalNet: a.breakdown.cricket.net + a.breakdown.casino.net
+        }
+      }));
+
+    const loss = accounts
+      .filter(a => a.net < 0)
+      .map(a => ({
+        name: a.name,
+        amount: Math.abs(a.net),
+        role: a.role,
+        parent: a.parent,
+        breakdown: {
+          cricket: a.breakdown.cricket,
+          casino: a.breakdown.casino,
+          totalNet: a.breakdown.cricket.net + a.breakdown.casino.net
+        }
+      }));
 
     res.json({ profit, loss });
   } catch (err) {
@@ -975,7 +1052,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     const requesterId = requester._id.toString();
     const requesterRole = requester.role;
 
-    const COMMISSION_RATE = 0.03;
+    const COMMISSION_RATE = 0.05;
 
     // 4. Calculate Exposure for Requester
     const exposure = {};

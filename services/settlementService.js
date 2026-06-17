@@ -62,10 +62,10 @@ const settleMatch = async (matchId, winningTeam, io) => {
             if (isWin) {
                 // User Won: 
                 // grossWin = stake * odds
-                // commission = 3% of grossWin
-                // netWin = grossWin - commission
+                // platformFee = 5% of grossWin (deducted before distribution)
+                // netWin = grossWin - platformFee
                 const grossWin = bet.stake * bet.odds;
-                const commission = grossWin * 0.03;
+                const commission = grossWin * 0.05;
                 const netWin = grossWin - commission;
                 
                 const user = await User.findOneAndUpdate(

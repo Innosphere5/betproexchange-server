@@ -77,6 +77,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     selection: matchDetails?.selection,
                     category: isCasino ? 'casino' : 'cricket',
                     bettor: username,
+                    downline: downlineName,
                     performedBy: 'SYSTEM'
                 });
             }
@@ -98,6 +99,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     selection: matchDetails?.selection,
                     category: isCasino ? 'casino' : 'cricket',
                     bettor: username,
+                    downline: downlineName,
                     performedBy: 'SYSTEM'
                 });
 

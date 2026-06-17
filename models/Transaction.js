@@ -9,6 +9,7 @@ const transactionSchema = new mongoose.Schema({
   selection: { type: String },    // For Team/Choice (A/B)
   category: { type: String, enum: ['cricket', 'casino', 'wallet'], default: 'cricket' },
   bettor: { type: String },       // The original user who placed the bet
+  downline: { type: String },     // The direct downline user name for the transaction
   performedBy: { type: String },  // Username of the admin/master
   createdAt: { type: Date, default: Date.now }
 });
