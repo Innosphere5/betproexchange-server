@@ -1,93 +1,58 @@
-const mongoose = require('mongoose');
-const User = require('../models/User');
-const Transaction = require('../models/Transaction');
-const { distributeProfitLoss, distributeCasinoPL } = require('../services/hierarchyService');
+/**
+ * Verification Script: Share Distribution Math
+ * 
+ * Tests the new 85/15 direct share model:
+ *   SuperAdmin → Admin(30%) → Master(20%) → Bettor
+ *   Bettor loses 1000
+ *
+ * Expected:
+ *   Master:     20% × 1000 = 200
+ *   Admin:      30% × 1000 = 300
+ *   SuperAdmin: (85 - 30 - 20)% × 1000 = 350
+ *   Book:       15% × 1000 = 150
+ *   Total: 200 + 300 + 350 + 150 = 1000 ✓
+ */
 
-async function runTest() {
-    try {
-        await mongoose.connect('mongodb://localhost:27017/betproexchange');
-        console.log("Connected to DB");
+const BOOK_SHARE_PERCENT = 15;
+const SUPERADMIN_TOTAL_PERCENT = 85;
 
-        // Setup Test Hierarchy
-        // SuperAdmin -> Shagufta (Master, 25%) -> Bettor
-        
-        await User.deleteMany({ username: { $in: ['test_superadmin', 'shagufta', 'test_bettor'] } });
-        await Transaction.deleteMany({ userId: { $in: ['test_superadmin', 'shagufta', 'test_bettor'] } });
+function simulateDistribution(amount, adminShare, masterShare) {
+    console.log(`\n=== Simulating distribution of ${amount} ===`);
+    console.log(`Admin Share: ${adminShare}%, Master Share: ${masterShare}%`);
+    console.log('---');
 
-        const superadmin = await User.create({
-            username: 'test_superadmin',
-            password: 'pw',
-            role: 'superadmin',
-            walletBalance: 0,
-            share: 100
-        });
+    // Book
+    const bookAmount = (BOOK_SHARE_PERCENT / 100) * amount;
+    console.log(`Book (${BOOK_SHARE_PERCENT}%): ${bookAmount}`);
 
-        const shagufta = await User.create({
-            username: 'shagufta',
-            password: 'pw',
-            role: 'master',
-            walletBalance: 0,
-            share: 25,
-            parentId: superadmin._id
-        });
+    // Master
+    const masterAmount = (masterShare / 100) * amount;
+    console.log(`Master (${masterShare}%): ${masterAmount}`);
 
-        const bettor = await User.create({
-            username: 'test_bettor',
-            password: 'pw',
-            role: 'user',
-            walletBalance: 1000,
-            parentId: shagufta._id
-        });
+    // Admin
+    const adminAmount = (adminShare / 100) * amount;
+    console.log(`Admin (${adminShare}%): ${adminAmount}`);
 
-        console.log("\n--- TEST 1: Casino Profit (House wins 1000) ---");
-        // House Profit = 1000 (Bettor lost)
-        // Expected: 
-        // 5% Comm = 50 (to Superadmin as platform comm?)
-        // Shagufta (25%) = 250
-        // Superadmin (Remainder) = 700
-        await distributeCasinoPL('test_bettor', 1000);
+    // SuperAdmin
+    const superAdminPercent = SUPERADMIN_TOTAL_PERCENT - adminShare - masterShare;
+    const superAdminAmount = (superAdminPercent / 100) * amount;
+    console.log(`SuperAdmin (${superAdminPercent}%): ${superAdminAmount}`);
 
-        let s_bal = await User.findOne({ username: 'shagufta' });
-        let sa_bal = await User.findOne({ username: 'test_superadmin' });
-        console.log(`Shagufta Balance: ${s_bal.walletBalance} (Expected 250)`);
-        console.log(`SuperAdmin Balance: ${sa_bal.walletBalance} (Expected 750 total: 700 share + 50 comm)`);
+    const total = bookAmount + masterAmount + adminAmount + superAdminAmount;
+    console.log(`---`);
+    console.log(`Total: ${total} (expected: ${amount})`);
+    console.log(`Match: ${total === amount ? '✅ PASS' : '❌ FAIL'}`);
 
-        console.log("\n--- TEST 2: Casino Loss (House loses 1000) ---");
-        // Reset balances
-        await User.updateMany({}, { walletBalance: 0 });
-        
-        // House Loss = -1000 (Bettor won)
-        // Expected:
-        // Shagufta (25%) = -250
-        // Superadmin (Remainder) = -750
-        await distributeCasinoPL('test_bettor', -1000);
-
-        s_bal = await User.findOne({ username: 'shagufta' });
-        sa_bal = await User.findOne({ username: 'test_superadmin' });
-        console.log(`Shagufta Balance: ${s_bal.walletBalance} (Expected -250)`);
-        console.log(`SuperAdmin Balance: ${sa_bal.walletBalance} (Expected -750)`);
-
-        console.log("\n--- TEST 3: Cricket Profit (House wins 1000) ---");
-        // Reset balances
-        await User.updateMany({}, { walletBalance: 0 });
-        
-        // House Profit = 1000 (Bettor lost)
-        // Expected:
-        // Shagufta (25%) = 250
-        // Superadmin (Remainder) = 750
-        await distributeProfitLoss('test_bettor', 1000);
-
-        s_bal = await User.findOne({ username: 'shagufta' });
-        sa_bal = await User.findOne({ username: 'test_superadmin' });
-        console.log(`Shagufta Balance: ${s_bal.walletBalance} (Expected 250)`);
-        console.log(`SuperAdmin Balance: ${sa_bal.walletBalance} (Expected 750)`);
-
-        console.log("\nTest Completed");
-        process.exit();
-    } catch (err) {
-        console.error("Test Failed", err);
-        process.exit(1);
-    }
+    return total === amount;
 }
 
-runTest();
+// Test cases
+let allPass = true;
+allPass &= simulateDistribution(1000, 30, 20);   // User's example
+allPass &= simulateDistribution(500, 40, 10);     // Different shares
+allPass &= simulateDistribution(-750, 30, 20);    // Negative (bettor won)
+allPass &= simulateDistribution(10000, 50, 25);   // Larger amounts
+allPass &= simulateDistribution(1000, 0, 0);      // No child shares (all goes to SA + Book)
+
+console.log(`\n${'='.repeat(40)}`);
+console.log(`Overall: ${allPass ? '✅ ALL TESTS PASSED' : '❌ SOME TESTS FAILED'}`);

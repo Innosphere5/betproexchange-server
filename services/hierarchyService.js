@@ -2,7 +2,29 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 
 /**
- * Distribute profit/loss up the hierarchy chain using Fixed Share logic.
+ * UNIVERSAL SHARE SPLIT:
+ *   85% → SuperAdmin hierarchy (SuperAdmin + Admin + Master)
+ *   15% → Book (Platform)
+ *
+ * Each entity gets their FULL share percentage of the total amount:
+ *   - Master gets (master.share)% of total
+ *   - Admin gets (admin.share)% of total
+ *   - SuperAdmin gets (85 - admin.share - master.share)% of total
+ *   - Book gets 15% of total
+ *
+ * Example: Bettor loses 1000, Admin=30%, Master=20%
+ *   Master: 20% × 1000 = 200
+ *   Admin:  30% × 1000 = 300
+ *   Super:  35% × 1000 = 350  (85 - 30 - 20 = 35)
+ *   Book:   15% × 1000 = 150
+ *   Total = 1000 ✓
+ */
+
+const BOOK_SHARE_PERCENT = 15;
+const SUPERADMIN_TOTAL_PERCENT = 85;
+
+/**
+ * Distribute profit/loss up the hierarchy chain using Direct Share logic.
  * @param {string} username - The username of the bettor.
  * @param {number} amount - Total amount to distribute (House Profit +ve, House Loss -ve).
  * @param {boolean} isCasino - Whether this is a casino bet (affects commission logic).
@@ -32,8 +54,43 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
 
         console.log(`[HIERARCHY] Starting ${isCasino ? 'CASINO' : 'CRICKET'} Distribution of ${amount.toFixed(2)} for ${username}`);
 
-        let childShare = 0;
-        let distributedSoFar = 0;
+        let desc = isCasino ? 'Casino Game' : 'Cricket Match';
+        if (matchDetails && matchDetails.matchName) {
+            desc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
+        }
+
+        // ──────────────────────────────────────────────
+        // 1. BOOK SHARE (15% Universal)
+        // ──────────────────────────────────────────────
+        const bookAmount = (BOOK_SHARE_PERCENT / 100) * amount;
+        if (bookAmount !== 0) {
+            // Find the SuperAdmin (top of chain) to store book transaction under
+            const superAdmin = chain[chain.length - 1];
+            
+            await Transaction.create({
+                userId: superAdmin.username,
+                amount: bookAmount,
+                type: 'BOOK_SHARE',
+                description: desc,
+                matchName: matchDetails?.matchName || (isCasino ? 'Casino Game' : 'Cricket Match'),
+                selection: matchDetails?.selection,
+                category: isCasino ? 'casino' : 'cricket',
+                bettor: username,
+                downline: 'BOOK',
+                performedBy: 'SYSTEM'
+            });
+
+            console.log(`[HIERARCHY] Book Share (${BOOK_SHARE_PERCENT}%): ${bookAmount.toFixed(2)}`);
+        }
+
+        // ──────────────────────────────────────────────
+        // 2. HIERARCHY DISTRIBUTION (85% split among chain)
+        // ──────────────────────────────────────────────
+        // Collect all child shares first (excluding SuperAdmin)
+        let totalChildShares = 0;
+        for (let i = 0; i < chain.length - 1; i++) {
+            totalChildShares += (chain[i].share || 0);
+        }
 
         // Casino Profit Commission Logic (5% taken from house profit)
         let commissionAmount = 0;
@@ -42,37 +99,37 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             console.log(`[HIERARCHY] Casino Commission (5%): ${commissionAmount.toFixed(2)}`);
         }
 
+        let distributedSoFar = 0;
+
         for (let i = 0; i < chain.length; i++) {
             const user = chain[i];
             const isTopLevel = (i === chain.length - 1);
-            
-            // Determine my share percentage
-            let mySharePercent = isTopLevel ? 100 : (user.share || 0);
-            
-            let shareDiff = mySharePercent - childShare;
-            if (shareDiff < 0) shareDiff = 0;
-
-            let earnings = (shareDiff / 100) * amount;
 
             // Direct Downline Name for the Final Sheet labeling
-            // If i=0, the downline is the bettor. 
-            // If i>0, the downline is the child user in the chain.
             const downlineName = (i === 0) ? username : chain[i - 1].username;
 
+            // Each entity gets their FULL share percentage directly
+            let sharePercent;
+            if (isTopLevel) {
+                // SuperAdmin gets 85% minus all child shares
+                sharePercent = SUPERADMIN_TOTAL_PERCENT - totalChildShares;
+                if (sharePercent < 0) sharePercent = 0;
+            } else {
+                sharePercent = user.share || 0;
+            }
+
+            let earnings = (sharePercent / 100) * amount;
+
+            // Deduct casino commission from SuperAdmin's portion
             if (isTopLevel && commissionAmount > 0) {
                 console.log(`[HIERARCHY] Deducting commission from SuperAdmin ${user.username} (${earnings.toFixed(2)} -> ${(earnings - commissionAmount).toFixed(2)})`);
                 earnings -= commissionAmount;
-                
-                let pDesc = isCasino ? 'Casino Game' : 'Cricket Match';
-                if (matchDetails && matchDetails.matchName) {
-                    pDesc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
-                }
 
                 await Transaction.create({
                     userId: user.username,
                     amount: commissionAmount,
                     type: 'PLATFORM_COMMISSION',
-                    description: pDesc,
+                    description: desc,
                     matchName: matchDetails?.matchName || (isCasino ? 'Casino Game' : 'Cricket Match'),
                     selection: matchDetails?.selection,
                     category: isCasino ? 'casino' : 'cricket',
@@ -84,11 +141,6 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
 
             if (earnings !== 0) {
                 await User.findByIdAndUpdate(user._id, { $inc: { walletBalance: earnings } });
-                
-                let desc = isCasino ? 'Casino Game' : 'Cricket Match';
-                if (matchDetails && matchDetails.matchName) {
-                    desc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
-                }
 
                 await Transaction.create({
                     userId: user.username,
@@ -103,14 +155,12 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     performedBy: 'SYSTEM'
                 });
 
-                console.log(`[HIERARCHY] Distributed ${earnings.toFixed(2)} to ${user.role} ${user.username} (${shareDiff}%)`);
+                console.log(`[HIERARCHY] Distributed ${earnings.toFixed(2)} to ${user.role} ${user.username} (${sharePercent}% direct share)`);
                 distributedSoFar += earnings;
             }
-
-            childShare = mySharePercent;
         }
 
-        console.log(`[HIERARCHY] Distribution complete for ${username}. Total Distributed (excl. comm): ${distributedSoFar.toFixed(2)}`);
+        console.log(`[HIERARCHY] Distribution complete for ${username}. Total Hierarchy: ${distributedSoFar.toFixed(2)}, Book: ${bookAmount.toFixed(2)}`);
     } catch (err) {
         console.error('[HIERARCHY ERROR] Failed to distribute P/L:', err);
     }

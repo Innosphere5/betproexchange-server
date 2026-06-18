@@ -27,10 +27,10 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Share Validation (0-85)
+    // Share Validation (0-85, since 15% is reserved for Book)
     const masterShare = parseFloat(share) || 0;
-    if (masterShare < 0 || masterShare > 100) {
-      return res.status(400).json({ error: 'Share must be between 0 and 100' });
+    if (masterShare < 0 || masterShare > 85) {
+      return res.status(400).json({ error: 'Share must be between 0 and 85 (15% is reserved for Book)' });
     }
 
     // Role restriction logic
@@ -457,9 +457,10 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
                 if (admin) aShare = admin.share || 0;
             }
 
+            // Direct share model: each entity gets their full share %
             if (req.user.role === 'master') return mShare;
-            if (req.user.role === 'admin') return aShare - mShare;
-            if (req.user.role === 'superadmin') return 100 - Math.max(mShare, aShare);
+            if (req.user.role === 'admin') return aShare;
+            if (req.user.role === 'superadmin') return 85 - aShare - mShare;
             return 0;
           };
 
@@ -591,7 +592,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     // 1. Fetch all betting-related share transactions for the current user
     const txs = await Transaction.find({ 
       userId: currentUser.username,
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] }
     }).sort({ createdAt: -1 });
 
     const accountSummary = {}; // { "downlineName": { green: 0, red: 0 } }
@@ -634,34 +635,25 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       shareMap[u.username] = u.share || 0;
     });
 
-    const pShare = currentUser.role === 'superadmin' ? 100 : (currentUser.share || 0);
-
     const accounts = Object.keys(accountSummary).map(name => {
       const { green: baseGreen, red: baseRed } = accountSummary[name];
-      const role = roleMap[name] || 'user';
-      const childShare = shareMap[name] || 0;
+      const role = roleMap[name] || (name === 'BOOK' ? 'book' : 'user');
 
-      let green = 0;
-      let red = 0;
-
-      if (pShare > childShare) {
-        green = baseGreen * (100 - childShare) / (pShare - childShare);
-        red = baseRed * (100 - childShare) / (pShare - childShare);
-      } else if (pShare === 100) {
-        green = baseGreen;
-        red = baseRed;
-      }
+      // Transaction amounts are already correctly calculated per share.
+      // No scaling needed.
+      const green = baseGreen;
+      const red = baseRed;
 
       return {
         name,
         role,
         green: Math.round(green * 100) / 100,
         red: Math.round(red * 100) / 100,
-        net: Math.round((green - red) * 100) / 100, // Net = Green(bettor won) - Red(bettor lost). Positive = bettor net win, Negative = bettor net loss
+        net: Math.round((green - red) * 100) / 100,
         myProfit: Math.round((baseGreen - baseRed) * 100) / 100
       };
     }).filter(a => {
-      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user'].includes(a.role);
+      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user', 'book'].includes(a.role);
       if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
       if (currentUser.role === 'master') return a.role === 'user';
       return false;
@@ -683,7 +675,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     let query = { 
       userId: currentUser.username,
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] }
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] }
     };
 
     let startDate, endDate;
@@ -782,34 +774,22 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
       shareMap[u.username] = u.share || 0;
     });
 
-    const pShare = currentUser.role === 'superadmin' ? 100 : (currentUser.share || 0);
-
     const accounts = Object.keys(accountSummary).map(name => {
       const s = accountSummary[name];
-      const role = roleMap[name] || 'user';
-      const childShare = shareMap[name] || 0;
+      const role = roleMap[name] || (name === 'BOOK' ? 'book' : 'user');
       
-      let green = 0; let red = 0;
-      let cricketGreen = 0; let cricketRed = 0;
-      let casinoGreen = 0; let casinoRed = 0;
-
-      if (pShare > childShare) {
-        const factor = (100 - childShare) / (pShare - childShare);
-        green = s.green * factor;
-        red = s.red * factor;
-        cricketGreen = s.cricketGreen * factor;
-        cricketRed = s.cricketRed * factor;
-        casinoGreen = s.casinoGreen * factor;
-        casinoRed = s.casinoRed * factor;
-      } else if (pShare === 100) {
-        green = s.green; red = s.red;
-        cricketGreen = s.cricketGreen; cricketRed = s.cricketRed;
-        casinoGreen = s.casinoGreen; casinoRed = s.casinoRed;
-      }
+      // Transaction amounts are already correctly calculated per share.
+      // No scaling needed.
+      const green = s.green;
+      const red = s.red;
+      const cricketGreen = s.cricketGreen;
+      const cricketRed = s.cricketRed;
+      const casinoGreen = s.casinoGreen;
+      const casinoRed = s.casinoRed;
 
       const greenRounded = Math.round(green * 100) / 100;
       const redRounded = Math.round(red * 100) / 100;
-      const netRounded = Math.round((green - red) * 100) / 100; // Green(bettor won) - Red(bettor lost)
+      const netRounded = Math.round((green - red) * 100) / 100;
       const myProfit = Math.round((s.green - s.red) * 100) / 100;
 
       const cricketGreenR = Math.round(cricketGreen * 100) / 100;
@@ -834,7 +814,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
         }
       };
     }).filter(a => {
-      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user'].includes(a.role);
+      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user', 'book'].includes(a.role);
       if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
       if (currentUser.role === 'master') return a.role === 'user';
       return false;
@@ -904,7 +884,7 @@ router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
 
     const query = {
       userId: req.user.userId,
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] },
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] },
       createdAt: { $gte: start, $lte: end }
     };
 
@@ -947,7 +927,7 @@ router.post('/clear-daily-report', auth, async (req, res) => {
     }
 
     const result = await Transaction.deleteMany({
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION'] },
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] },
       createdAt: { $gte: startOfDay, $lte: endOfDay }
     });
 
@@ -1035,15 +1015,14 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
         const mShare = master ? (master.share || 0) : 0;
         const aShare = admin ? (admin.share || 0) : 0;
 
+        // Direct share model: each entity gets their full share %
         if (requesterRole === 'master') {
             return mShare;
         } else if (requesterRole === 'admin') {
-            // Admin gets their share minus what they gave to the master
-            return aShare - mShare;
+            return aShare;
         } else if (requesterRole === 'superadmin') {
-            // Superadmin gets what's left after Admin/Master
-            const highestChildShare = Math.max(mShare, aShare);
-            return 100 - highestChildShare;
+            // SuperAdmin gets 85% minus all child shares
+            return 85 - aShare - mShare;
         }
         return 0;
     };
