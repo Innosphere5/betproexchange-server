@@ -176,6 +176,18 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
     });
     await newTransaction.save();
 
+    // Create Settlement Record for Admin/Master's Final Sheet
+    const settlementTx = new Transaction({
+      userId: parent.username,
+      amount: -addAmount,
+      type: 'SETTLEMENT',
+      category: 'wallet',
+      downline: target.username,
+      description: `${type === 'credit' ? 'Credit' : 'Cash'} Deposit Settlement for ${target.username}`,
+      performedBy: parent.username
+    });
+    await settlementTx.save();
+
     res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
     console.error(err);
@@ -235,6 +247,18 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
       performedBy: parent.username
     });
     await newTransaction.save();
+
+    // Create Settlement Record for Admin/Master's Final Sheet
+    const settlementTx = new Transaction({
+      userId: parent.username,
+      amount: withdrawAmount,
+      type: 'SETTLEMENT',
+      category: 'wallet',
+      downline: target.username,
+      description: `${type === 'credit' ? 'Credit' : 'Cash'} Withdraw Settlement for ${target.username}`,
+      performedBy: parent.username
+    });
+    await settlementTx.save();
 
     res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
@@ -592,7 +616,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     // 1. Fetch all betting-related share transactions for the current user
     const txs = await Transaction.find({ 
       userId: currentUser.username,
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] }
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
     }).sort({ createdAt: -1 });
 
     const accountSummary = {}; // { "downlineName": { green: 0, red: 0 } }
@@ -675,7 +699,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     let query = { 
       userId: currentUser.username,
-      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] }
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
     };
 
     let startDate, endDate;
