@@ -10,7 +10,7 @@
 
 const mongoose = require('mongoose');
 const Match = require('../models/Match');
-const oddsPapiRest = require('../services/oddsPapiRest');
+const oddsApiRest = require('../services/oddsApiRest');
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const CRICKET_SPORT_ID = 27;
@@ -108,7 +108,7 @@ async function run() {
     console.log('🌐 Fetching fixtures from OddsPapi REST...');
     let fixtures;
     try {
-        fixtures = await oddsPapiRest.getFixturesToday({
+        fixtures = await oddsApiRest.getFixturesToday({
             sportId: CRICKET_SPORT_ID,
             bookmakers: BOOKMAKERS.join(',')
         });
@@ -169,7 +169,7 @@ async function run() {
 
         // 5. Fetch odds for this fixture
         try {
-            const oddsData = await oddsPapiRest.getFixtureOdds(fixture.fixtureId, BOOKMAKERS);
+            const oddsData = await oddsApiRest.getFixtureOdds(fixture.fixtureId, BOOKMAKERS);
             if (!oddsData || !oddsData.odds) {
                 console.log(`   ⚠️ No odds data\n`);
                 continue;

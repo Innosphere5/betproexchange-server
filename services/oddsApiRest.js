@@ -1,11 +1,11 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const BASE_URL = 'https://api.odds-api.io/v3';
+const BASE_URL = 'https://v5.oddspapi.io/en';
 
 class OddsApiRest {
     constructor() {
-        this.apiKey = process.env.ODDS_API_KEY;
+        this.apiKey = process.env.ODDS_API_KEY || '6de1aca2c07d3f5abeb411b7157069e6';
         this.rateLimitRemaining = null;
         this.rateLimitReset = null;
     }
@@ -32,8 +32,8 @@ class OddsApiRest {
             });
 
             const headers = response.headers;
-            if (headers['x-requests-remaining'] !== undefined) {
-                this.rateLimitRemaining = parseInt(headers['x-requests-remaining'], 10);
+            if (headers['x-ratelimit-remaining'] !== undefined) {
+                this.rateLimitRemaining = parseInt(headers['x-ratelimit-remaining'], 10);
             }
             if (headers['x-ratelimit-reset'] !== undefined) {
                 this.rateLimitReset = parseInt(headers['x-ratelimit-reset'], 10);
@@ -57,31 +57,33 @@ class OddsApiRest {
     }
 
     async getTournaments(sportId) {
-        return this.request('tournaments', { sport: sportId });
+        return this.request('tournaments', { sportId: sportId });
     }
 
     async getFixtures(params = {}) {
-        return this.request('events', { sport: 'cricket', ...params });
+        return this.request('fixtures', { sportId: 27, ...params });
     }
 
     async getFixturesForDate(dateStr, params = {}) {
-        return this.request('events', { sport: 'cricket', from: dateStr, to: dateStr, ...params });
+        const start = Math.floor(new Date(`${dateStr}T00:00:00Z`).getTime() / 1000);
+        const end = Math.floor(new Date(`${dateStr}T23:59:59Z`).getTime() / 1000);
+        return this.request('fixtures', { sportId: 27, startTimeFrom: start, startTimeTo: end, ...params });
     }
 
     async getFixturesLive(params = {}) {
-        return this.request('events/live', { sport: 'cricket', ...params });
+        return this.request('fixtures/live', { sportId: 27, ...params });
     }
 
     async getFixturesToday(params = {}) {
-        return this.request('events', { sport: 'cricket', status: 'live,pending', ...params });
+        return this.request('fixtures/today', { sportId: 27, ...params });
     }
 
-    async getFixtureOdds(eventId, bookmakers = []) {
-        const params = { eventId };
+    async getFixtureOdds(fixtureId, bookmakers = []) {
+        const params = { fixtureId };
         if (bookmakers.length > 0) {
             params.bookmakers = bookmakers.join(',');
         }
-        return this.request('odds', params);
+        return this.request('fixtures/odds', params);
     }
 
     async getMarkets(params = {}) {

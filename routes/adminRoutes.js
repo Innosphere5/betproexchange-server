@@ -607,11 +607,15 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
   }
 });
 
+const { generateFinalSheet } = require('../services/finalSheetEngine');
+
 // Get Final Sheet (Green/Red/Net Ledger - cumulative running totals)
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   try {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
+
+    const PLATFORM_FEE_RATE = 0.05; // 5% platform commission
 
     // 1. Fetch all betting-related share transactions for the current user
     const txs = await Transaction.find({ 
@@ -619,71 +623,17 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
     }).sort({ createdAt: -1 });
 
-    const accountSummary = {}; // { "downlineName": { green: 0, red: 0 } }
+    const finalSheetData = await generateFinalSheet(currentUser, txs);
 
-    txs.forEach(tx => {
-      let sourceName = tx.downline || tx.bettor || 'Unknown';
-
-      if (!tx.bettor) {
-        const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
-        if (match) {
-          sourceName = match[1].trim();
-        } else {
-          const fallbackMatch = tx.description.match(/from (.*?)(?: \(|$)/);
-          if (fallbackMatch) {
-            sourceName = fallbackMatch[1].trim();
-          }
-        }
-      }
-
-      if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = { green: 0, red: 0, name: sourceName };
-      }
-
-      if (tx.amount > 0) {
-        // Positive amount = house profit (bettor lost) = RED side (bettor owes)
-        accountSummary[sourceName].red += tx.amount;
-      } else if (tx.amount < 0) {
-        // Negative amount = house loss (bettor won) = GREEN side (bettor earned)
-        accountSummary[sourceName].green += Math.abs(tx.amount);
-      }
+    const sharesMap = {};
+    // Populate sharesMap as it was previously sent if needed by UI
+    const uniqueUsernames = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];
+    const users = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
+    users.forEach(u => {
+      sharesMap[u.username] = { role: u.role, share: u.share || 0 };
     });
 
-    // 2. Fetch roles and shares for all users in accountSummary
-    const uniqueUsernames = Object.keys(accountSummary);
-    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
-    const roleMap = {};
-    const shareMap = {};
-    usersWithRoles.forEach(u => {
-      roleMap[u.username] = u.role;
-      shareMap[u.username] = u.share || 0;
-    });
-
-    const accounts = Object.keys(accountSummary).map(name => {
-      const { green: baseGreen, red: baseRed } = accountSummary[name];
-      const role = roleMap[name] || (name === 'BOOK' ? 'book' : 'user');
-
-      // Transaction amounts are already correctly calculated per share.
-      // No scaling needed.
-      const green = baseGreen;
-      const red = baseRed;
-
-      return {
-        name,
-        role,
-        green: Math.round(green * 100) / 100,
-        red: Math.round(red * 100) / 100,
-        net: Math.round((green - red) * 100) / 100,
-        myProfit: Math.round((baseGreen - baseRed) * 100) / 100
-      };
-    }).filter(a => {
-      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user', 'book'].includes(a.role);
-      if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
-      if (currentUser.role === 'master') return a.role === 'user';
-      return false;
-    });
-
-    res.json({ accounts });
+    res.json({ ...finalSheetData, sharesMap });
   } catch (err) {
     console.error("Final Sheet Error:", err);
     res.status(500).json({ error: 'Server error fetching final sheet' });
@@ -739,141 +689,16 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
 
-    const accountSummary = {}; 
-    // { username: { green: 0, red: 0, parent: '', cricketGreen: 0, cricketRed: 0, casinoGreen: 0, casinoRed: 0 } }
+    const finalSheetData = await generateFinalSheet(currentUser, txs);
 
-    txs.forEach(tx => {
-      let sourceName = tx.downline || tx.bettor || 'Unknown';
-      let parentName = 'Hierarchy';
-
-      if (!tx.bettor) {
-        const match = tx.description.match(/from (.*?) \| (.*?)(?: \(|$)/);
-        if (match) {
-          sourceName = match[1].trim();
-          parentName = match[2].trim();
-        } else {
-          const oldMatch = tx.description.match(/from (.*?)(?: \(|$)/);
-          if (oldMatch) {
-            sourceName = oldMatch[1].trim();
-            parentName = 'Legacy';
-          }
-        }
-      }
-
-      const isCasino = tx.category === 'casino';
-
-      if (!accountSummary[sourceName]) {
-        accountSummary[sourceName] = { 
-          green: 0, 
-          red: 0, 
-          parent: parentName,
-          cricketGreen: 0,
-          cricketRed: 0,
-          casinoGreen: 0,
-          casinoRed: 0
-        };
-      }
-
-      const amount = Math.abs(tx.amount);
-      if (tx.amount > 0) {
-        // Bettor lost = RED side
-        accountSummary[sourceName].red += amount;
-        if (isCasino) accountSummary[sourceName].casinoRed += amount;
-        else accountSummary[sourceName].cricketRed += amount;
-      } else if (tx.amount < 0) {
-        // Bettor won = GREEN side
-        accountSummary[sourceName].green += amount;
-        if (isCasino) accountSummary[sourceName].casinoGreen += amount;
-        else accountSummary[sourceName].cricketGreen += amount;
-      }
+    const sharesMap = {};
+    const uniqueUsernames = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];
+    const users = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
+    users.forEach(u => {
+      sharesMap[u.username] = { role: u.role, share: u.share || 0 };
     });
 
-    // Fetch roles and shares for all users in accountSummary
-    const uniqueUsernames = Object.keys(accountSummary);
-    const usersWithRoles = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
-    const roleMap = {};
-    const shareMap = {};
-    usersWithRoles.forEach(u => {
-      roleMap[u.username] = u.role;
-      shareMap[u.username] = u.share || 0;
-    });
-
-    const accounts = Object.keys(accountSummary).map(name => {
-      const s = accountSummary[name];
-      const role = roleMap[name] || (name === 'BOOK' ? 'book' : 'user');
-      
-      // Transaction amounts are already correctly calculated per share.
-      // No scaling needed.
-      const green = s.green;
-      const red = s.red;
-      const cricketGreen = s.cricketGreen;
-      const cricketRed = s.cricketRed;
-      const casinoGreen = s.casinoGreen;
-      const casinoRed = s.casinoRed;
-
-      const greenRounded = Math.round(green * 100) / 100;
-      const redRounded = Math.round(red * 100) / 100;
-      const netRounded = Math.round((green - red) * 100) / 100;
-      const myProfit = Math.round((s.green - s.red) * 100) / 100;
-
-      const cricketGreenR = Math.round(cricketGreen * 100) / 100;
-      const cricketRedR = Math.round(cricketRed * 100) / 100;
-      const cricketNetR = Math.round((cricketGreen - cricketRed) * 100) / 100;
-
-      const casinoGreenR = Math.round(casinoGreen * 100) / 100;
-      const casinoRedR = Math.round(casinoRed * 100) / 100;
-      const casinoNetR = Math.round((casinoGreen - casinoRed) * 100) / 100;
-
-      return {
-        name,
-        role,
-        parent: s.parent,
-        green: greenRounded,
-        red: redRounded,
-        net: netRounded,
-        myProfit,
-        breakdown: {
-          cricket: { green: cricketGreenR, red: cricketRedR, net: cricketNetR },
-          casino: { green: casinoGreenR, red: casinoRedR, net: casinoNetR }
-        }
-      };
-    }).filter(a => {
-      if (currentUser.role === 'superadmin') return ['admin', 'master', 'user', 'book'].includes(a.role);
-      if (currentUser.role === 'admin') return ['master', 'user'].includes(a.role);
-      if (currentUser.role === 'master') return a.role === 'user';
-      return false;
-    });
-
-    // Split into profit and loss arrays for frontend
-    const profit = accounts
-      .filter(a => a.net >= 0)
-      .map(a => ({
-        name: a.name,
-        amount: a.net,
-        role: a.role,
-        parent: a.parent,
-        breakdown: {
-          cricket: a.breakdown.cricket,
-          casino: a.breakdown.casino,
-          totalNet: a.breakdown.cricket.net + a.breakdown.casino.net
-        }
-      }));
-
-    const loss = accounts
-      .filter(a => a.net < 0)
-      .map(a => ({
-        name: a.name,
-        amount: Math.abs(a.net),
-        role: a.role,
-        parent: a.parent,
-        breakdown: {
-          cricket: a.breakdown.cricket,
-          casino: a.breakdown.casino,
-          totalNet: a.breakdown.cricket.net + a.breakdown.casino.net
-        }
-      }));
-
-    res.json({ profit, loss });
+    res.json({ ...finalSheetData, sharesMap });
   } catch (err) {
     console.error("Report Error:", err);
     res.status(500).json({ error: 'Server error fetching report' });
