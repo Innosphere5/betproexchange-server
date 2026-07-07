@@ -4,36 +4,34 @@ const { getData } = require('./apiManager');
 /**
  * updateLiveScores
  * 
- * Migrated to Sportmonks Cricket API v2.0.
- * Fetches all current live scores in one call.
- * Extracts runs/wickets/overs from the 'runs' include.
+ * Migrated to oddspapi REST API (v5.oddspapi.io).
+ * Fetches live fixtures from /fixtures/live endpoint.
+ * Extracts participant scores from the oddspapi scores object.
  */
 const updateLiveScores = async (io) => {
     try {
-        // 1. Fetch live scores from API with balls for "This Over" logic
-        const response = await getData('livescores', {
-            include: 'runs,balls,scoreboards,localteam,visitorteam,league'
-        });
+        // 1. Fetch live fixtures from oddspapi
+        const response = await getData('fixtures/live');
 
-        if (!response || !Array.isArray(response.data) || response.data.length === 0) {
+        if (!response || !Array.isArray(response) || response.length === 0) {
             return;
         }
 
         let updatedCount = 0;
 
-        for (const liveData of response.data) {
-            const matchId = liveData.id.toString();
+        for (const liveData of response) {
+            const matchId = liveData.fixtureId;
             let matchInDb = await Match.findOne({ matchId });
 
             if (!matchInDb) {
-                // Upsert new live match if it was missed by matchService filtering
+                // Upsert new live match if it was missed by matchService
                 matchInDb = await Match.create({
                     matchId: matchId,
-                    leagueId: liveData.league_id,
-                    teamA: liveData.localteam?.name || 'Local Team',
-                    teamB: liveData.visitorteam?.name || 'Visitor Team',
-                    league: liveData.league?.name || 'Unknown League',
-                    startTime: new Date(liveData.starting_at || Date.now()),
+                    tournamentId: liveData.tournament?.tournamentId || null,
+                    teamA: liveData.participants?.participant1Name || 'Team 1',
+                    teamB: liveData.participants?.participant2Name || 'Team 2',
+                    league: liveData.tournament?.tournamentName || 'Unknown League',
+                    startTime: new Date((liveData.startTime || Math.floor(Date.now() / 1000)) * 1000),
                     status: 'live',
                     sportKey: 'cricket_international',
                     lastUpdated: new Date()
@@ -41,103 +39,37 @@ const updateLiveScores = async (io) => {
                 console.log(`[ScoreService] Automatically added missing LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
             }
 
-            const runs = liveData.runs || [];
-            const balls = liveData.balls || [];
-            
-            // Get current and previous innings
-            const currentInnings = runs.length > 0 ? runs[runs.length - 1] : null;
-            const prevInnings = runs.length > 1 ? runs[runs.length - 2] : null;
+            // Extract scores from oddspapi format
+            const scores = liveData.scores || {};
+            const resultScore = scores.result || {};
+            const p1Score = resultScore.participant1Score || 0;
+            const p2Score = resultScore.participant2Score || 0;
 
-            const currentScore = currentInnings ? currentInnings.score : 0;
-            const currentWickets = currentInnings ? currentInnings.wickets : 0;
-            const currentOvers = currentInnings ? currentInnings.overs : (matchInDb.score?.overs || "0.0");
-
-            // Calculate CRR (Current Run Rate)
-            const calculateCRR = (s, o) => {
-                const overParts = String(o).split('.');
-                const totalBalls = (parseInt(overParts[0]) * 6) + (parseInt(overParts[1]) || 0);
-                if (totalBalls === 0) return "0.00";
-                return ((s / totalBalls) * 6).toFixed(2);
-            };
-
-            const crr = calculateCRR(currentScore, currentOvers);
-
-            // Calculate Target & RRR
-            let target = 0;
-            let rrr = "0.00";
-            let remRuns = 0;
-            let remBalls = 0;
-
-            if (prevInnings && currentInnings) {
-                target = prevInnings.score + 1;
-                remRuns = target - currentScore;
-                
-                // Assuming T20 for rem balls if not specified, or use stage/type if available
-                // Sportmonks v2 fixture has 'type', e.g. 'T20', 'ODI'
-                const totalOvers = liveData.type === 'ODI' ? 50 : (liveData.type === 'T20' || liveData.type === 'T20I' ? 20 : 0);
-                
-                if (totalOvers > 0) {
-                    const overParts = String(currentOvers).split('.');
-                    const ballsBowled = (parseInt(overParts[0]) * 6) + (parseInt(overParts[1]) || 0);
-                    remBalls = (totalOvers * 6) - ballsBowled;
-                    
-                    if (remBalls > 0) {
-                        rrr = ((remRuns / remBalls) * 6).toFixed(2);
-                    } else if (remRuns <= 0) {
-                        rrr = "0.00";
-                    } else {
-                        rrr = "∞";
-                    }
-                }
-            }
-
-            // "This Over" logic
-            // Get balls from the current over (e.g. if overs is 7.5, current over is 8)
-            const currentOverNumber = Math.ceil(parseFloat(currentOvers)) || 1;
-            const thisOverBalls = balls
-                .filter(b => b.ball >= (currentOverNumber - 1) && b.ball < currentOverNumber)
-                .sort((a, b) => a.ball - b.ball)
-                .map(b => {
-                    if (b.score?.is_wicket || b.batsmanout_id) return 'W';
-                    const runs = b.score?.runs || 0;
-                    const isExtra = b.score?.bye > 0 || b.score?.leg_bye > 0 || b.score?.noball > 0 || (b.score?.name && b.score.name.toLowerCase().includes('wide'));
-                    if (isExtra) return `${runs} (Ex)`;
-                    return String(runs);
-                });
-
-            // Map runs to teams for DB storage
-            const teamARunsObj = runs.find(r => r.team_id === liveData.localteam_id);
-            const teamBRunsObj = runs.find(r => r.team_id === liveData.visitorteam_id);
-
-            const teamA_score = teamARunsObj ? `${teamARunsObj.score}/${teamARunsObj.wickets}` : (matchInDb.score?.teamA_runs || "0/0");
-            const teamB_score = teamBRunsObj ? `${teamBRunsObj.score}/${teamBRunsObj.wickets}` : (matchInDb.score?.teamB_runs || "0/0");
+            // oddspapi provides total runs per team in scores.result
+            // For cricket, format as "runs/wickets" — oddspapi doesn't provide wickets separately
+            // so we use the total score format
+            const teamA_score = `${p1Score}`;
+            const teamB_score = `${p2Score}`;
 
             // Determine if match is finished
-            const completedStatuses = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Completed', 'Ended', 'Aban.', 'Canc.'];
-            const isFinished = completedStatuses.includes(liveData.status);
+            const isFinished = liveData.status?.statusName === 'Finished' || 
+                               liveData.status?.statusId === 2 ||
+                               liveData.trueEndTime != null;
+
             let winner = matchInDb.winner;
 
             if (isFinished) {
-                if (['Finished', 'Completed', 'Ended'].includes(liveData.status)) {
-                    if (liveData.winner_team_id === liveData.localteam_id) winner = matchInDb.teamA;
-                    else if (liveData.winner_team_id === liveData.visitorteam_id) winner = matchInDb.teamB;
-                    else {
-                        const rA = teamARunsObj?.score || 0;
-                        const rB = teamBRunsObj?.score || 0;
-                        if (rA > rB) winner = matchInDb.teamA;
-                        else if (rB > rA) winner = matchInDb.teamB;
-                        else winner = 'TIE';
-                    }
-                } else {
-                    winner = 'VOID';
-                }
+                if (p1Score > p2Score) winner = matchInDb.teamA;
+                else if (p2Score > p1Score) winner = matchInDb.teamB;
+                else winner = 'TIE';
             }
+
+            const currentStatus = isFinished ? 'completed' : 'live';
 
             const hasChanged = (
                 matchInDb.score?.teamA_runs !== teamA_score ||
                 matchInDb.score?.teamB_runs !== teamB_score ||
-                String(matchInDb.score?.overs) !== String(currentOvers) ||
-                matchInDb.status !== (isFinished ? 'completed' : 'live')
+                matchInDb.status !== currentStatus
             );
 
             if (hasChanged) {
@@ -145,19 +77,19 @@ const updateLiveScores = async (io) => {
                     { matchId },
                     {
                         $set: {
-                            status: isFinished ? 'completed' : 'live',
+                            status: currentStatus,
                             winner: winner,
                             score: {
                                 teamA_runs: teamA_score,
                                 teamB_runs: teamB_score,
-                                overs:      isFinished ? "Final" : currentOvers,
-                                wickets:    currentWickets,
-                                target:     target,
-                                runRate:    crr,
-                                reqRunRate: rrr,
-                                thisOver:   thisOverBalls,
-                                remRuns:    remRuns,
-                                remBalls:   remBalls,
+                                overs:      isFinished ? "Final" : (matchInDb.score?.overs || "0.0"),
+                                wickets:    matchInDb.score?.wickets || 0,
+                                target:     matchInDb.score?.target || 0,
+                                runRate:    matchInDb.score?.runRate || "0.00",
+                                reqRunRate: matchInDb.score?.reqRunRate || "0.00",
+                                thisOver:   matchInDb.score?.thisOver || [],
+                                remRuns:    matchInDb.score?.remRuns || 0,
+                                remBalls:   matchInDb.score?.remBalls || 0,
                                 lastUpdated: new Date()
                             },
                             lastUpdated: new Date()
@@ -170,24 +102,24 @@ const updateLiveScores = async (io) => {
             if (io) {
                 io.emit('live_score_update', {
                     matchId: matchId,
-                    score:   currentScore,
-                    overs:   currentOvers,
-                    wickets: currentWickets,
-                    status:  isFinished ? 'completed' : 'live',
+                    score:   p1Score,
+                    overs:   isFinished ? "Final" : (matchInDb.score?.overs || "0.0"),
+                    wickets: matchInDb.score?.wickets || 0,
+                    status:  currentStatus,
                     teamA_runs: teamA_score,
                     teamB_runs: teamB_score,
-                    target:     target,
-                    runRate:    crr,
-                    reqRunRate: rrr,
-                    thisOver:   thisOverBalls,
-                    remRuns:    remRuns,
-                    remBalls:   remBalls
+                    target:     matchInDb.score?.target || 0,
+                    runRate:    matchInDb.score?.runRate || "0.00",
+                    reqRunRate: matchInDb.score?.reqRunRate || "0.00",
+                    thisOver:   matchInDb.score?.thisOver || [],
+                    remRuns:    matchInDb.score?.remRuns || 0,
+                    remBalls:   matchInDb.score?.remBalls || 0
                 });
             }
         }
         
         // 2. Handle matches marked 'live' in DB but NOT in the current API response
-        const liveMatchIdsFromApi = response.data.map(m => m.id.toString());
+        const liveMatchIdsFromApi = response.map(m => m.fixtureId);
         const staleMatches = await Match.find({ 
             status: 'live', 
             matchId: { $nin: liveMatchIdsFromApi } 
@@ -204,7 +136,7 @@ const updateLiveScores = async (io) => {
         }
 
         if (updatedCount > 0 && io) {
-            console.log(`[ScoreService] Updated detailed scores for ${updatedCount} matches.`);
+            console.log(`[ScoreService] Updated scores for ${updatedCount} matches.`);
         }
 
     } catch (error) {
@@ -213,4 +145,3 @@ const updateLiveScores = async (io) => {
 };
 
 module.exports = { updateLiveScores };
-

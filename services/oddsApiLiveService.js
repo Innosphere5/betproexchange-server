@@ -773,10 +773,10 @@ class OddsApiLiveService {
 
         const oddsMarketOps = updates.map(update => ({
             updateOne: {
-                filter: { sportmonksMatchId: update.matchId },
+                filter: { dbMatchId: update.matchId },
                 update: {
                     $set: {
-                        sportmonksMatchId: update.matchId,
+                        dbMatchId: update.matchId,
                         oddsApiEventId: update.oddsApiEventId || '',
                         teamA: update.teamA,
                         teamB: update.teamB,

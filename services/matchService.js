@@ -4,15 +4,13 @@ const { getData } = require('./apiManager');
 /**
  * fetchUpcomingMatches
  * 
- * Migrated to Sportmonks Cricket API v2.0.
- * Fetches fixtures for today and next 2 days.
- * Filters for International Matches (Men/Women, ODI/T20/Test/World Cups/Asia Cup).
- * Removed IPL and PSL focus.
- * Keeps only top 6 matches sorted by start time.
+ * Migrated to oddspapi REST API (v5.oddspapi.io).
+ * Fetches cricket fixtures for today and the next 7 days.
+ * Maps oddspapi fixture structure to the Match model.
  */
 const fetchUpcomingMatches = async (io) => {
     try {
-        console.log('[MatchService] Syncing fixtures from Sportmonks v2 API...');
+        console.log('[MatchService] Syncing fixtures from oddspapi...');
 
         // 1. Midnight Reset: Remove all matches from previous days (except LIVE)
         const todayStart = new Date();
@@ -27,46 +25,45 @@ const fetchUpcomingMatches = async (io) => {
             console.log(`[MatchService] 🗑️ Midnight Reset: Cleaned ${prunedOldCount.deletedCount} previous matches.`);
         }
 
-        const today = new Date().toISOString().split('T')[0];
-        const lookaheadDays = 7;
-        const endDate = new Date(Date.now() + lookaheadDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        // 2. Fetch upcoming fixtures from oddspapi (next 7 days)
+        const now = Math.floor(Date.now() / 1000);
+        const weekLater = now + 7 * 24 * 3600;
 
         const response = await getData('fixtures', {
-            filter: {
-                'filter[starts_between]': `${today},${endDate}`,
-            },
-            include: 'localteam,visitorteam,league'
+            params: {
+                startTimeFrom: now,
+                startTimeTo: weekLater,
+            }
         });
 
-        if (!response || !Array.isArray(response.data)) {
+        if (!response || !Array.isArray(response) || response.length === 0) {
             console.warn('[MatchService] No fixtures returned or API error.');
             return;
         }
 
-        console.log(`[MatchService] Total matches from API: ${response.data.length}`);
-        if (response.data.length > 0) {
-            console.log(`[MatchService] Sample Data (First 3):`, response.data.slice(0, 3).map(f => ({ id: f.id, league: f.league?.name, status: f.status })));
+        console.log(`[MatchService] Total fixtures from oddspapi: ${response.length}`);
+        if (response.length > 0) {
+            console.log(`[MatchService] Sample Data (First 3):`, response.slice(0, 3).map(f => ({
+                id: f.fixtureId,
+                tournament: f.tournament?.tournamentName,
+                status: f.status?.statusName
+            })));
         }
 
-        // Focused on International (Men and Women)
-        const allowedLeagueIds = [2, 3, 4, 11, 12, 16, 17, 18, 19, 35, 41, 86, 141, 201, 258, 261];
+        // 3. Map oddspapi fixtures to our Match model format
+        let matches = response.map(f => ({
+            matchId: f.fixtureId,
+            tournamentId: f.tournament?.tournamentId || null,
+            teamA: f.participants?.participant1Name || 'Team 1',
+            teamB: f.participants?.participant2Name || 'Team 2',
+            league: f.tournament?.tournamentName || 'Cricket',
+            startTime: new Date(f.startTime * 1000), // oddspapi uses unix timestamp
+            status: f.status?.live ? 'live' : (f.status?.statusName === 'Finished' ? 'completed' : 'upcoming'),
+            sportKey: 'cricket_international',
+            lastUpdated: new Date()
+        }));
 
-        // 3. Filter and Map
-        let matches = response.data
-            .filter(f => allowedLeagueIds.includes(f.league_id))
-            .map(f => ({
-                matchId: f.id.toString(),
-                leagueId: f.league_id,
-                teamA: f.localteam?.name || 'Local Team',
-                teamB: f.visitorteam?.name || 'Visitor Team',
-                league: f.league?.name || 'Cricket',
-                startTime: new Date(f.starting_at),
-                status: f.status === 'Live' ? 'live' : 'upcoming',
-                sportKey: 'cricket_international', // Unified key for cricket
-                lastUpdated: new Date()
-            }));
-
-        // 4. Sort and Store (All today's matches + next 10 upcoming)
+        // 4. Sort and Store
         const upcomingOrLive = matches.filter(m => m.status !== 'completed');
         upcomingOrLive.sort((a, b) => a.startTime - b.startTime);
 
@@ -75,14 +72,9 @@ const fetchUpcomingMatches = async (io) => {
         const futureMatches = upcomingOrLive.filter(m => m.startTime >= todayEnd).slice(0, 30);
 
         const topMatches = [...todayMatches, ...futureMatches];
-
-        // Keep completed matches too (we'll fetch them separately or they exist in DB)
-        // For now, let's just make sure we don't delete them if they were recently completed.
-
         const activeIds = topMatches.map(m => m.matchId);
 
         for (const m of topMatches) {
-            // Upsert with default score if new
             await Match.findOneAndUpdate(
                 { matchId: m.matchId },
                 {
@@ -100,17 +92,15 @@ const fetchUpcomingMatches = async (io) => {
             );
         }
 
-        // 5. Final Pruning: Remove matches not in the fresh fetch
-        // We remove them if they are for yesterday/past or if they are NOT in the fresh active list.
-        // Special case: If a match is 'live' in DB but NOT in the activeIds, and it's old, prune it.
-        const staleLiveTime = new Date(Date.now() - 12 * 60 * 60 * 1000); // 12 hours ago
+        // 5. Final Pruning
+        const staleLiveTime = new Date(Date.now() - 12 * 60 * 60 * 1000);
         
         const deleteResult = await Match.deleteMany({
             matchId: { $nin: activeIds },
             $or: [
-                { startTime: { $lt: todayStart } }, // Yesterday's matches
-                { status: 'completed' },             // Any completed match not in the fresh list
-                { status: 'live', startTime: { $lt: staleLiveTime } } // Ghost matches like Romania v Bulgaria
+                { startTime: { $lt: todayStart } },
+                { status: 'completed' },
+                { status: 'live', startTime: { $lt: staleLiveTime } }
             ]
         });
 
@@ -131,4 +121,3 @@ const fetchUpcomingMatches = async (io) => {
 };
 
 module.exports = { fetchUpcomingMatches };
-

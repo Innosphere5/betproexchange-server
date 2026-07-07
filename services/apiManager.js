@@ -1,15 +1,17 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const API_TOKEN = process.env.API_KEY;
-const BASE_URL  = 'https://cricket.sportmonks.com/api/v2.0';
+const API_KEY = process.env.ODDS_API_KEY;
+const BASE_URL = 'https://v5.oddspapi.io/en';
+const SPORT_ID = 27; // Cricket
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 const cache = new Map();
 
 const CACHE_TTL_MS = {
-  fixtures:  120 * 1000,      // 2 minutes — fixture list
-  livescores: 5 * 1000,      // 5 seconds — live scores
+  fixtures:   120 * 1000,     // 2 minutes — fixture list
+  livescores:  10 * 1000,     // 10 seconds — live scores
+  tournaments: 3600 * 1000,   // 1 hour — tournament list
 };
 
 // ─── Circuit Breaker ──────────────────────────────────────────────────────────
@@ -82,13 +84,13 @@ function recordFailure(status, responseData) {
 
 // ─── Core Fetch ──────────────────────────────────────────────────────────────
 
-async function fetchFromSportmonks(endpoint, params = {}, retries = 2) {
+async function fetchFromOddspapi(endpoint, params = {}, retries = 2) {
   const url = `${BASE_URL}/${endpoint}`;
   
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const response = await axios.get(url, {
-        params: { api_token: API_TOKEN, ...params },
+        params: { apiKey: API_KEY, ...params },
         timeout: 15_000,
       });
 
@@ -122,15 +124,20 @@ async function fetchFromSportmonks(endpoint, params = {}, retries = 2) {
 
 /**
  * getData
- * Sportmonks v2 compatible.
- * @param {string} endpoint - e.g. 'fixtures' or 'livescores/now'
- * @param {object} options - { include, filter, cacheKeySuffix }
+ * oddspapi REST compatible.
+ * @param {string} endpoint - e.g. 'fixtures', 'fixtures/live', 'fixtures/today', 'tournaments'
+ * @param {object} options - { params, cacheKeySuffix }
+ * @returns {Promise<Array>} - array of fixture/tournament objects
  */
 async function getData(endpoint, options = {}) {
-  const { include, filter = {}, cacheKeySuffix = '' } = options;
-  const type = endpoint.includes('livescores') ? 'livescores' : 'fixtures';
-  
-  const cacheKey = `${endpoint}:${cacheKeySuffix}:${JSON.stringify(filter)}:${include}`;
+  const { params = {}, cacheKeySuffix = '' } = options;
+
+  // Determine cache type based on endpoint
+  let type = 'fixtures';
+  if (endpoint.includes('live')) type = 'livescores';
+  if (endpoint.includes('tournaments')) type = 'tournaments';
+
+  const cacheKey = `${endpoint}:${cacheKeySuffix}:${JSON.stringify(params)}`;
   const ttl = CACHE_TTL_MS[type] || 60000;
 
   if (isCacheValid(cacheKey, ttl)) return getCached(cacheKey);
@@ -143,10 +150,10 @@ async function getData(endpoint, options = {}) {
 
   if (inflight.has(cacheKey)) return inflight.get(cacheKey);
 
-  const params = { ...filter };
-  if (include) params.include = include;
+  // Always include sportId for cricket
+  const mergedParams = { sportId: SPORT_ID, ...params };
 
-  const promise = fetchFromSportmonks(endpoint, params)
+  const promise = fetchFromOddspapi(endpoint, mergedParams)
     .then(data => {
       setCache(cacheKey, data);
       inflight.delete(cacheKey);
@@ -162,6 +169,16 @@ async function getData(endpoint, options = {}) {
   return promise;
 }
 
+/**
+ * getFixtureOdds
+ * Fetch odds for a specific fixture
+ * @param {string} fixtureId
+ * @returns {Promise<object>}
+ */
+async function getFixtureOdds(fixtureId) {
+  return fetchFromOddspapi('fixtures/odds', { fixtureId });
+}
+
 function getStatus() {
   return {
     rateLimitedUntil,
@@ -170,5 +187,4 @@ function getStatus() {
   };
 }
 
-module.exports = { getData, getStatus };
-
+module.exports = { getData, getFixtureOdds, getStatus };

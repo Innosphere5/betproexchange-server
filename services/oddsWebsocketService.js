@@ -51,7 +51,7 @@ class OddsWebsocketService {
                         isLive: fixture.status?.live || fixture.status === 'live'
                     });
                     
-                    const dbMatch = await this.matchOddsEventToSportMonksFixture(eventId, home, away);
+                    const dbMatch = await this.matchOddsEventToDbFixture(eventId, home, away);
                     if (dbMatch) {
                         this.eventMapping.set(eventId, dbMatch.matchId);
                         console.log(`[OddsWS] 🔗 Pre-linked ${home} v ${away} (ID: ${eventId}) -> Match ${dbMatch.matchId}`);
@@ -172,19 +172,19 @@ class OddsWebsocketService {
         if (!eventId) return;
 
         try {
-            let sportmonksMatchId = this.eventMapping.get(eventId);
+            let dbMatchId = this.eventMapping.get(eventId);
             const meta = this.eventMetadata.get(eventId);
             
-            if (!sportmonksMatchId && meta && meta.home && meta.away) {
-                const dbMatch = await this.matchOddsEventToSportMonksFixture(eventId, meta.home, meta.away);
+            if (!dbMatchId && meta && meta.home && meta.away) {
+                const dbMatch = await this.matchOddsEventToDbFixture(eventId, meta.home, meta.away);
                 if (dbMatch) {
-                    sportmonksMatchId = dbMatch.matchId;
-                    this.eventMapping.set(eventId, sportmonksMatchId);
-                    console.log(`[OddsWS] 🔗 Linked event ${meta.home} v ${meta.away} to match ${sportmonksMatchId}`);
+                    dbMatchId = dbMatch.matchId;
+                    this.eventMapping.set(eventId, dbMatchId);
+                    console.log(`[OddsWS] 🔗 Linked event ${meta.home} v ${meta.away} to match ${dbMatchId}`);
                 }
             }
 
-            if (!sportmonksMatchId || !meta) return;
+            if (!dbMatchId || !meta) return;
 
             // OddsPapi Odds Payload extraction (targeting Market 271 for match winner)
             let bookiesMap = event.bookmakers || {};
@@ -223,7 +223,7 @@ class OddsWebsocketService {
             const teamB_odds = processRunner(bestAwayPrice);
 
             const payload = {
-                matchId: sportmonksMatchId,
+                matchId: dbMatchId,
                 teamABack: teamA_odds.back,
                 teamALay: teamA_odds.lay,
                 teamBBack: teamB_odds.back,
@@ -235,7 +235,7 @@ class OddsWebsocketService {
                 updatedAt: new Date()
             };
 
-            const cached = this.cache.get(sportmonksMatchId);
+            const cached = this.cache.get(dbMatchId);
             const oddsChanged = !cached || 
                 cached.teamABack !== payload.teamABack || 
                 cached.teamALay !== payload.teamALay ||
@@ -243,11 +243,11 @@ class OddsWebsocketService {
                 cached.teamBLay !== payload.teamBLay;
 
             if (oddsChanged) {
-                this.cache.set(sportmonksMatchId, payload);
+                this.cache.set(dbMatchId, payload);
                 
                 if (this.io) {
                     this.io.emit('market_odds_update', {
-                        matchId: sportmonksMatchId,
+                        matchId: dbMatchId,
                         updatedAt: payload.updatedAt,
                         marketStatus: 'OPEN',
                         runners: [
@@ -269,7 +269,7 @@ class OddsWebsocketService {
                     });
                 }
 
-                this.writeQueue.set(sportmonksMatchId, {
+                this.writeQueue.set(dbMatchId, {
                     ...payload,
                     oddsApiEventId: eventId,
                     teamA: meta.home,
@@ -305,7 +305,7 @@ class OddsWebsocketService {
         for (const update of updates) {
             try {
                 await OddsMarket.findOneAndUpdate(
-                    { sportmonksMatchId: update.matchId },
+                    { dbMatchId: update.matchId },
                     update,
                     { upsert: true }
                 );
@@ -327,7 +327,7 @@ class OddsWebsocketService {
         }
     }
 
-    async matchOddsEventToSportMonksFixture(eventId, apiHomeName, apiAwayName) {
+    async matchOddsEventToDbFixture(eventId, apiHomeName, apiAwayName) {
         const matches = await Match.find({ 
             status: { $in: ['live', 'upcoming'] }
         });

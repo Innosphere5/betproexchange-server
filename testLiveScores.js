@@ -3,26 +3,30 @@ require('dotenv').config();
 
 async function testLiveScores() {
   try {
-    console.log("Fetching livescores from Sportmonks...");
-    const res = await axios.get('https://cricket.sportmonks.com/api/v2.0/livescores', {
+    console.log("Fetching live cricket fixtures from oddspapi...");
+    const res = await axios.get('https://v5.oddspapi.io/en/fixtures/live', {
       params: { 
-        api_token: process.env.API_KEY,
-        include: 'runs,balls,scoreboards,localteam,visitorteam'
+        apiKey: process.env.ODDS_API_KEY,
+        sportId: 27
       }
     });
     
-    const matches = res.data.data;
+    const matches = res.data;
     console.log(`Live matches found: ${matches.length}`);
     
     if (matches.length > 0) {
       matches.forEach(m => {
-        console.log(`Match ID: ${m.id} | ${m.localteam?.name} vs ${m.visitorteam?.name} | League ID: ${m.league_id} | Status: ${m.status}`);
-        console.log(`  Runs:`, JSON.stringify(m.runs?.map(r => ({ team: r.team_id, score: r.score, wickets: r.wickets, overs: r.overs }))));
+        const p1 = m.participants?.participant1Name || 'Team 1';
+        const p2 = m.participants?.participant2Name || 'Team 2';
+        const p1Score = m.scores?.result?.participant1Score || 0;
+        const p2Score = m.scores?.result?.participant2Score || 0;
+        console.log(`Match ID: ${m.fixtureId} | ${p1} vs ${p2} | Tournament: ${m.tournament?.tournamentName} | Status: ${m.status?.statusName}`);
+        console.log(`  Scores: ${p1} ${p1Score} - ${p2Score} ${p2}`);
       });
     }
 
   } catch (error) {
-    console.error("Error fetching livescores:", error.message);
+    console.error("Error fetching live scores:", error.response?.status, error.response?.data || error.message);
   }
 }
 

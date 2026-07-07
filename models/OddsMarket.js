@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const oddsMarketSchema = new mongoose.Schema({
-  sportmonksMatchId: { type: String, required: true, index: true },
+  dbMatchId: { type: String, required: true, index: true },
   oddsApiEventId: { type: String, required: true, index: true },
 
   teamA: { type: String },
@@ -23,6 +23,6 @@ const oddsMarketSchema = new mongoose.Schema({
 });
 
 // Compound index for quick lookups
-oddsMarketSchema.index({ sportmonksMatchId: 1, oddsApiEventId: 1 });
+oddsMarketSchema.index({ dbMatchId: 1, oddsApiEventId: 1 });
 
 module.exports = mongoose.model('OddsMarket', oddsMarketSchema);

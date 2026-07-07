@@ -6,10 +6,10 @@ const { settleMatch } = require('./settlementService');
 /**
  * processMatchResults
  * 
- * Logic to fetch results from Sportmonks v2 API, identify completed matches, 
- * determine the winner, and trigger settlement.
+ * Uses oddspapi REST API to fetch recently completed fixtures,
+ * determine the winner, and trigger bet settlement.
  * 
- * ENHANCED: Now also checks for results of every "MATCHED" bet in the DB, 
+ * ENHANCED: Also checks for results of every "MATCHED" bet in the DB, 
  * even if the Match object was deleted or is old.
  */
 const processMatchResults = async (io) => {
@@ -34,63 +34,53 @@ const processMatchResults = async (io) => {
 
         console.log(`[ResultSettlement] Found ${allIdsToCheck.length} unique match IDs to check result status.`);
 
-        // Sportmonks allows fetching multiple fixtures by ID if separated by comma in some versions, 
-        // but for safety and v2 compatibility, we'll try a date-based bulk fetch first for a wider window (yesterday to tomorrow).
-        const d = new Date();
-        const tomorrow = new Date(d.getTime() + 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        d.setDate(d.getDate() - 1); 
-        const yesterday = d.toISOString().split('T')[0];
+        // Fetch today's fixtures from oddspapi (covers yesterday through tomorrow)
+        const yesterdayTs = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+        const tomorrowTs = Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000);
 
-        console.log(`[ResultSettlement] Fetching fixtures between ${yesterday} and ${tomorrow}`);
+        console.log(`[ResultSettlement] Fetching fixtures from oddspapi...`);
 
         const response = await getData('fixtures', {
-            filter: {
-                'filter[starts_between]': `${yesterday},${tomorrow}`,
-            },
-            include: 'runs,localteam,visitorteam'
+            params: {
+                startTimeFrom: yesterdayTs,
+                startTimeTo: tomorrowTs,
+            }
         });
 
-        if (!response || !Array.isArray(response.data)) {
+        if (!response || !Array.isArray(response)) {
             console.warn('[ResultSettlement] API returned no fixture data.');
             return;
         }
 
-        const apifixtures = response.data;
-        console.log(`[ResultSettlement] Fetched ${apifixtures.length} fixtures for the check.`);
+        const apiFixtures = response;
+        console.log(`[ResultSettlement] Fetched ${apiFixtures.length} fixtures for the check.`);
 
         for (const matchId of allIdsToCheck) {
-            const apiMatch = apifixtures.find(f => f.id?.toString() === matchId);
+            const apiMatch = apiFixtures.find(f => f.fixtureId === matchId);
 
             if (!apiMatch) {
-                // If match is older than 7 days, it won't be in the bulk fetch.
-                // We should ideally fetch it by ID specifically, but Sportmonks v2 fixtures endpoint 
-                // might need a different path. For now, we print a log.
-                // console.log(`[ResultSettlement] Match ${matchId} not found in 7-day window.`);
                 continue;
             }
 
-            // Sportmonks statuses: 'Finished', 'Aborted', 'No Result', 'Abandoned', 'Aban.', 'Canc.'
-            const isCompleted = ['Finished', 'Aborted', 'No Result', 'Abandoned', 'Aban.', 'Canc.'].includes(apiMatch.status);
+            // oddspapi statuses: statusId=2 means "Finished"
+            const isCompleted = apiMatch.status?.statusName === 'Finished' || 
+                                apiMatch.status?.statusId === 2 ||
+                                apiMatch.trueEndTime != null;
 
             if (isCompleted) {
-                console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status}.`);
+                console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status?.statusName}.`);
 
                 let winningTeam = 'VOID'; 
 
-                if (apiMatch.status === 'Finished') {
-                    if (apiMatch.winner_team_id === apiMatch.localteam_id) {
-                        winningTeam = apiMatch.localteam?.name || 'Home Team';
-                    } else if (apiMatch.winner_team_id === apiMatch.visitorteam_id) {
-                        winningTeam = apiMatch.visitorteam?.name || 'Away Team';
-                    } else {
-                        const runs = apiMatch.runs || [];
-                        const rA = runs.find(r => r.team_id === apiMatch.localteam_id)?.score || 0;
-                        const rB = runs.find(r => r.team_id === apiMatch.visitorteam_id)?.score || 0;
+                if (apiMatch.status?.statusName === 'Finished') {
+                    const p1Score = apiMatch.scores?.result?.participant1Score || 0;
+                    const p2Score = apiMatch.scores?.result?.participant2Score || 0;
+                    const p1Name = apiMatch.participants?.participant1Name || 'Team 1';
+                    const p2Name = apiMatch.participants?.participant2Name || 'Team 2';
 
-                        if (rA > rB) winningTeam = apiMatch.localteam?.name || 'Home Team';
-                        else if (rB > rA) winningTeam = apiMatch.visitorteam?.name || 'Away Team';
-                        else winningTeam = 'TIE';
-                    }
+                    if (p1Score > p2Score) winningTeam = p1Name;
+                    else if (p2Score > p1Score) winningTeam = p2Name;
+                    else winningTeam = 'TIE';
                 }
 
                 console.log(`[ResultSettlement] Identified winner for ${matchId}: ${winningTeam}`);
@@ -98,15 +88,14 @@ const processMatchResults = async (io) => {
                 // 1. Update Match record if it exists
                 const dbMatch = pendingMatches.find(m => m.matchId === matchId);
                 if (dbMatch) {
+                    const p1Score = apiMatch.scores?.result?.participant1Score || 0;
+                    const p2Score = apiMatch.scores?.result?.participant2Score || 0;
+
                     dbMatch.status = 'completed';
                     dbMatch.winner = winningTeam;
-                    const runs = apiMatch.runs || [];
-                    const tA = runs.find(r => r.team_id === apiMatch.localteam_id);
-                    const tB = runs.find(r => r.team_id === apiMatch.visitorteam_id);
-                    
                     dbMatch.score = {
-                        teamA_runs: tA ? `${tA.score}/${tA.wickets}` : dbMatch.score?.teamA_runs || '0/0',
-                        teamB_runs: tB ? `${tB.score}/${tB.wickets}` : dbMatch.score?.teamB_runs || '0/0',
+                        teamA_runs: `${p1Score}`,
+                        teamB_runs: `${p2Score}`,
                         overs: "Final",
                         lastUpdated: new Date()
                     };
