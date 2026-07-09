@@ -6,6 +6,43 @@ function normalizeText(value) {
     .trim();
 }
 
+function getFixtureStartTimeMs(fixture) {
+  const rawStart = fixture?.startTime;
+  if (rawStart === undefined || rawStart === null || rawStart === "") return null;
+
+  const parsed = Number(rawStart);
+  if (!Number.isFinite(parsed)) return null;
+
+  return parsed > 1e12 ? parsed : parsed * 1000;
+}
+
+function hasOddsMarket(fixture) {
+  if (fixture?.hasOdds === true) return true;
+
+  const oddsCandidate = fixture?.oddsData || fixture?.odds || fixture?.markets;
+  if (!oddsCandidate) {
+    const hasBasicOdds = [
+      fixture?.backOddsA,
+      fixture?.layOddsA,
+      fixture?.backOddsB,
+      fixture?.layOddsB,
+    ].some((value) => value !== null && value !== undefined && value !== "");
+    return hasBasicOdds;
+  }
+
+  const items = Array.isArray(oddsCandidate) ? oddsCandidate : [oddsCandidate];
+  return items.some((item) => {
+    if (!item || typeof item !== "object") return false;
+    if (item.bookmakers || item.bookmaker || item.markets) return true;
+
+    const nestedValues = Object.values(item);
+    return nestedValues.some((value) => {
+      if (!value || typeof value !== "object") return false;
+      return Boolean(value.bookmaker || value.markets || value.odds || value.outcomes);
+    });
+  });
+}
+
 function isCricketFixture(fixture) {
   const sportName = normalizeText(
     fixture?.sport?.sportName || fixture?.sport_key || fixture?.sport || "",
@@ -41,10 +78,27 @@ function isCricketFixture(fixture) {
   );
 }
 
-function shouldIncludeFixture(fixture) {
+function shouldIncludeFixture(fixture, now = new Date()) {
   if (!fixture) return false;
 
   if (!isCricketFixture(fixture)) return false;
+
+  const startTimeMs = getFixtureStartTimeMs(fixture);
+  if (startTimeMs !== null) {
+    const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
+    const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+    const isLiveFixture = Boolean(
+      fixture?.status?.live ||
+        /live|in play|in-play|paused|delayed/i.test(
+          normalizeText(
+            fixture?.status?.statusName || fixture?.status?.shortName || "",
+          ),
+        ),
+    );
+
+    const isWithinWindow = startTimeMs >= nowMs && startTimeMs <= nowMs + twoDaysMs;
+    if (!isWithinWindow && !isLiveFixture) return false;
+  }
 
   const tournamentName = normalizeText(
     fixture?.tournament?.tournamentName ||
@@ -86,4 +140,26 @@ function shouldIncludeFixture(fixture) {
   return true;
 }
 
-module.exports = { shouldIncludeFixture, normalizeText };
+function selectDisplayableFixtures(fixtures, options = {}) {
+  const now = options.now || new Date();
+  const limit = options.limit || 7;
+  const requireOdds = options.requireOdds !== false;
+
+  const selected = [];
+  for (const fixture of fixtures || []) {
+    if (!shouldIncludeFixture(fixture, now)) continue;
+    if (requireOdds && !hasOddsMarket(fixture)) continue;
+
+    selected.push(fixture);
+    if (selected.length >= limit) break;
+  }
+
+  return selected;
+}
+
+module.exports = {
+  shouldIncludeFixture,
+  normalizeText,
+  hasOddsMarket,
+  selectDisplayableFixtures,
+};

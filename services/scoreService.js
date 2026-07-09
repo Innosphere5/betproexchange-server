@@ -1,12 +1,69 @@
 const Match = require('../models/Match');
 const { getData } = require('./apiManager');
 
+const normalizeScoreValue = (value, fallback = 0) => {
+    if (value === null || value === undefined || value === '') return fallback;
+    return value;
+};
+
+const normalizeScoreText = (value, fallback = '0.0') => {
+    if (value === null || value === undefined || value === '') return fallback;
+    if (typeof value === 'number') return String(value);
+    return String(value);
+};
+
+const extractLiveScorePayload = (liveData, existingScore = {}) => {
+    const scores = liveData?.scores || {};
+    const resultScore = scores.result || {};
+
+    const p1Score = normalizeScoreValue(resultScore.participant1Score, 0);
+    const p2Score = normalizeScoreValue(resultScore.participant2Score, 0);
+
+    const extracted = {
+        teamA_runs: String(p1Score),
+        teamB_runs: String(p2Score),
+        overs: normalizeScoreText(
+            resultScore.overs ?? liveData?.clock?.currentTime ?? existingScore?.overs,
+            existingScore?.overs || '0.0'
+        ),
+        wickets: normalizeScoreValue(
+            resultScore.wickets ?? existingScore?.wickets,
+            existingScore?.wickets || 0
+        ),
+        target: normalizeScoreValue(
+            resultScore.target ?? existingScore?.target,
+            existingScore?.target || 0
+        ),
+        runRate: normalizeScoreText(
+            resultScore.runRate ?? existingScore?.runRate,
+            existingScore?.runRate || '0.00'
+        ),
+        reqRunRate: normalizeScoreText(
+            resultScore.reqRunRate ?? existingScore?.reqRunRate,
+            existingScore?.reqRunRate || '0.00'
+        ),
+        thisOver: Array.isArray(resultScore.thisOver)
+            ? resultScore.thisOver
+            : (Array.isArray(existingScore?.thisOver) ? existingScore.thisOver : []),
+        remRuns: normalizeScoreValue(
+            resultScore.remRuns ?? existingScore?.remRuns,
+            existingScore?.remRuns || 0
+        ),
+        remBalls: normalizeScoreValue(
+            resultScore.remBalls ?? existingScore?.remBalls,
+            existingScore?.remBalls || 0
+        )
+    };
+
+    return extracted;
+};
+
 /**
  * updateLiveScores
  * 
  * Migrated to oddspapi REST API (v5.oddspapi.io).
  * Fetches live fixtures from /fixtures/live endpoint.
- * Extracts participant scores from the oddspapi scores object.
+ * Extracts participant scores and available in-play detail from the oddspapi payload.
  */
 const updateLiveScores = async (io) => {
     try {
@@ -39,17 +96,11 @@ const updateLiveScores = async (io) => {
                 console.log(`[ScoreService] Automatically added missing LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
             }
 
-            // Extract scores from oddspapi format
-            const scores = liveData.scores || {};
-            const resultScore = scores.result || {};
-            const p1Score = resultScore.participant1Score || 0;
-            const p2Score = resultScore.participant2Score || 0;
-
-            // oddspapi provides total runs per team in scores.result
-            // For cricket, format as "runs/wickets" — oddspapi doesn't provide wickets separately
-            // so we use the total score format
-            const teamA_score = `${p1Score}`;
-            const teamB_score = `${p2Score}`;
+            const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
+            const p1Score = parsedScore.teamA_runs;
+            const p2Score = parsedScore.teamB_runs;
+            const teamA_score = String(p1Score);
+            const teamB_score = String(p2Score);
 
             // Determine if match is finished
             const isFinished = liveData.status?.statusName === 'Finished' || 
@@ -69,6 +120,12 @@ const updateLiveScores = async (io) => {
             const hasChanged = (
                 matchInDb.score?.teamA_runs !== teamA_score ||
                 matchInDb.score?.teamB_runs !== teamB_score ||
+                matchInDb.score?.overs !== parsedScore.overs ||
+                matchInDb.score?.runRate !== parsedScore.runRate ||
+                matchInDb.score?.reqRunRate !== parsedScore.reqRunRate ||
+                matchInDb.score?.thisOver?.join(',') !== parsedScore.thisOver.join(',') ||
+                matchInDb.score?.remRuns !== parsedScore.remRuns ||
+                matchInDb.score?.remBalls !== parsedScore.remBalls ||
                 matchInDb.status !== currentStatus
             );
 
@@ -82,14 +139,14 @@ const updateLiveScores = async (io) => {
                             score: {
                                 teamA_runs: teamA_score,
                                 teamB_runs: teamB_score,
-                                overs:      isFinished ? "Final" : (matchInDb.score?.overs || "0.0"),
-                                wickets:    matchInDb.score?.wickets || 0,
-                                target:     matchInDb.score?.target || 0,
-                                runRate:    matchInDb.score?.runRate || "0.00",
-                                reqRunRate: matchInDb.score?.reqRunRate || "0.00",
-                                thisOver:   matchInDb.score?.thisOver || [],
-                                remRuns:    matchInDb.score?.remRuns || 0,
-                                remBalls:   matchInDb.score?.remBalls || 0,
+                                overs:      isFinished ? "Final" : parsedScore.overs,
+                                wickets:    parsedScore.wickets,
+                                target:     parsedScore.target,
+                                runRate:    parsedScore.runRate,
+                                reqRunRate: parsedScore.reqRunRate,
+                                thisOver:   parsedScore.thisOver,
+                                remRuns:    parsedScore.remRuns,
+                                remBalls:   parsedScore.remBalls,
                                 lastUpdated: new Date()
                             },
                             lastUpdated: new Date()
@@ -103,17 +160,17 @@ const updateLiveScores = async (io) => {
                 io.emit('live_score_update', {
                     matchId: matchId,
                     score:   p1Score,
-                    overs:   isFinished ? "Final" : (matchInDb.score?.overs || "0.0"),
-                    wickets: matchInDb.score?.wickets || 0,
+                    overs:   isFinished ? "Final" : parsedScore.overs,
+                    wickets: parsedScore.wickets,
                     status:  currentStatus,
                     teamA_runs: teamA_score,
                     teamB_runs: teamB_score,
-                    target:     matchInDb.score?.target || 0,
-                    runRate:    matchInDb.score?.runRate || "0.00",
-                    reqRunRate: matchInDb.score?.reqRunRate || "0.00",
-                    thisOver:   matchInDb.score?.thisOver || [],
-                    remRuns:    matchInDb.score?.remRuns || 0,
-                    remBalls:   matchInDb.score?.remBalls || 0
+                    target:     parsedScore.target,
+                    runRate:    parsedScore.runRate,
+                    reqRunRate: parsedScore.reqRunRate,
+                    thisOver:   parsedScore.thisOver,
+                    remRuns:    parsedScore.remRuns,
+                    remBalls:   parsedScore.remBalls
                 });
             }
         }
@@ -144,4 +201,4 @@ const updateLiveScores = async (io) => {
     }
 };
 
-module.exports = { updateLiveScores };
+module.exports = { updateLiveScores, extractLiveScorePayload };

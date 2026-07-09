@@ -39,7 +39,7 @@ async function test() {
         type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
       }).sort({ createdAt: -1 });
 
-      return await generateFinalSheet(currentUser, txs);
+      return await generateFinalSheet(currentUser, txs, true);
     }
 
     console.log("\n=================== FINAL SHEET FOR MASTER ===================");

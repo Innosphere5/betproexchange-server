@@ -1,5 +1,7 @@
 const assert = require("assert");
-const { shouldIncludeFixture } = require("../services/fixtureFilter");
+const { shouldIncludeFixture, selectDisplayableFixtures } = require("../services/fixtureFilter");
+
+const referenceNow = new Date("2026-07-08T12:00:00Z");
 
 const cases = [
   {
@@ -66,10 +68,20 @@ const cases = [
     },
     expected: false,
   },
+  {
+    name: "excludes fixtures beyond the next two days",
+    fixture: {
+      fixtureId: "7",
+      startTime: Math.floor(referenceNow.getTime() / 1000) + 3 * 24 * 60 * 60,
+      tournament: { tournamentName: "International - Twenty20 International" },
+      participants: { participant1Name: "India", participant2Name: "England" },
+    },
+    expected: false,
+  },
 ];
 
 for (const testCase of cases) {
-  const actual = shouldIncludeFixture(testCase.fixture);
+  const actual = shouldIncludeFixture(testCase.fixture, referenceNow);
   assert.strictEqual(
     actual,
     testCase.expected,
@@ -77,4 +89,19 @@ for (const testCase of cases) {
   );
 }
 
-console.log(`fixtureFilter tests passed (${cases.length} cases)`);
+const cappedFixtures = Array.from({ length: 10 }, (_, index) => ({
+  fixtureId: `cap-${index}`,
+  startTime: Math.floor(referenceNow.getTime() / 1000) + 60,
+  tournament: { tournamentName: "International - Twenty20 International" },
+  participants: { participant1Name: `Team ${index}`, participant2Name: `Team ${index + 1}` },
+  hasOdds: true,
+}));
+
+const capped = selectDisplayableFixtures(cappedFixtures, {
+  now: referenceNow,
+  limit: 7,
+  requireOdds: true,
+});
+assert.strictEqual(capped.length, 7, `expected capped fixtures to be 7, got ${capped.length}`);
+
+console.log(`fixtureFilter tests passed (${cases.length + 1} cases)`);

@@ -689,7 +689,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     const txs = await Transaction.find(query).sort({ createdAt: -1 });
 
-    const finalSheetData = await generateFinalSheet(currentUser, txs);
+    const finalSheetData = await generateFinalSheet(currentUser, txs, true);
 
     const sharesMap = {};
     const uniqueUsernames = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];

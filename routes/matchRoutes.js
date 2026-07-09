@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Match = require('../models/Match');
+const { shouldIncludeFixture } = require('../services/fixtureFilter');
 
 // Helper to deduplicate matches by team names
 function deduplicateMatches(matches) {
@@ -36,7 +37,12 @@ function deduplicateMatches(matches) {
 router.get('/live', async (req, res) => {
     try {
         const liveMatches = await Match.find({ status: 'live' }).sort({ startTime: -1 });
-        res.json(deduplicateMatches(liveMatches));
+        const now = new Date();
+        const filtered = deduplicateMatches(liveMatches)
+            .filter((match) => shouldIncludeFixture(match, now))
+            .filter((match) => Boolean(match.backOddsA !== null || match.backOddsB !== null || match.layOddsA !== null || match.layOddsB !== null))
+            .slice(0, 7);
+        res.json(filtered);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -85,7 +91,12 @@ router.get('/odds-status', async (req, res) => {
 router.get('/', async (req, res) => {
     try {
         const matches = await Match.find().sort({ startTime: 1 });
-        res.json(deduplicateMatches(matches));
+        const now = new Date();
+        const filtered = deduplicateMatches(matches)
+            .filter((match) => shouldIncludeFixture(match, now))
+            .filter((match) => Boolean(match.backOddsA !== null || match.backOddsB !== null || match.layOddsA !== null || match.layOddsB !== null || match.status === 'live'))
+            .slice(0, 7);
+        res.json(filtered);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

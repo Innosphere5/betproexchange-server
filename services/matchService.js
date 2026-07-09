@@ -1,6 +1,6 @@
 const Match = require("../models/Match");
 const { getData } = require("./apiManager");
-const { shouldIncludeFixture } = require("./fixtureFilter");
+const { shouldIncludeFixture, selectDisplayableFixtures } = require("./fixtureFilter");
 
 /**
  * fetchUpcomingMatches
@@ -29,13 +29,14 @@ const fetchUpcomingMatches = async (io) => {
     }
 
     // 2. Fetch upcoming fixtures from oddspapi (next 7 days)
-    const now = Math.floor(Date.now() / 1000);
-    const weekLater = now + 7 * 24 * 3600;
+    const now = new Date();
+    const nowTs = Math.floor(now.getTime() / 1000);
+    const twoDaysLater = nowTs + 2 * 24 * 3600;
 
     const response = await getData("fixtures", {
       params: {
-        startTimeFrom: now,
-        startTimeTo: weekLater,
+        startTimeFrom: nowTs,
+        startTimeTo: twoDaysLater,
       },
     });
 
@@ -58,24 +59,46 @@ const fetchUpcomingMatches = async (io) => {
       );
     }
 
+    const fixturePool = [];
+    for (const fixture of response) {
+      if (!shouldIncludeFixture(fixture, now)) continue;
+
+      const fixtureId = fixture.fixtureId || fixture.id;
+      if (!fixtureId) continue;
+
+      const oddsResponse = await getData("fixtures/odds", {
+        params: { fixtureId },
+      });
+
+      const hasOdds = Boolean(oddsResponse && (Array.isArray(oddsResponse) ? oddsResponse.length > 0 : Object.keys(oddsResponse).length > 0));
+      if (!hasOdds) continue;
+
+      fixturePool.push({ ...fixture, hasOdds: true });
+      if (fixturePool.length >= 7) break;
+    }
+
+    const displayFixtures = selectDisplayableFixtures(fixturePool, {
+      now,
+      limit: 7,
+      requireOdds: true,
+    });
+
     // 3. Map oddspapi fixtures to our Match model format
-    let matches = response
-      .filter((f) => shouldIncludeFixture(f))
-      .map((f) => ({
-        matchId: f.fixtureId,
-        tournamentId: f.tournament?.tournamentId || null,
-        teamA: f.participants?.participant1Name || "Team 1",
-        teamB: f.participants?.participant2Name || "Team 2",
-        league: f.tournament?.tournamentName || "Cricket",
-        startTime: new Date(f.startTime * 1000), // oddspapi uses unix timestamp
-        status: f.status?.live
-          ? "live"
-          : f.status?.statusName === "Finished"
-            ? "completed"
-            : "upcoming",
-        sportKey: "cricket_international",
-        lastUpdated: new Date(),
-      }));
+    let matches = displayFixtures.map((f) => ({
+      matchId: f.fixtureId || f.id,
+      tournamentId: f.tournament?.tournamentId || null,
+      teamA: f.participants?.participant1Name || f.home_team || "Team 1",
+      teamB: f.participants?.participant2Name || f.away_team || "Team 2",
+      league: f.tournament?.tournamentName || f.league || "Cricket",
+      startTime: new Date((f.startTime || f.commence_time || 0) * 1000),
+      status: f.status?.live
+        ? "live"
+        : f.status?.statusName === "Finished"
+          ? "completed"
+          : "upcoming",
+      sportKey: "cricket_international",
+      lastUpdated: new Date(),
+    }));
 
     // 4. Sort and Store
     const upcomingOrLive = matches.filter((m) => m.status !== "completed");

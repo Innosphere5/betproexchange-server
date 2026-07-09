@@ -6,7 +6,7 @@ const User = require('../models/User');
  * @param {Array} txs - The list of transactions to process.
  * @returns {Object} { viewer, greenEntries, redEntries, totalGreen, totalRed, netAmount, platformFee, masterInfo }
  */
-async function generateFinalSheet(currentUser, txs) {
+async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const PLATFORM_FEE_RATE = 0.05;
 
   const uniqueBettorNames = [...new Set(txs.map(tx => tx.bettor).filter(Boolean))];
@@ -132,6 +132,18 @@ async function generateFinalSheet(currentUser, txs) {
 
   function addEntry(side, accountId, accountName, amount, role, details = {}) {
     if (amount === 0) return;
+
+    // Auto-populate parentName if role is user (bettor)
+    if (role === 'user' && !details.parentName) {
+      const uDoc = userMap[accountName];
+      if (uDoc && uDoc.parentId) {
+        const pDoc = userMap[uDoc.parentId.toString()];
+        if (pDoc) {
+          details.parentName = pDoc.username;
+        }
+      }
+    }
+
     const entry = { accountId, accountName, amount, role, ...details };
     if (side === 'green') {
       greenEntries.push(entry);
@@ -154,52 +166,65 @@ async function generateFinalSheet(currentUser, txs) {
     const aShare = aUser ? (aUser.share || 0) : 0;
     const saShare = Math.max(0, 85 - aShare - mShare);
 
-    const mPortion = Math.abs(bNet) * (mShare / 100);
-    const aPortion = Math.abs(bNet) * (aShare / 100);
-    const saPortion = Math.abs(bNet) * (saShare / 100);
-    const bookPortion = Math.abs(bNet) * (bookShare / 100);
+    let mPortion, aPortion, saPortion, bookPortion;
+    if (isDailyReport) {
+      mPortion = Math.abs(bNet) * (mShare / 100);
+      aPortion = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
+      saPortion = Math.abs(bNet) * (Math.max(0, 100 - aShare) / 100);
+      bookPortion = 0;
+    } else {
+      mPortion = Math.abs(bNet) * (mShare / 100);
+      aPortion = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
+      saPortion = Math.abs(bNet) * (Math.max(0, 85 - aShare) / 100);
+      bookPortion = Math.abs(bNet) * (bookShare / 100);
+    }
 
     const parentPortion = Math.abs(bNet) - mPortion;
     const adminParentPortion = parentPortion - aPortion;
 
+    // Determine sides based on who won:
+    // bNet > 0 means the bettor won. Bettor goes to Green, hierarchy goes to Red.
+    // bNet < 0 means the bettor lost. Bettor goes to Red, hierarchy goes to Green.
+    const bettorSide = bNet > 0 ? 'green' : 'red';
+    const otherSide = bNet > 0 ? 'red' : 'green';
+    const amountAbs = Math.abs(bNet);
+
     if (currentUser.role === 'master') {
-      if (bNet > 0) { // Bettor loses, Hierarchy Profit = Green
-        addEntry('red', bName, bName, bNet, 'user');
-        if (mPortion > 0) addEntry('green', currentUser.username, currentUser.username, mPortion, 'master');
-        if (parentPortion > 0) addEntry('green', parentName, parentName, parentPortion, 'admin');
-        netAmount += mPortion; 
-      } else { // Bettor wins, Hierarchy Loss = Red
-        addEntry('green', bName, bName, Math.abs(bNet), 'user');
-        if (mPortion > 0) addEntry('red', currentUser.username, currentUser.username, mPortion, 'master');
-        if (parentPortion > 0) addEntry('red', parentName, parentName, parentPortion, 'admin');
-        netAmount -= mPortion;
-      }
+      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
+      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      
+      // Other side: Master and Admin (parent)
+      if (mPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, mPortion, 'master');
+      if (parentPortion > 0) addEntry(otherSide, parentName, parentName, parentPortion, 'admin');
+      
+      netAmount += bNet > 0 ? -mPortion : mPortion;
+      
     } else if (currentUser.role === 'admin') {
-      const downlineName = mUser ? mUser.username : 'Unknown Master';
-      if (bNet > 0) { // Bettor loses, Hierarchy Profit = Green
-        if (mPortion > 0) addEntry('green', downlineName, downlineName, mPortion, 'master');
-        if (aPortion > 0) addEntry('green', currentUser.username, currentUser.username, aPortion, 'admin');
-        if (adminParentPortion > 0) addEntry('green', parentName, parentName, adminParentPortion, 'superadmin');
-        netAmount += aPortion;
-      } else { // Bettor wins, Hierarchy Loss = Red
-        if (mPortion > 0) addEntry('red', downlineName, downlineName, mPortion, 'master');
-        if (aPortion > 0) addEntry('red', currentUser.username, currentUser.username, aPortion, 'admin');
-        if (adminParentPortion > 0) addEntry('red', parentName, parentName, adminParentPortion, 'superadmin');
-        netAmount -= aPortion;
-      }
+      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
+      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      
+      // Other side: Master, Admin, and SuperAdmin (parent)
+      const masterName = mUser ? mUser.username : 'Unknown Master';
+      if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+      if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
+      if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+      
+      netAmount += bNet > 0 ? -aPortion : aPortion;
+      
     } else if (currentUser.role === 'superadmin') {
-      const downlineName = aUser ? aUser.username : 'Unknown Admin';
-      if (bNet > 0) { // Bettor loses, Hierarchy Profit = Green
-        if (parentPortion > 0) addEntry('green', downlineName, downlineName, parentPortion, 'admin');
-        if (saPortion > 0) addEntry('green', currentUser.username, currentUser.username, saPortion, 'superadmin');
-        if (bookPortion > 0) addEntry('green', 'BOOK', 'BOOK', bookPortion, 'book');
-        netAmount += saPortion;
-      } else { // Bettor wins, Hierarchy Loss = Red
-        if (parentPortion > 0) addEntry('red', downlineName, downlineName, parentPortion, 'admin');
-        if (saPortion > 0) addEntry('red', currentUser.username, currentUser.username, saPortion, 'superadmin');
-        if (bookPortion > 0) addEntry('red', 'BOOK', 'BOOK', bookPortion, 'book');
-        netAmount -= saPortion;
-      }
+      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
+      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      
+      // Other side: Master, Admin, SuperAdmin, and Book
+      const masterName = mUser ? mUser.username : 'Unknown Master';
+      const adminName = aUser ? aUser.username : 'Unknown Admin';
+      
+      if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+      if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
+      if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+      if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+      
+      netAmount += bNet > 0 ? -saPortion : saPortion;
     }
   }
 
