@@ -755,6 +755,346 @@ router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
   }
 });
 
+// Helper functions for daily report drill downs
+function parseReportDates(req) {
+  const { reportType = 'daily', date, month, year, startDate: sDate, endDate: eDate } = req.query;
+  let start, end;
+  if (reportType === 'monthly' && month) {
+    const [y, m] = month.split('-').map(Number);
+    start = new Date(y, m - 1, 1, 0, 0, 0, 0);
+    end = new Date(y, m, 0, 23, 59, 59, 999);
+  } else if (reportType === 'yearly' && year) {
+    const y = parseInt(year);
+    start = new Date(y, 0, 1, 0, 0, 0, 0);
+    end = new Date(y, 11, 31, 23, 59, 59, 999);
+  } else if (reportType === 'range' && sDate && eDate) {
+    const [sy, sm, sd] = sDate.split('-').map(Number);
+    const [ey, em, ed] = eDate.split('-').map(Number);
+    start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
+    end = new Date(ey, em - 1, ed, 23, 59, 59, 999);
+  } else {
+    if (date) {
+      const [y, m, d] = date.split('-').map(Number);
+      start = new Date(y, m - 1, d, 0, 0, 0, 0);
+      end = new Date(y, m - 1, d, 23, 59, 59, 999);
+    } else {
+      start = new Date();
+      start.setHours(0, 0, 0, 0);
+      end = new Date();
+      end.setHours(23, 59, 59, 999);
+    }
+  }
+  return { start, end };
+}
+
+async function buildUserMap(txs, currentUserId) {
+  const uniqueBettorNames = [...new Set(txs.map(tx => tx.bettor).filter(Boolean))];
+  const uniqueUsers = await User.find({ username: { $in: [...uniqueBettorNames, currentUserId] } }).lean();
+  const parentIds = uniqueUsers.map(u => u.parentId).filter(Boolean);
+  const parents = await User.find({ _id: { $in: parentIds } }).lean();
+  const grandParentIds = parents.map(p => p.parentId).filter(Boolean);
+  const grandParents = await User.find({ _id: { $in: grandParentIds } }).lean();
+
+  const userMap = {};
+  [...uniqueUsers, ...parents, ...grandParents].forEach(u => {
+    if (u) {
+      userMap[u.username] = u;
+      userMap[u._id.toString()] = u;
+    }
+  });
+  return userMap;
+}
+
+function computeBettorNet(tx, userMap, viewerRole) {
+  if (tx.type === 'SETTLEMENT') return 0;
+  
+  const bettorUser = userMap[tx.bettor];
+  if (!bettorUser) return 0;
+  const mUser = bettorUser.parentId ? userMap[bettorUser.parentId.toString()] : null;
+  const aUser = mUser && mUser.parentId ? userMap[mUser.parentId.toString()] : null;
+
+  const mShare = mUser ? (mUser.share || 0) : 0;
+  const aShare = aUser ? (aUser.share || 0) : 0;
+  const saShare = Math.max(0, 85 - aShare - mShare);
+
+  let sharePercent = 0;
+  if (viewerRole === 'master') sharePercent = mShare;
+  else if (viewerRole === 'admin') sharePercent = aShare;
+  else if (viewerRole === 'superadmin') {
+    if (tx.type === 'BOOK_SHARE') sharePercent = 15;
+    else sharePercent = saShare;
+  }
+
+  if (sharePercent <= 0) return 0;
+  return - (tx.amount / (sharePercent / 100));
+}
+
+// 1. Sportwise Report
+router.get('/daily-report-sportwise', auth, isAuthorized, async (req, res) => {
+  try {
+    const { bettor } = req.query;
+    if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
+
+    const { start, end } = parseReportDates(req);
+
+    const query = {
+      userId: req.user.userId,
+      bettor,
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] },
+      createdAt: { $gte: start, $lte: end }
+    };
+
+    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    const userMap = await buildUserMap(txs, req.user.userId);
+
+    const sportwiseMap = {};
+    for (const tx of txs) {
+      const bettorNet = computeBettorNet(tx, userMap, req.user.role);
+      if (bettorNet === 0) continue;
+
+      let category = tx.category || 'cricket';
+      let event = 'Cricket';
+      if (category === 'casino') {
+        event = 'TeenPatti Studio';
+      } else if (category === 'soccer') {
+        event = 'Soccer';
+      } else if (category === 'tennis') {
+        event = 'Tennis';
+      }
+
+      if (!sportwiseMap[event]) {
+        sportwiseMap[event] = { event, amount: 0, category };
+      }
+      sportwiseMap[event].amount += bettorNet;
+    }
+
+    const result = Object.values(sportwiseMap).map(row => ({
+      ...row,
+      amount: Math.round(row.amount * 100) / 100
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error("Sportwise report error:", err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 2. Market Details
+router.get('/daily-report-market-details', auth, isAuthorized, async (req, res) => {
+  try {
+    const { bettor, category } = req.query;
+    if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
+
+    const { start, end } = parseReportDates(req);
+
+    const query = {
+      userId: req.user.userId,
+      bettor,
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] },
+      createdAt: { $gte: start, $lte: end }
+    };
+
+    if (category) {
+      if (category === 'casino' || category === 'TeenPatti Studio') {
+        query.category = 'casino';
+      } else if (category === 'cricket' || category === 'Cricket') {
+        query.category = 'cricket';
+      } else {
+        query.category = category.toLowerCase();
+      }
+    }
+
+    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    const userMap = await buildUserMap(txs, req.user.userId);
+
+    const marketsMap = {};
+    for (const tx of txs) {
+      const bettorNet = computeBettorNet(tx, userMap, req.user.role);
+      if (bettorNet === 0) continue;
+
+      const mName = tx.matchName || 'Unknown Match';
+      if (!marketsMap[mName]) {
+        let displayEvent = mName;
+        if (tx.category === 'casino') {
+          displayEvent = `TeenPatti Studio / Aviator ${mName.replace('RND-', '')}`;
+        }
+        marketsMap[mName] = {
+          date: tx.createdAt,
+          event: displayEvent,
+          amount: 0,
+          matchId: mName,
+          category: tx.category
+        };
+      }
+      marketsMap[mName].amount += bettorNet;
+    }
+
+    const result = Object.values(marketsMap).map(row => ({
+      ...row,
+      amount: Math.round(row.amount * 100) / 100
+    }));
+
+    res.json(result);
+  } catch (err) {
+    console.error("Market details error:", err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 3. Bet Statement
+router.get('/daily-report-bet-statement', auth, isAuthorized, async (req, res) => {
+  try {
+    const { bettor, matchId } = req.query;
+    if (!bettor || !matchId) {
+      return res.status(400).json({ error: 'Bettor and matchId/roundId are required' });
+    }
+
+    const CasinoRound = require('../models/CasinoRound');
+    const CasinoBet = require('../models/CasinoBet');
+    const Bet = require('../models/Bet');
+    const Match = require('../models/Match');
+
+    let isCasino = matchId.startsWith('RND-');
+    
+    let responseData = {
+      winner: 'PENDING',
+      netPL: 0,
+      userName: bettor,
+      bets: [],
+      marketStartTime: null
+    };
+
+    if (isCasino) {
+      const round = await CasinoRound.findOne({ roundId: matchId });
+      if (round) {
+        responseData.winner = round.result === 'PENDING' ? 'PENDING' : `${round.result}`;
+        if (round.startTime) {
+          responseData.marketStartTime = round.startTime;
+        }
+      }
+
+      const casinoBets = await CasinoBet.find({ userId: bettor, roundId: matchId }).lean();
+      
+      let totalNetPL = 0;
+      let betsList = [];
+      let totalGrossProfit = 0;
+      let totalCommission = 0;
+
+      for (const bet of casinoBets) {
+        let pl = 0;
+        let betComm = 0;
+        if (bet.status === 'WIN') {
+          const profit = bet.amount * ((bet.odds || 2.0) - 1);
+          const netProfit = profit * 0.95;
+          betComm = profit * 0.05;
+          pl = netProfit;
+          totalGrossProfit += profit;
+          totalCommission += betComm;
+        } else if (bet.status === 'LOSE') {
+          pl = -bet.amount;
+        }
+
+        totalNetPL += pl;
+
+        betsList.push({
+          runner: bet.choice,
+          price: bet.odds || 2.0,
+          size: bet.amount,
+          side: 'B',
+          pl: Math.round(pl * 100) / 100,
+          placedAt: bet.createdAt
+        });
+
+        if (!responseData.marketStartTime) {
+          responseData.marketStartTime = bet.createdAt;
+        }
+      }
+
+      // If we had a win and therefore some commission, append the commission row
+      if (totalCommission > 0) {
+        betsList.push({
+          runner: 'Commission',
+          price: 1.0,
+          size: Math.round(totalGrossProfit * 100) / 100,
+          side: '',
+          pl: -Math.round(totalCommission * 100) / 100,
+          placedAt: responseData.marketStartTime
+        });
+      }
+
+      responseData.bets = betsList;
+      responseData.netPL = Math.round(totalNetPL * 100) / 100;
+
+    } else {
+      // Cricket bets
+      const cricketMatch = await Match.findOne({ matchName: matchId }).lean();
+      if (cricketMatch) {
+        responseData.winner = cricketMatch.winner || 'PENDING';
+        if (cricketMatch.matchDate) {
+          responseData.marketStartTime = cricketMatch.matchDate;
+        }
+      }
+
+      const bets = await Bet.find({ userId: bettor, matchName: matchId }).lean();
+
+      let totalNetPL = 0;
+      let betsList = [];
+      let totalGrossProfit = 0;
+      let totalCommission = 0;
+
+      for (const bet of bets) {
+        let pl = 0;
+        let betComm = 0;
+        if (bet.status === 'won') {
+          const grossWin = bet.stake * bet.odds;
+          const netWin = bet.payout; // payout is grossWin - commission
+          betComm = grossWin - netWin;
+          pl = netWin - bet.stake;
+          totalGrossProfit += (grossWin - bet.stake);
+          totalCommission += betComm;
+        } else if (bet.status === 'lost') {
+          pl = -bet.stake;
+        }
+
+        totalNetPL += pl;
+
+        betsList.push({
+          runner: bet.runner,
+          price: bet.odds,
+          size: bet.stake,
+          side: bet.type === 'back' ? 'B' : 'L',
+          pl: Math.round(pl * 100) / 100,
+          placedAt: bet.createdAt
+        });
+
+        if (!responseData.marketStartTime) {
+          responseData.marketStartTime = bet.createdAt;
+        }
+      }
+
+      if (totalCommission > 0) {
+        betsList.push({
+          runner: 'Commission',
+          price: 1.0,
+          size: Math.round(totalGrossProfit * 100) / 100,
+          side: '',
+          pl: -Math.round(totalCommission * 100) / 100,
+          placedAt: responseData.marketStartTime
+        });
+      }
+
+      responseData.bets = betsList;
+      responseData.netPL = Math.round(totalNetPL * 100) / 100;
+    }
+
+    res.json(responseData);
+  } catch (err) {
+    console.error("Bet statement error:", err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Clear Daily Report Data (SuperAdmin only)
 router.post('/clear-daily-report', auth, async (req, res) => {
   try {

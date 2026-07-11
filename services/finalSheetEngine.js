@@ -19,8 +19,13 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const grandParentIds = parents.map(p => p.parentId).filter(Boolean);
   const grandParents = await User.find({ _id: { $in: grandParentIds } }).lean();
 
+  let allUsersInDb = [];
+  if (currentUser.role === 'superadmin') {
+    allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
+  }
+
   const userMap = {};
-  [...uniqueUsersInDb, ...parents, ...grandParents, currentUser].forEach(u => {
+  [...uniqueUsersInDb, ...parents, ...grandParents, currentUser, ...allUsersInDb].forEach(u => {
     if (u) {
       userMap[u.username] = u;
       userMap[u._id.toString()] = u;
@@ -236,24 +241,67 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     
     if (netSetl > 0) {
       addEntry('green', name, name, netSetl, role);
+      // Double-entry balancing: the viewer (currentUser) funded this settlement (outgoing/red)
+      addEntry('red', currentUser.username, currentUser.username, netSetl, currentUser.role);
     } else {
       addEntry('red', name, name, Math.abs(netSetl), role);
+      // Double-entry balancing: the viewer (currentUser) received this settlement (incoming/green)
+      addEntry('green', currentUser.username, currentUser.username, Math.abs(netSetl), currentUser.role);
     }
   }
 
-  function aggregateEntries(entries) {
-    const map = {};
-    for (const entry of entries) {
-      if (!map[entry.accountId]) map[entry.accountId] = { ...entry, amount: 0 };
-      map[entry.accountId].amount += entry.amount;
+  // 1. Group and sum green and red amounts per accountId
+  const greenTotalsMap = {};
+  const redTotalsMap = {};
+
+  for (const entry of greenEntries) {
+    const id = entry.accountId;
+    if (!greenTotalsMap[id]) {
+      greenTotalsMap[id] = { ...entry, amount: 0 };
     }
-    return Object.values(map).map(e => ({ ...e, amount: Math.round(e.amount * 100) / 100 })).filter(e => e.amount > 0);
+    greenTotalsMap[id].amount += entry.amount;
   }
 
-  const finalGreen = aggregateEntries(greenEntries);
-  const finalRed = aggregateEntries(redEntries);
-  totalGreen = Math.round(totalGreen * 100) / 100;
-  totalRed = Math.round(totalRed * 100) / 100;
+  for (const entry of redEntries) {
+    const id = entry.accountId;
+    if (!redTotalsMap[id]) {
+      redTotalsMap[id] = { ...entry, amount: 0 };
+    }
+    redTotalsMap[id].amount += entry.amount;
+  }
+
+  // 2. Net the amounts for each unique accountId
+  const allAccountIds = new Set([...Object.keys(greenTotalsMap), ...Object.keys(redTotalsMap)]);
+  const finalGreen = [];
+  const finalRed = [];
+  let calculatedTotalGreen = 0;
+  let calculatedTotalRed = 0;
+
+  for (const id of allAccountIds) {
+    const greenEntry = greenTotalsMap[id];
+    const redEntry = redTotalsMap[id];
+
+    const greenAmt = greenEntry ? greenEntry.amount : 0;
+    const redAmt = redEntry ? redEntry.amount : 0;
+
+    const diff = greenAmt - redAmt;
+    const roundedDiff = Math.round(diff * 100) / 100;
+
+    if (roundedDiff > 0) {
+      // Net Green (Incoming)
+      const baseEntry = greenEntry || redEntry;
+      finalGreen.push({ ...baseEntry, amount: roundedDiff });
+      calculatedTotalGreen += roundedDiff;
+    } else if (roundedDiff < 0) {
+      // Net Red (Outgoing)
+      const baseEntry = redEntry || greenEntry;
+      finalRed.push({ ...baseEntry, amount: Math.abs(roundedDiff) });
+      calculatedTotalRed += Math.abs(roundedDiff);
+    }
+  }
+
+  totalGreen = Math.round(calculatedTotalGreen * 100) / 100;
+  totalRed = Math.round(calculatedTotalRed * 100) / 100;
   netAmount = Math.round(netAmount * 100) / 100;
 
   return {
@@ -264,7 +312,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     totalRed,
     netAmount,
     platformFee: totalPlatformFee,
-    masterInfo
+    masterInfo,
+    allUsers: allUsersInDb.map(u => ({
+      username: u.username,
+      role: u.role,
+      share: u.share || 0,
+      parentId: u.parentId,
+      parentName: u.parentId ? (userMap[u.parentId.toString()]?.username || null) : null
+    }))
   };
 }
 
