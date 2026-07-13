@@ -54,11 +54,14 @@ router.get('/statement', auth, async (req, res) => {
     });
 
     casinoBets.filter(b => b.status === 'WIN').forEach(b => {
+        const profit = b.amount * ((b.odds || 2.0) - 1);
+        const netProfit = profit * 0.95;
+        const netPayout = b.amount + netProfit;
         statement.push({
             id: `WIN-${b._id}`,
             date: b.updatedAt || b.createdAt,
             description: `Casino Win Payout`,
-            amount: Math.max(0, (b.amount * (b.odds || 2.0)) - 50),
+            amount: netPayout,
             type: 'CASINO_WIN',
             status: 'SETTLED'
         });
@@ -98,8 +101,13 @@ router.get('/profit-loss', auth, async (req, res) => {
 
     let casinoPL = 0;
     casinoBets.forEach(b => {
-        if (b.status === 'WIN') casinoPL += ((b.amount * (b.odds || 2.0)) - b.amount - 50);
-        else if (b.status === 'LOSE') casinoPL -= b.amount;
+        if (b.status === 'WIN') {
+            const profit = b.amount * ((b.odds || 2.0) - 1);
+            const netProfit = profit * 0.95;
+            casinoPL += netProfit;
+        } else if (b.status === 'LOSE') {
+            casinoPL -= b.amount;
+        }
     });
 
     res.json({

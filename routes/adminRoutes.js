@@ -747,13 +747,51 @@ router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
       query.bettor = bettor;
     }
 
-    const txs = await Transaction.find(query).sort({ createdAt: -1 });
-    res.json(txs);
+    const txs = await Transaction.find(query).sort({ createdAt: -1 }).lean();
+
+    // Build userMap so we can compute each bettor's actual net P/L
+    const userMap = await buildUserMap(txs, req.user.userId);
+    const viewerRole = req.user.role;
+
+    // Attach bettorNet to each transaction:
+    //   bettorNet = -(tx.amount / (sharePercent / 100))
+    //   Negative bettorNet → bettor lost money
+    //   Positive bettorNet → bettor won money
+    const enriched = [];
+    for (const tx of txs) {
+      if (viewerRole === 'superadmin' && tx.type === 'BOOK_SHARE') {
+        const bettorUser = userMap[tx.bettor];
+        if (bettorUser) {
+          let mUser = null, aUser = null;
+          let temp = bettorUser;
+          while (temp && temp.parentId) {
+            let p = userMap[temp.parentId.toString()];
+            if (!p) break;
+            if (p.role === 'master') mUser = p;
+            else if (p.role === 'admin') aUser = p;
+            temp = p;
+          }
+          const mShare = mUser ? (mUser.share || 0) : 0;
+          const aShare = aUser ? (aUser.share || 0) : 0;
+          const saShare = Math.max(0, 85 - aShare - mShare);
+          if (saShare > 0) continue;
+        }
+      }
+
+      const bettorNet = computeBettorNet(tx, userMap, viewerRole);
+      enriched.push({
+        ...tx,
+        bettorNet: Math.round(bettorNet * 100) / 100
+      });
+    }
+
+    res.json(enriched);
   } catch (err) {
     console.error("Daily Report Details Error:", err);
     res.status(500).json({ error: 'Server error' });
   }
 });
+
 
 // Helper functions for daily report drill downs
 function parseReportDates(req) {
@@ -810,8 +848,16 @@ function computeBettorNet(tx, userMap, viewerRole) {
   
   const bettorUser = userMap[tx.bettor];
   if (!bettorUser) return 0;
-  const mUser = bettorUser.parentId ? userMap[bettorUser.parentId.toString()] : null;
-  const aUser = mUser && mUser.parentId ? userMap[mUser.parentId.toString()] : null;
+
+  let mUser = null, aUser = null;
+  let temp = bettorUser;
+  while (temp && temp.parentId) {
+    let p = userMap[temp.parentId.toString()];
+    if (!p) break;
+    if (p.role === 'master') mUser = p;
+    else if (p.role === 'admin') aUser = p;
+    temp = p;
+  }
 
   const mShare = mUser ? (mUser.share || 0) : 0;
   const aShare = aUser ? (aUser.share || 0) : 0;
@@ -849,6 +895,25 @@ router.get('/daily-report-sportwise', auth, isAuthorized, async (req, res) => {
 
     const sportwiseMap = {};
     for (const tx of txs) {
+      if (req.user.role === 'superadmin' && tx.type === 'BOOK_SHARE') {
+        const bettorUser = userMap[tx.bettor];
+        if (bettorUser) {
+          let mUser = null, aUser = null;
+          let temp = bettorUser;
+          while (temp && temp.parentId) {
+            let p = userMap[temp.parentId.toString()];
+            if (!p) break;
+            if (p.role === 'master') mUser = p;
+            else if (p.role === 'admin') aUser = p;
+            temp = p;
+          }
+          const mShare = mUser ? (mUser.share || 0) : 0;
+          const aShare = aUser ? (aUser.share || 0) : 0;
+          const saShare = Math.max(0, 85 - aShare - mShare);
+          if (saShare > 0) continue;
+        }
+      }
+
       const bettorNet = computeBettorNet(tx, userMap, req.user.role);
       if (bettorNet === 0) continue;
 
@@ -910,6 +975,25 @@ router.get('/daily-report-market-details', auth, isAuthorized, async (req, res) 
 
     const marketsMap = {};
     for (const tx of txs) {
+      if (req.user.role === 'superadmin' && tx.type === 'BOOK_SHARE') {
+        const bettorUser = userMap[tx.bettor];
+        if (bettorUser) {
+          let mUser = null, aUser = null;
+          let temp = bettorUser;
+          while (temp && temp.parentId) {
+            let p = userMap[temp.parentId.toString()];
+            if (!p) break;
+            if (p.role === 'master') mUser = p;
+            else if (p.role === 'admin') aUser = p;
+            temp = p;
+          }
+          const mShare = mUser ? (mUser.share || 0) : 0;
+          const aShare = aUser ? (aUser.share || 0) : 0;
+          const saShare = Math.max(0, 85 - aShare - mShare);
+          if (saShare > 0) continue;
+        }
+      }
+
       const bettorNet = computeBettorNet(tx, userMap, req.user.role);
       if (bettorNet === 0) continue;
 

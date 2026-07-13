@@ -102,8 +102,15 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const bettorUser = userMap[bettorName];
     if (!bettorUser) return;
 
-    const mUser = bettorUser.parentId ? userMap[bettorUser.parentId.toString()] : null;
-    const aUser = mUser && mUser.parentId ? userMap[mUser.parentId.toString()] : null;
+    let mUser = null, aUser = null;
+    let temp = bettorUser;
+    while (temp && temp.parentId) {
+      let p = userMap[temp.parentId.toString()];
+      if (!p) break;
+      if (p.role === 'master') mUser = p;
+      else if (p.role === 'admin') aUser = p;
+      temp = p;
+    }
 
     const mShare = mUser ? (mUser.share || 0) : 0;
     const aShare = aUser ? (aUser.share || 0) : 0;
@@ -123,8 +130,26 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
     if (sharePercent > 0) {
       const bettorNetForTx = - (tx.amount / (sharePercent / 100));
-      if (!bettorSummary[bettorName]) bettorSummary[bettorName] = 0;
-      bettorSummary[bettorName] += bettorNetForTx;
+      if (!bettorSummary[bettorName]) {
+        bettorSummary[bettorName] = { 
+          total: 0, 
+          breakdown: { 
+            cricket: { wins: 0, losses: 0, net: 0 }, 
+            casino: { wins: 0, losses: 0, net: 0 },
+            totalNet: 0
+          } 
+        };
+      }
+      bettorSummary[bettorName].total += bettorNetForTx;
+      
+      const category = tx.category === 'casino' ? 'casino' : 'cricket';
+      bettorSummary[bettorName].breakdown[category].net += bettorNetForTx;
+      if (bettorNetForTx > 0) {
+        bettorSummary[bettorName].breakdown[category].wins += bettorNetForTx;
+      } else {
+        bettorSummary[bettorName].breakdown[category].losses += Math.abs(bettorNetForTx);
+      }
+      bettorSummary[bettorName].breakdown.totalNet += bettorNetForTx;
     }
   });
 
@@ -159,30 +184,34 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     }
   }
 
-  for (const [bName, bNet] of Object.entries(bettorSummary)) {
+  for (const [bName, bData] of Object.entries(bettorSummary)) {
+    const bNet = bData.total;
+    const bBreakdown = bData.breakdown;
     if (bNet === 0) continue;
     
     const bUser = userMap[bName];
     if (!bUser) continue;
-    const mUser = bUser.parentId ? userMap[bUser.parentId.toString()] : null;
-    const aUser = mUser && mUser.parentId ? userMap[mUser.parentId.toString()] : null;
+    let mUser = null, aUser = null;
+    let temp = bUser;
+    while (temp && temp.parentId) {
+      let p = userMap[temp.parentId.toString()];
+      if (!p) break;
+      if (p.role === 'master') mUser = p;
+      else if (p.role === 'admin') aUser = p;
+      temp = p;
+    }
 
     const mShare = mUser ? (mUser.share || 0) : 0;
     const aShare = aUser ? (aUser.share || 0) : 0;
     const saShare = Math.max(0, 85 - aShare - mShare);
 
-    let mPortion, aPortion, saPortion, bookPortion;
-    if (isDailyReport) {
-      mPortion = Math.abs(bNet) * (mShare / 100);
-      aPortion = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
-      saPortion = Math.abs(bNet) * (Math.max(0, 100 - aShare) / 100);
-      bookPortion = 0;
-    } else {
-      mPortion = Math.abs(bNet) * (mShare / 100);
-      aPortion = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
-      saPortion = Math.abs(bNet) * (Math.max(0, 85 - aShare) / 100);
-      bookPortion = Math.abs(bNet) * (bookShare / 100);
-    }
+    // Compute share portions — identical for both daily report and final sheet.
+    // 85% is split: Master gets mShare%, Admin gets aShare%, SuperAdmin gets (85 - aShare - mShare)%.
+    // 15% always goes to Book (platform).
+    const mPortion    = Math.abs(bNet) * (mShare / 100);
+    const aPortion    = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
+    const saPortion   = Math.abs(bNet) * (Math.max(0, 85 - aShare) / 100);
+    const bookPortion = Math.abs(bNet) * (bookShare / 100); // always 15%
 
     const parentPortion = Math.abs(bNet) - mPortion;
     const adminParentPortion = parentPortion - aPortion;
@@ -196,7 +225,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
     if (currentUser.role === 'master') {
       // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
-      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
       
       // Other side: Master and Admin (parent)
       if (mPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, mPortion, 'master');
@@ -206,7 +235,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       
     } else if (currentUser.role === 'admin') {
       // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
-      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
       
       // Other side: Master, Admin, and SuperAdmin (parent)
       const masterName = mUser ? mUser.username : 'Unknown Master';
@@ -218,7 +247,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       
     } else if (currentUser.role === 'superadmin') {
       // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
-      addEntry(bettorSide, bName, bName, amountAbs, 'user');
+      addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
       
       // Other side: Master, Admin, SuperAdmin, and Book
       const masterName = mUser ? mUser.username : 'Unknown Master';
