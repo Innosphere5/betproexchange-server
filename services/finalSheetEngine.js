@@ -42,11 +42,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   let grandParentName = 'SuperAdmin';
   let grandParentShare = 0;
 
+  let parentRole = 'admin';
+
   if (currentUser.parentId) {
     const parentUser = userMap[currentUser.parentId.toString()];
     if (parentUser) {
       parentName = parentUser.username;
       parentShare = parentUser.share || 0;
+      parentRole = parentUser.role;
       if (parentUser.parentId) {
         const grandParent = userMap[parentUser.parentId.toString()];
         if (grandParent) {
@@ -86,14 +89,26 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   txs.forEach(tx => {
     if (!tx.bettor || tx.type === 'SETTLEMENT') {
-      const sourceName = tx.downline || tx.bettor || 'Unknown';
+      let sourceName = tx.downline || tx.bettor || 'Unknown';
+      let txAmount = tx.amount;
+
+      // Handle parent settlements (where current user is the downline)
+      if (tx.downline === currentUser.username) {
+        sourceName = parentName;
+        txAmount = -tx.amount; // invert sign to match current user's perspective
+      }
+
+      if (sourceName === currentUser.username) {
+        return; // Skip self transactions
+      }
+
       if (!settlementSummary[sourceName]) {
         settlementSummary[sourceName] = { green: 0, red: 0 };
       }
-      if (tx.amount > 0) {
-        settlementSummary[sourceName].red += tx.amount;
-      } else if (tx.amount < 0) {
-        settlementSummary[sourceName].green += Math.abs(tx.amount);
+      if (txAmount > 0) {
+        settlementSummary[sourceName].red += txAmount;
+      } else if (txAmount < 0) {
+        settlementSummary[sourceName].green += Math.abs(txAmount);
       }
       return;
     }
@@ -242,6 +257,8 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
       if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
       if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+      
+      netAmount += bNet > 0 ? -aPortion : aPortion;
       
       netAmount += bNet > 0 ? -aPortion : aPortion;
       
