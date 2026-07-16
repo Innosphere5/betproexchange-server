@@ -21,7 +21,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   let allUsersInDb = [];
   if (currentUser.role === 'superadmin') {
-    allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
+    if (isDailyReport) {
+      allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
+    } else {
+      allUsersInDb = await User.find({ role: { $nin: ['superadmin', 'user'] } }).lean();
+    }
   }
 
   const userMap = {};
@@ -175,12 +179,73 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   let netAmount = 0;
   let totalPlatformFee = 0;
 
+  function getRollupTarget(accountName, accountRole) {
+    if (isDailyReport) {
+      return { name: accountName, role: accountRole };
+    }
+
+    if (currentUser.role === 'master') {
+      return { name: accountName, role: accountRole };
+    }
+
+    if (currentUser.role === 'admin') {
+      if (accountRole === 'user') {
+        const uDoc = userMap[accountName];
+        if (uDoc && uDoc.parentId) {
+          const pDoc = userMap[uDoc.parentId.toString()];
+          if (pDoc) {
+            return { name: pDoc.username, role: pDoc.role };
+          }
+        }
+      }
+      return { name: accountName, role: accountRole };
+    }
+
+    if (currentUser.role === 'superadmin') {
+      if (accountRole === 'user') {
+        const uDoc = userMap[accountName];
+        if (uDoc && uDoc.parentId) {
+          const pDoc = userMap[uDoc.parentId.toString()]; // this is master
+          if (pDoc) {
+            if (pDoc.parentId) {
+              const gpDoc = userMap[pDoc.parentId.toString()]; // this is admin
+              if (gpDoc) {
+                return { name: gpDoc.username, role: gpDoc.role };
+              }
+            }
+            return { name: pDoc.username, role: pDoc.role };
+          }
+        }
+      } else if (accountRole === 'master') {
+        const uDoc = userMap[accountName];
+        if (uDoc && uDoc.parentId) {
+          const pDoc = userMap[uDoc.parentId.toString()]; // this is admin
+          if (pDoc) {
+            return { name: pDoc.username, role: pDoc.role };
+          }
+        }
+      }
+      return { name: accountName, role: accountRole };
+    }
+
+    return { name: accountName, role: accountRole };
+  }
+
   function addEntry(side, accountId, accountName, amount, role, details = {}) {
     if (amount === 0) return;
 
+    let targetName = accountName;
+    let targetRole = role;
+
+    if (!isDailyReport && currentUser.role !== 'master') {
+      const target = getRollupTarget(accountName, role);
+      targetName = target.name;
+      targetRole = target.role;
+    }
+
     // Auto-populate parentName if role is user (bettor)
-    if (role === 'user' && !details.parentName) {
-      const uDoc = userMap[accountName];
+    if (targetRole === 'user' && !details.parentName) {
+      const uDoc = userMap[targetName];
       if (uDoc && uDoc.parentId) {
         const pDoc = userMap[uDoc.parentId.toString()];
         if (pDoc) {
@@ -189,7 +254,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       }
     }
 
-    const entry = { accountId, accountName, amount, role, ...details };
+    const entry = { accountId: targetName, accountName: targetName, amount, role: targetRole, ...details };
     if (side === 'green') {
       greenEntries.push(entry);
       totalGreen += amount;

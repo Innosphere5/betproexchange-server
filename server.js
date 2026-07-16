@@ -12,6 +12,7 @@ const User = require('./models/User');
 const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { initRoundManager, getCurrentRound } = require('./services/roundManager');
+const { initAviatorManager } = require('./services/aviatorManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -28,6 +29,7 @@ const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const aviatorRoutes = require('./routes/aviatorRoutes');
 const auth = require('./middleware/auth');
 
 app.use(cors({
@@ -41,6 +43,7 @@ app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/aviator', aviatorRoutes);
 
 // MongoDB Connection Options
 mongoose.set('bufferCommands', true);
@@ -58,6 +61,9 @@ mongoose.connect(process.env.MONGO_URI, {
 
     // Initialize Casino Round Manager with Socket.io
     initRoundManager(io);
+
+    // Initialize Aviator Manager with Socket.io
+    initAviatorManager(io);
 
     // Initial fetch
     const { fetchUpcomingMatches } = require('./services/matchService');

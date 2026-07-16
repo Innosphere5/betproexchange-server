@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Bet = require('../models/Bet');
 const CasinoBet = require('../models/CasinoBet');
+const AviatorBet = require('../models/AviatorBet');
 const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
 
@@ -10,6 +11,7 @@ router.get('/statement', auth, async (req, res) => {
   try {
     const cricketBets = await Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
+    const aviatorBets = await AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
 
     const transactions = await Transaction.find({ userId: req.user.userId }).sort({ createdAt: -1 });
     
@@ -29,6 +31,14 @@ router.get('/statement', auth, async (req, res) => {
         description: `Casino Bet (Choice: ${b.choice})`,
         amount: -b.amount,
         type: 'CASINO_BET',
+        status: b.status
+      })),
+      ...aviatorBets.map(b => ({
+        id: b._id,
+        date: b.createdAt,
+        description: `Aviator Bet (Slot: ${b.betSlot})`,
+        amount: -b.stake,
+        type: 'AVIATOR_BET',
         status: b.status
       })),
       ...transactions.map(t => ({
@@ -67,6 +77,17 @@ router.get('/statement', auth, async (req, res) => {
         });
     });
 
+    aviatorBets.filter(b => b.status === 'WON').forEach(b => {
+        statement.push({
+            id: `WIN-${b._id}`,
+            date: b.cashoutTime || b.createdAt,
+            description: `Aviator Win Payout (${b.cashoutMultiplier}x)`,
+            amount: b.payout,
+            type: 'AVIATOR_WIN',
+            status: 'SETTLED'
+        });
+    });
+
     statement.sort((a, b) => new Date(b.date) - new Date(a.date));
 
     res.json(statement);
@@ -80,8 +101,9 @@ router.get('/results', auth, async (req, res) => {
   try {
     const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
+    const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } }).sort({ createdAt: -1 });
 
-    res.json({ cricket: cricketBets, casino: casinoBets });
+    res.json({ cricket: cricketBets, casino: casinoBets, aviator: aviatorBets });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -92,6 +114,7 @@ router.get('/profit-loss', auth, async (req, res) => {
   try {
     const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
+    const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } });
 
     let cricketPL = 0;
     cricketBets.forEach(b => {
@@ -110,13 +133,24 @@ router.get('/profit-loss', auth, async (req, res) => {
         }
     });
 
+    let aviatorPL = 0;
+    aviatorBets.forEach(b => {
+        if (b.status === 'WON') {
+            aviatorPL += (b.payout - b.stake);
+        } else if (b.status === 'LOST') {
+            aviatorPL -= b.stake;
+        }
+    });
+
     res.json({
-        totalPL: cricketPL + casinoPL,
+        totalPL: cricketPL + casinoPL + aviatorPL,
         cricketPL,
         casinoPL,
+        aviatorPL,
         details: {
             cricketCount: cricketBets.length,
-            casinoCount: casinoBets.length
+            casinoCount: casinoBets.length,
+            aviatorCount: aviatorBets.length
         }
     });
   } catch (err) {
@@ -129,6 +163,7 @@ router.get('/bets', auth, async (req, res) => {
   try {
     const cricketBets = await Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
+    const aviatorBets = await AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
 
     const combinedBets = [
         ...cricketBets.map(b => ({
@@ -147,6 +182,15 @@ router.get('/bets', auth, async (req, res) => {
             stake: b.amount,
             placed: b.createdAt,
             updated: b.createdAt // Casino bets are usually settled instantly or per round
+        })),
+        ...aviatorBets.map(b => ({
+            ...b.toObject(),
+            sport: 'Aviator',
+            event: `Aviator Round ${b.roundId}`,
+            selection: `Slot ${b.betSlot} (Cashed: ${b.cashoutMultiplier ? b.cashoutMultiplier + 'x' : 'N/A'})`,
+            stake: b.stake,
+            placed: b.createdAt,
+            updated: b.cashoutTime || b.createdAt
         }))
     ];
 
