@@ -1230,6 +1230,25 @@ router.post('/clear-daily-report', auth, async (req, res) => {
   }
 });
 
+// Clear Final Sheet Data (SuperAdmin only)
+router.post('/clear-final-sheet', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Only SuperAdmin can clear final sheet data' });
+    }
+
+    const result = await Transaction.deleteMany({
+      type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
+    });
+
+    res.json({ success: true, message: `Cleared ${result.deletedCount} final sheet records` });
+  } catch (err) {
+    console.error("Clear Final Sheet Error:", err);
+    res.status(500).json({ error: 'Server error clearing final sheet' });
+  }
+});
+
+
 // Get Match Exposure (Runners P/L and Matched Bets)
 router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
   try {

@@ -24,8 +24,26 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     if (isDailyReport) {
       allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
     } else {
-      allUsersInDb = await User.find({ role: { $nin: ['superadmin', 'user'] } }).lean();
+      // Load admins and masters
+      const nonBettors = await User.find({ role: { $nin: ['superadmin', 'user'] } }).lean();
+      // Also load bettors created directly by admin or superadmin
+      const adminAndSaIds = nonBettors
+        .filter(u => u.role === 'admin')
+        .map(u => u._id);
+      adminAndSaIds.push(currentUser._id);
+      const directBettors = await User.find({ 
+        role: 'user', 
+        parentId: { $in: adminAndSaIds } 
+      }).lean();
+      allUsersInDb = [...nonBettors, ...directBettors];
     }
+  } else if (currentUser.role === 'admin' && !isDailyReport) {
+    // Load bettors created directly by this admin
+    const directBettors = await User.find({ 
+      role: 'user', 
+      parentId: currentUser._id 
+    }).lean();
+    allUsersInDb = [...directBettors];
   }
 
   const userMap = {};
@@ -193,9 +211,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
         const uDoc = userMap[accountName];
         if (uDoc && uDoc.parentId) {
           const pDoc = userMap[uDoc.parentId.toString()];
-          if (pDoc) {
+          if (pDoc && pDoc.role === 'master') {
+            // Only roll up to parent if parent is a master
             return { name: pDoc.username, role: pDoc.role };
           }
+          // If parent is admin (self-created bettor), don't roll up — show as bettor
         }
       }
       return { name: accountName, role: accountRole };
@@ -205,15 +225,24 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (accountRole === 'user') {
         const uDoc = userMap[accountName];
         if (uDoc && uDoc.parentId) {
-          const pDoc = userMap[uDoc.parentId.toString()]; // this is master
+          const pDoc = userMap[uDoc.parentId.toString()];
           if (pDoc) {
-            if (pDoc.parentId) {
-              const gpDoc = userMap[pDoc.parentId.toString()]; // this is admin
-              if (gpDoc) {
-                return { name: gpDoc.username, role: gpDoc.role };
+            if (pDoc.role === 'master') {
+              // Normal hierarchy: bettor → master → admin. Roll up to admin.
+              if (pDoc.parentId) {
+                const gpDoc = userMap[pDoc.parentId.toString()];
+                if (gpDoc) {
+                  return { name: gpDoc.username, role: gpDoc.role };
+                }
               }
+              return { name: pDoc.username, role: pDoc.role };
+            } else if (pDoc.role === 'admin') {
+              // Bettor created directly by admin. Roll up to admin.
+              return { name: pDoc.username, role: pDoc.role };
+            } else if (pDoc.role === 'superadmin') {
+              // Bettor created directly by superadmin. Show as bettor (no rollup).
+              return { name: accountName, role: accountRole };
             }
-            return { name: pDoc.username, role: pDoc.role };
           }
         }
       } else if (accountRole === 'master') {

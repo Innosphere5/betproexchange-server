@@ -13,6 +13,8 @@ const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { initRoundManager, getCurrentRound } = require('./services/roundManager');
 const { initAviatorManager } = require('./services/aviatorManager');
+const { initAviatorxManager } = require('./services/aviatorxManager');
+const { initTeenPattiManager } = require('./services/teenPattiManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,6 +32,8 @@ const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const aviatorRoutes = require('./routes/aviatorRoutes');
+const aviatorxRoutes = require('./routes/aviatorxRoutes');
+const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
 
 app.use(cors({
@@ -44,6 +48,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/aviator', aviatorRoutes);
+app.use('/api/aviatorx', aviatorxRoutes);
+app.use('/api/teenpatti', teenPattiRoutes);
 
 // MongoDB Connection Options
 mongoose.set('bufferCommands', true);
@@ -64,6 +70,12 @@ mongoose.connect(process.env.MONGO_URI, {
 
     // Initialize Aviator Manager with Socket.io
     initAviatorManager(io);
+
+    // Initialize AviatorX Manager with Socket.io
+    initAviatorxManager(io);
+
+    // Initialize Teen Patti Manager with Socket.io
+    initTeenPattiManager(io);
 
     // Initial fetch
     const { fetchUpcomingMatches } = require('./services/matchService');

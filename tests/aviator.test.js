@@ -12,10 +12,10 @@ test('Aviator Growth Curve Math', async (t) => {
     assert.equal(getMultiplierAt(0), 1.00);
   });
 
-  await t.test('getMultiplierAt grows exponentially (1.06^t)', () => {
-    // 1.06^10 = ~1.79
+  await t.test('getMultiplierAt grows exponentially (1.07^t)', () => {
+    // 1.07^10 = ~1.97
     const multAt10s = getMultiplierAt(10000);
-    assert.ok(multAt10s >= 1.78 && multAt10s <= 1.80, `Expected ~1.79, got ${multAt10s}`);
+    assert.ok(multAt10s >= 1.96 && multAt10s <= 1.98, `Expected ~1.97, got ${multAt10s}`);
   });
 
   await t.test('getMsForMultiplier solves the correct takeoff duration', () => {
@@ -59,7 +59,7 @@ test('Provably Fair Algorithm Integrity', async (t) => {
     const e = Math.pow(2, 52);
     
     let crashPoint;
-    if (h % 33 === 0) {
+    if (h % 28 === 0) {
       crashPoint = 1.00;
     } else {
       crashPoint = Math.floor((100 * e - h) / (e - h)) / 100;

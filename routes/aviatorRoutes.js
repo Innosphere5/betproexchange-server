@@ -41,7 +41,7 @@ router.post('/cashout', auth, async (req, res) => {
   }
 });
 
-// Fetch active bets for reconnection flow
+// Fetch active bets for reconnection/page-reload flows
 router.get('/active-bets', auth, async (req, res) => {
   try {
     const currentRound = aviatorManager.getCurrentRound();
@@ -61,15 +61,40 @@ router.get('/active-bets', auth, async (req, res) => {
   }
 });
 
-// Fetch historical rounds for the verifier/recent strip
+// Fetch historical rounds for the strip/fair verifier
 router.get('/history', async (req, res) => {
   try {
     const history = await AviatorRound.find({ status: 'CRASHED' })
-                                       .sort({ endTime: -1 })
-                                       .limit(30);
+                                      .sort({ endTime: -1 })
+                                      .limit(30);
     res.json(history);
   } catch (err) {
     console.error('[API AVIATOR] Get history failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Fetch top bets and stats (used for settings / leaderboard modals)
+router.get('/stats', async (req, res) => {
+  try {
+    const biggestWins = await AviatorBet.find({ status: 'WON' })
+                                       .sort({ payout: -1 })
+                                       .limit(10);
+
+    const totalRounds = await AviatorRound.countDocuments({ status: 'CRASHED' });
+
+    res.json({
+      biggestWins: biggestWins.map(b => ({
+        username: b.userId.substring(0, 4) + '***',
+        stake: b.stake,
+        multiplier: b.cashoutMultiplier,
+        payout: b.payout,
+        date: b.createdAt
+      })),
+      totalRounds
+    });
+  } catch (err) {
+    console.error('[API AVIATOR] Get stats failed:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
