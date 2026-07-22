@@ -609,9 +609,10 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
 
 const { generateFinalSheet } = require('../services/finalSheetEngine');
 
-// Get Final Sheet (Green/Red/Net Ledger - cumulative running totals)
+// Get Final Sheet (Green/Red/Net Ledger - cumulative running totals or date filtered)
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   try {
+    const { date, month, year, reportType, startDate: sDate, endDate: eDate } = req.query;
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
@@ -623,18 +624,46 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       types.push('SETTLEMENT');
     }
 
-    const txs = await Transaction.find({ 
+    let query = { 
       $or: [
         { userId: currentUser.username },
         { downline: currentUser.username, type: 'SETTLEMENT' }
       ],
       type: { $in: types }
-    }).sort({ createdAt: -1 });
+    };
+
+    if (reportType === 'monthly' && month) {
+      const [y, m] = month.split('-').map(Number);
+      query.createdAt = {
+        $gte: new Date(y, m - 1, 1, 0, 0, 0, 0),
+        $lte: new Date(y, m, 0, 23, 59, 59, 999)
+      };
+    } else if (reportType === 'yearly' && year) {
+      const y = parseInt(year);
+      query.createdAt = {
+        $gte: new Date(y, 0, 1, 0, 0, 0, 0),
+        $lte: new Date(y, 11, 31, 23, 59, 59, 999)
+      };
+    } else if (reportType === 'range' && sDate && eDate) {
+      const [sy, sm, sd] = sDate.split('-').map(Number);
+      const [ey, em, ed] = eDate.split('-').map(Number);
+      query.createdAt = {
+        $gte: new Date(sy, sm - 1, sd, 0, 0, 0, 0),
+        $lte: new Date(ey, em - 1, ed, 23, 59, 59, 999)
+      };
+    } else if (reportType === 'daily' && date) {
+      const [y, m, d] = date.split('-').map(Number);
+      query.createdAt = {
+        $gte: new Date(y, m - 1, d, 0, 0, 0, 0),
+        $lte: new Date(y, m - 1, d, 23, 59, 59, 999)
+      };
+    }
+
+    const txs = await Transaction.find(query).sort({ createdAt: -1 });
 
     const finalSheetData = await generateFinalSheet(currentUser, txs);
 
     const sharesMap = {};
-    // Populate sharesMap as it was previously sent if needed by UI
     const uniqueUsernames = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];
     const users = await User.find({ username: { $in: uniqueUsernames } }).select('username role share').lean();
     users.forEach(u => {
@@ -1527,6 +1556,48 @@ router.get('/global-open-bets', auth, isAuthorized, async (req, res) => {
   } catch (err) {
     console.error("Global Open Bets Error:", err);
     res.status(500).json({ error: 'Server error fetching global open bets' });
+  }
+});
+
+// Reset All Accounts (SuperAdmin only)
+router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Only SuperAdmin can perform a system reset.' });
+    }
+
+    const User = require('../models/User');
+    const Transaction = require('../models/Transaction');
+    const Bet = require('../models/Bet');
+    const CasinoBet = require('../models/CasinoBet');
+    const AviatorBet = require('../models/AviatorBet');
+    const AviatorXBet = require('../models/AviatorXBet');
+    const TeenPattiBet = require('../models/TeenPattiBet');
+
+    // Delete all non-superadmin users
+    const deleteUsers = await User.deleteMany({ role: { $ne: 'superadmin' } });
+
+    // Reset superadmin balance and credit
+    await User.updateMany(
+      { role: 'superadmin' },
+      { $set: { credit: 0, walletBalance: 1000000000, share: 100 } }
+    );
+
+    // Delete all transactions and bets
+    await Transaction.deleteMany({});
+    await Bet.deleteMany({});
+    if (CasinoBet) await CasinoBet.deleteMany({});
+    if (AviatorBet) await AviatorBet.deleteMany({});
+    if (AviatorXBet) await AviatorXBet.deleteMany({});
+    if (TeenPattiBet) await TeenPattiBet.deleteMany({});
+
+    res.json({ 
+      success: true, 
+      message: `System reset complete. Deleted ${deleteUsers.deletedCount} downline accounts. You can now create new accounts.` 
+    });
+  } catch (err) {
+    console.error("Reset All Accounts Error:", err);
+    res.status(500).json({ error: 'Server error resetting accounts' });
   }
 });
 
