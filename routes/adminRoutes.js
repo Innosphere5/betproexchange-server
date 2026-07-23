@@ -176,17 +176,19 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
     });
     await newTransaction.save();
 
-    // Create Settlement Record for Admin/Master's Final Sheet
-    const settlementTx = new Transaction({
-      userId: parent.username,
-      amount: -addAmount,
-      type: 'SETTLEMENT',
-      category: 'wallet',
-      downline: target.username,
-      description: `${type === 'credit' ? 'Credit' : 'Cash'} Deposit Settlement for ${target.username}`,
-      performedBy: parent.username
-    });
-    await settlementTx.save();
+    // Create Settlement Record for Admin/Master's Final Sheet (Only for Cash, not Credit)
+    if (type !== 'credit') {
+      const settlementTx = new Transaction({
+        userId: parent.username,
+        amount: -addAmount,
+        type: 'SETTLEMENT',
+        category: 'wallet',
+        downline: target.username,
+        description: `Cash Deposit Settlement for ${target.username}`,
+        performedBy: parent.username
+      });
+      await settlementTx.save();
+    }
 
     res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
@@ -248,17 +250,19 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
     });
     await newTransaction.save();
 
-    // Create Settlement Record for Admin/Master's Final Sheet
-    const settlementTx = new Transaction({
-      userId: parent.username,
-      amount: withdrawAmount,
-      type: 'SETTLEMENT',
-      category: 'wallet',
-      downline: target.username,
-      description: `${type === 'credit' ? 'Credit' : 'Cash'} Withdraw Settlement for ${target.username}`,
-      performedBy: parent.username
-    });
-    await settlementTx.save();
+    // Create Settlement Record for Admin/Master's Final Sheet (Only for Cash, not Credit)
+    if (type !== 'credit') {
+      const settlementTx = new Transaction({
+        userId: parent.username,
+        amount: withdrawAmount,
+        type: 'SETTLEMENT',
+        category: 'wallet',
+        downline: target.username,
+        description: `Cash Withdraw Settlement for ${target.username}`,
+        performedBy: parent.username
+      });
+      await settlementTx.save();
+    }
 
     res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
@@ -619,10 +623,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     const PLATFORM_FEE_RATE = 0.05; // 5% platform commission
 
     // 1. Fetch all betting-related share transactions for the current user
-    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'];
-    if (currentUser.role !== 'superadmin') {
-      types.push('SETTLEMENT');
-    }
+    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
 
     let query = { 
       $or: [
@@ -684,10 +685,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'];
-    if (currentUser.role !== 'superadmin') {
-      types.push('SETTLEMENT');
-    }
+    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
 
     let query = { 
       $or: [
