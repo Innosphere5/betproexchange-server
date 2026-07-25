@@ -395,19 +395,35 @@ router.delete('/remove-user/:username', auth, isAuthorized, async (req, res) => 
   }
 });
 
-// Get Downline User Statement (Ledger)
+// Get Downline User Statement (Ledger / Balance Details)
 router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => {
   try {
     const { username } = req.params;
-    const parent = await User.findOne({ username: req.user.userId });
-    
-    // Ensure the target is in the downline
-    const target = await User.findOne({ username, parentId: parent._id });
-    if (!target) return res.status(403).json({ error: 'Access denied: User not in downline' });
+    const target = await User.findOne({ username });
+    if (!target) return res.status(404).json({ error: 'User not found' });
+
+    // SuperAdmin can view any user statement; Admin/Master can view downline users or self
+    if (req.user.role !== 'superadmin') {
+      const currentUser = await User.findOne({ username: req.user.userId });
+      if (!currentUser) return res.status(403).json({ error: 'Access denied' });
+      
+      // Check if target is equal to currentUser or child/downline
+      const isDirectChild = target.parentId && target.parentId.toString() === currentUser._id.toString();
+      const isSelf = target.username === currentUser.username;
+      if (!isDirectChild && !isSelf) {
+        // If not direct child, check if target's parent is created by currentUser
+        const targetParent = await User.findById(target.parentId);
+        const isIndirectChild = targetParent && targetParent.parentId && targetParent.parentId.toString() === currentUser._id.toString();
+        if (!isIndirectChild) {
+          return res.status(403).json({ error: 'Access denied: User not in downline' });
+        }
+      }
+    }
 
     const transactions = await Transaction.find({ userId: username }).sort({ createdAt: -1 });
     res.json(transactions);
   } catch (err) {
+    console.error('Error fetching user statement:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
