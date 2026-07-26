@@ -21,30 +21,16 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   let allUsersInDb = [];
   if (currentUser.role === 'superadmin') {
-    if (isDailyReport) {
-      allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
-    } else {
-      // Load admins and masters
-      const nonBettors = await User.find({ role: { $nin: ['superadmin', 'user'] } }).lean();
-      // Also load bettors created directly by admin or superadmin
-      const adminAndSaIds = nonBettors
-        .filter(u => u.role === 'admin')
-        .map(u => u._id);
-      adminAndSaIds.push(currentUser._id);
-      const directBettors = await User.find({ 
-        role: 'user', 
-        parentId: { $in: adminAndSaIds } 
-      }).lean();
-      allUsersInDb = [...nonBettors, ...directBettors];
-    }
-  } else if (currentUser.role === 'admin' && !isDailyReport) {
-    // Load bettors created directly by this admin
-    const directBettors = await User.find({ 
-      role: 'user', 
-      parentId: currentUser._id 
-    }).lean();
-    allUsersInDb = [...directBettors];
+    allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
+  } else if (currentUser.role === 'admin') {
+    const adminDownlines = await User.find({ parentId: currentUser._id }).lean();
+    const masterIds = adminDownlines.filter(u => u.role === 'master').map(u => u._id);
+    const masterBettors = await User.find({ role: 'user', parentId: { $in: masterIds } }).lean();
+    allUsersInDb = [...adminDownlines, ...masterBettors];
+  } else if (currentUser.role === 'master') {
+    allUsersInDb = await User.find({ parentId: currentUser._id }).lean();
   }
+
 
   const userMap = {};
   [...uniqueUsersInDb, ...parents, ...grandParents, currentUser, ...allUsersInDb].forEach(u => {
@@ -198,67 +184,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   let totalPlatformFee = 0;
 
   function getRollupTarget(accountName, accountRole) {
-    if (isDailyReport) {
-      return { name: accountName, role: accountRole };
-    }
-
-    if (currentUser.role === 'master') {
-      return { name: accountName, role: accountRole };
-    }
-
-    if (currentUser.role === 'admin') {
-      if (accountRole === 'user') {
-        const uDoc = userMap[accountName];
-        if (uDoc && uDoc.parentId) {
-          const pDoc = userMap[uDoc.parentId.toString()];
-          if (pDoc && pDoc.role === 'master') {
-            // Only roll up to parent if parent is a master
-            return { name: pDoc.username, role: pDoc.role };
-          }
-          // If parent is admin (self-created bettor), don't roll up — show as bettor
-        }
-      }
-      return { name: accountName, role: accountRole };
-    }
-
-    if (currentUser.role === 'superadmin') {
-      if (accountRole === 'user') {
-        const uDoc = userMap[accountName];
-        if (uDoc && uDoc.parentId) {
-          const pDoc = userMap[uDoc.parentId.toString()];
-          if (pDoc) {
-            if (pDoc.role === 'master') {
-              // Normal hierarchy: bettor → master → admin. Roll up to admin.
-              if (pDoc.parentId) {
-                const gpDoc = userMap[pDoc.parentId.toString()];
-                if (gpDoc) {
-                  return { name: gpDoc.username, role: gpDoc.role };
-                }
-              }
-              return { name: pDoc.username, role: pDoc.role };
-            } else if (pDoc.role === 'admin') {
-              // Bettor created directly by admin. Roll up to admin.
-              return { name: pDoc.username, role: pDoc.role };
-            } else if (pDoc.role === 'superadmin') {
-              // Bettor created directly by superadmin. Show as bettor (no rollup).
-              return { name: accountName, role: accountRole };
-            }
-          }
-        }
-      } else if (accountRole === 'master') {
-        const uDoc = userMap[accountName];
-        if (uDoc && uDoc.parentId) {
-          const pDoc = userMap[uDoc.parentId.toString()]; // this is admin
-          if (pDoc) {
-            return { name: pDoc.username, role: pDoc.role };
-          }
-        }
-      }
-      return { name: accountName, role: accountRole };
-    }
-
     return { name: accountName, role: accountRole };
   }
+
 
   function addEntry(side, accountId, accountName, amount, role, details = {}) {
     if (amount === 0) return;
@@ -351,8 +279,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
       if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
       if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
-      
-      netAmount += bNet > 0 ? -aPortion : aPortion;
       
       netAmount += bNet > 0 ? -aPortion : aPortion;
       

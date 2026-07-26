@@ -5,6 +5,10 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Match = require('../models/Match');
 const Bet = require('../models/Bet');
+const CasinoBet = require('../models/CasinoBet');
+const AviatorBet = require('../models/AviatorBet');
+const TeenPattiBet = require('../models/TeenPattiBet');
+const AviatorXBet = require('../models/AviatorXBet');
 const auth = require('../middleware/auth');
 
 // Middleware to check if user is Authorized (SuperAdmin, Admin or Master)
@@ -17,10 +21,70 @@ const isAuthorized = (req, res, next) => {
   }
 };
 
+// Helper function to calculate Client Net P/L
+async function calculateUserClientPL(user) {
+  let pl = 0;
+  if (user.role === 'user') {
+    const winStatuses = ['won', 'WIN', 'WON', 'win'];
+    const loseStatuses = ['lost', 'LOSE', 'LOST', 'lose', 'pending', 'PENDING'];
+
+    const [cricket, casino, aviator, teenPatti, aviatorX, settlements] = await Promise.all([
+      Bet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
+      CasinoBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
+      AviatorBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
+      TeenPattiBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
+      AviatorXBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
+      Transaction.find({ userId: user.username, type: 'SETTLEMENT' }).lean()
+    ]);
+
+    cricket.forEach(b => {
+      const stake = b.stake || b.amount || 0;
+      if (winStatuses.includes(b.status)) pl += ((b.payout || (stake * (b.odds || 2.0))) - stake);
+      else if (loseStatuses.includes(b.status)) pl -= stake;
+    });
+
+    casino.forEach(b => {
+      const amt = b.amount || b.stake || 0;
+      if (winStatuses.includes(b.status)) pl += (b.winAmount ? (b.winAmount - amt) : (amt * ((b.odds || 2.0) - 1) * 0.95));
+      else if (loseStatuses.includes(b.status)) pl -= amt;
+    });
+
+    aviator.forEach(b => {
+      const stake = b.stake || b.amount || 0;
+      if (winStatuses.includes(b.status)) pl += ((b.payout || 0) - stake);
+      else if (loseStatuses.includes(b.status)) pl -= stake;
+    });
+
+    teenPatti.forEach(b => {
+      const amt = b.amount || b.stake || 0;
+      if (winStatuses.includes(b.status)) pl += (b.payout ? (b.payout - amt) : (b.winAmount ? (b.winAmount - amt) : (amt * 0.95)));
+      else if (loseStatuses.includes(b.status)) pl -= amt;
+    });
+
+    aviatorX.forEach(b => {
+      const stake = b.stake || b.amount || 0;
+      if (winStatuses.includes(b.status)) pl += ((b.payout || 0) - stake);
+      else if (loseStatuses.includes(b.status)) pl -= stake;
+    });
+
+    settlements.forEach(s => {
+      pl += (s.amount || 0);
+    });
+  } else {
+    const childUsers = await User.find({ parentId: user._id }).lean();
+    for (const child of childUsers) {
+      pl += await calculateUserClientPL(child);
+    }
+  }
+  return Math.round(pl * 100) / 100;
+}
+
+
 // Create Downline User (Admin, Master, or Bettor)
 router.post('/create-user', auth, isAuthorized, async (req, res) => {
   try {
-    const { username, password, role, initialBalance, share } = req.body;
+    const { username, password, role, initialBalance, balanceType, type, share } = req.body;
+    const selectedBalanceType = balanceType || type || 'cash';
 
     // Validation
     if (!username || !password || !role) {
@@ -40,7 +104,6 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     if (req.user.role === 'admin' && !['master', 'user'].includes(role)) {
       return res.status(403).json({ error: 'Admins can only create Masters or Bettors' });
     }
-    // superadmin can create admin, master, user (no restriction needed here as role is in enum)
 
     const lowerUsername = username.toLowerCase();
     let existingUser = await User.findOne({ username: lowerUsername });
@@ -56,51 +119,109 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       }
     }
 
-    // Initial Balance Check
     const balance = parseFloat(initialBalance) || 0;
-    // Initial Balance Check (Only SuperAdmin has unlimited spending)
     const skipBalanceCheck = req.user.role === 'superadmin';
-    if (!skipBalanceCheck && parent.walletBalance < balance) {
-      return res.status(400).json({ error: 'Insufficient balance in parent account' });
-    }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const newUser = new User({
-      username: lowerUsername,
-      password: hashedPassword,
-      role,
-      share: (role === 'master' || role === 'admin') ? masterShare : 0,
-      parentId: parent._id,
-      walletBalance: balance
-    });
+    let newUser;
 
-    // Deduct from parent balance if not SuperAdmin
-    if (req.user.role !== 'superadmin') {
-      parent.walletBalance -= balance;
-      await parent.save();
-
-      // Create Transaction Record for the deduction
-      const newTransaction = new Transaction({
-        userId: username,
-        amount: balance,
-        type: 'LOAD_BALANCE',
-        description: `Initial balance for ${role} account created by ${parent.role} ${parent.username}`,
-        performedBy: parent.username
+    if (selectedBalanceType === 'credit') {
+      newUser = new User({
+        username: lowerUsername,
+        password: hashedPassword,
+        role,
+        share: (role === 'master' || role === 'admin') ? masterShare : 0,
+        parentId: parent._id,
+        walletBalance: balance,
+        credit: balance
       });
-      await newTransaction.save();
+
+      if (balance > 0) {
+        const newTransaction = new Transaction({
+          userId: lowerUsername,
+          amount: balance,
+          type: 'LOAD_CREDIT',
+          category: 'credit',
+          description: `Initial Credit Received from ${parent.role} ${parent.username} (Credit)`,
+          performedBy: parent.username
+        });
+        await newTransaction.save();
+
+        const parentTx = new Transaction({
+          userId: parent.username,
+          amount: -balance,
+          type: 'CREDIT_GIVEN',
+          category: 'credit',
+          downline: lowerUsername,
+          description: `Initial Credit Issued to ${lowerUsername} (Credit)`,
+          performedBy: parent.username
+        });
+        await parentTx.save();
+      }
+    } else {
+      // Default: Cash
+      if (!skipBalanceCheck && parent.walletBalance < balance) {
+        return res.status(400).json({ error: 'Insufficient balance in parent account' });
+      }
+
+      newUser = new User({
+        username: lowerUsername,
+        password: hashedPassword,
+        role,
+        share: (role === 'master' || role === 'admin') ? masterShare : 0,
+        parentId: parent._id,
+        walletBalance: balance,
+        credit: 0
+      });
+
+      if (req.user.role !== 'superadmin' && balance > 0) {
+        parent.walletBalance -= balance;
+        await parent.save();
+
+        const parentTx = new Transaction({
+          userId: parent.username,
+          amount: -balance,
+          type: 'CASH_DEPOSIT',
+          category: 'wallet',
+          downline: lowerUsername,
+          description: `Initial Cash Deposit to ${lowerUsername}`,
+          performedBy: parent.username
+        });
+        await parentTx.save();
+      }
+
+      if (balance > 0) {
+        const newTransaction = new Transaction({
+          userId: lowerUsername,
+          amount: balance,
+          type: 'LOAD_BALANCE',
+          category: 'wallet',
+          description: `Initial Cash Deposit from ${parent.role} ${parent.username}`,
+          performedBy: parent.username
+        });
+        await newTransaction.save();
+      }
     }
 
     await newUser.save();
-    res.json({ success: true, user: { username: newUser.username, role: newUser.role, balance: newUser.walletBalance } });
+    res.json({ 
+      success: true, 
+      user: { 
+        username: newUser.username, 
+        role: newUser.role, 
+        balance: newUser.walletBalance,
+        credit: newUser.credit
+      } 
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// Get Downline Users with sub-user counts
+// Get Downline Users with sub-user counts and Client P/L
 router.get('/downline', auth, isAuthorized, async (req, res) => {
   try {
     const parent = await User.findOne({ username: req.user.userId });
@@ -118,12 +239,16 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const countMap = {};
     counts.forEach(c => countMap[c._id.toString()] = c.count);
 
-    const usersWithCounts = users.map(u => ({
-      ...u,
-      downlineCount: countMap[u._id.toString()] || 0
+    const usersWithCountsAndPL = await Promise.all(users.map(async u => {
+      const clientPL = await calculateUserClientPL(u);
+      return {
+        ...u,
+        downlineCount: countMap[u._id.toString()] || 0,
+        clientPL
+      };
     }));
 
-    res.json(usersWithCounts);
+    res.json(usersWithCountsAndPL);
   } catch (err) {
     console.error("Downline Error:", err);
     res.status(500).json({ error: 'Server error fetching downline' });
@@ -295,6 +420,93 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
+
+// Settle Account (P/L Settlement)
+router.post('/settle-account', auth, isAuthorized, async (req, res) => {
+  try {
+    const { targetUsername, amount, description } = req.body;
+    const settleAmount = parseFloat(amount);
+
+    if (isNaN(settleAmount) || settleAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid settlement amount' });
+    }
+
+    const parent = await User.findOne({ username: req.user.userId });
+    if (!parent) return res.status(404).json({ error: 'Parent user not found' });
+
+    let target;
+    if (req.user.role === 'superadmin') {
+      target = await User.findOne({ username: targetUsername });
+    } else {
+      target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    }
+
+    if (!target) return res.status(404).json({ error: 'Downline user not found' });
+
+    // Restriction: Master can only settle Bettors
+    if (req.user.role === 'master' && target.role !== 'user') {
+      return res.status(403).json({ error: 'Masters can only settle Bettors' });
+    }
+
+    // Calculate current P/L to determine settlement direction
+    const clientPL = await calculateUserClientPL(target);
+
+    // Update target balance & parent balance
+    if (clientPL < 0) {
+      target.walletBalance = (target.walletBalance || 0) + settleAmount;
+      if (req.user.role !== 'superadmin') {
+        parent.walletBalance = (parent.walletBalance || 0) - settleAmount;
+        await parent.save();
+      }
+    } else {
+      target.walletBalance = (target.walletBalance || 0) - settleAmount;
+      if (req.user.role !== 'superadmin') {
+        parent.walletBalance = (parent.walletBalance || 0) + settleAmount;
+        await parent.save();
+      }
+    }
+
+    await target.save();
+
+    const desc = description && description.trim() !== '' ? description.trim() : 'P/L to Cash transfer';
+
+    // Double entry transactions:
+    // Target user transaction
+    const targetTx = new Transaction({
+      userId: target.username,
+      amount: clientPL < 0 ? settleAmount : -settleAmount,
+      type: 'SETTLEMENT',
+      category: 'wallet',
+      description: desc,
+      downline: parent.username,
+      performedBy: parent.username
+    });
+    await targetTx.save();
+
+    // Parent user transaction for ledger and final sheet
+    const parentTx = new Transaction({
+      userId: parent.username,
+      amount: clientPL < 0 ? -settleAmount : settleAmount,
+      type: 'SETTLEMENT',
+      category: 'wallet',
+      downline: target.username,
+      description: desc,
+      performedBy: parent.username
+    });
+    await parentTx.save();
+
+    res.json({
+      success: true,
+      message: 'Account settled successfully',
+      newTargetBalance: target.walletBalance,
+      parentBalance: parent.walletBalance
+    });
+  } catch (err) {
+    console.error("Settle Account Error:", err);
+    res.status(500).json({ error: 'Server error settling account' });
+  }
+});
+
 
 // Update Downline User Detail (Share, Password, etc.)
 router.post('/update-user', auth, isAuthorized, async (req, res) => {
@@ -666,13 +878,32 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     // 1. Fetch all betting-related share transactions for the current user
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
 
+    let allowedUsernames = [currentUser.username];
+    if (currentUser.role === 'superadmin') {
+      const allUsers = await User.find({}).select('username').lean();
+      allowedUsernames = allUsers.map(u => u.username);
+    } else {
+      const getDownlines = async (parentId) => {
+        const children = await User.find({ parentId }).select('_id username').lean();
+        let list = [...children];
+        for (const child of children) {
+          const sub = await getDownlines(child._id);
+          list = [...list, ...sub];
+        }
+        return list;
+      };
+      const downlineUsers = await getDownlines(currentUser._id);
+      allowedUsernames = [currentUser.username, ...downlineUsers.map(u => u.username)];
+    }
+
     let query = { 
       $or: [
-        { userId: currentUser.username },
-        { downline: currentUser.username, type: 'SETTLEMENT' }
+        { userId: { $in: allowedUsernames } },
+        { downline: { $in: allowedUsernames } }
       ],
       type: { $in: types }
     };
+
 
     if (reportType === 'monthly' && month) {
       const [y, m] = month.split('-').map(Number);
