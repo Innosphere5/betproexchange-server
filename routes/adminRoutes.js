@@ -75,6 +75,10 @@ async function calculateUserClientPL(user) {
     for (const child of childUsers) {
       pl += await calculateUserClientPL(child);
     }
+    const ownSettlements = await Transaction.find({ userId: user.username, type: 'SETTLEMENT' }).lean();
+    ownSettlements.forEach(s => {
+      pl += (s.amount || 0);
+    });
   }
   return Math.round(pl * 100) / 100;
 }
@@ -413,7 +417,6 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
       });
       await settlementTx.save();
     }
-
     res.json({ success: true, newBalance: target.walletBalance, newCredit: target.credit, parentBalance: parent.walletBalance });
   } catch (err) {
     console.error(err);
@@ -425,9 +428,9 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
 router.post('/settle-account', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, amount, description } = req.body;
-    const settleAmount = parseFloat(amount);
+    const rawAmount = parseFloat(amount);
 
-    if (isNaN(settleAmount) || settleAmount <= 0) {
+    if (isNaN(rawAmount) || rawAmount === 0) {
       return res.status(400).json({ error: 'Invalid settlement amount' });
     }
 
@@ -450,23 +453,9 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 
     // Calculate current P/L to determine settlement direction
     const clientPL = await calculateUserClientPL(target);
+    const settleAmount = Math.abs(rawAmount);
 
-    // Update target balance & parent balance
-    if (clientPL < 0) {
-      target.walletBalance = (target.walletBalance || 0) + settleAmount;
-      if (req.user.role !== 'superadmin') {
-        parent.walletBalance = (parent.walletBalance || 0) - settleAmount;
-        await parent.save();
-      }
-    } else {
-      target.walletBalance = (target.walletBalance || 0) - settleAmount;
-      if (req.user.role !== 'superadmin') {
-        parent.walletBalance = (parent.walletBalance || 0) + settleAmount;
-        await parent.save();
-      }
-    }
-
-    await target.save();
+    const isTargetCredit = (clientPL < 0 || (clientPL === 0 && rawAmount > 0));
 
     const desc = description && description.trim() !== '' ? description.trim() : 'P/L to Cash transfer';
 
@@ -474,7 +463,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     // Target user transaction
     const targetTx = new Transaction({
       userId: target.username,
-      amount: clientPL < 0 ? settleAmount : -settleAmount,
+      amount: isTargetCredit ? settleAmount : -settleAmount,
       type: 'SETTLEMENT',
       category: 'wallet',
       description: desc,
@@ -486,7 +475,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     // Parent user transaction for ledger and final sheet
     const parentTx = new Transaction({
       userId: parent.username,
-      amount: clientPL < 0 ? -settleAmount : settleAmount,
+      amount: isTargetCredit ? -settleAmount : settleAmount,
       type: 'SETTLEMENT',
       category: 'wallet',
       downline: target.username,
