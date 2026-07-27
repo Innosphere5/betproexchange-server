@@ -26,7 +26,7 @@ async function calculateUserClientPL(user) {
   let pl = 0;
   if (user.role === 'user') {
     const winStatuses = ['won', 'WIN', 'WON', 'win'];
-    const loseStatuses = ['lost', 'LOSE', 'LOST', 'lose', 'pending', 'PENDING'];
+    const loseStatuses = ['lost', 'LOSE', 'LOST', 'lose'];
 
     const [cricket, casino, aviator, teenPatti, aviatorX, settlements] = await Promise.all([
       Bet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
@@ -225,13 +225,40 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
   }
 });
 
-// Get Downline Users with sub-user counts and Client P/L
+// Get Downline Users with sub-user counts and Client P/L (Supports optional ?username= for hierarchy drill-down)
 router.get('/downline', auth, isAuthorized, async (req, res) => {
   try {
-    const parent = await User.findOne({ username: req.user.userId });
-    if (!parent) return res.status(404).json({ error: 'User not found' });
+    const loggedInUser = await User.findOne({ username: req.user.userId });
+    if (!loggedInUser) return res.status(404).json({ error: 'User not found' });
 
-    const users = await User.find({ parentId: parent._id }).select('-password').sort({ createdAt: -1 }).lean();
+    let targetParent = loggedInUser;
+    const { username } = req.query;
+
+    if (username && username.trim() !== '' && username.trim().toLowerCase() !== loggedInUser.username.toLowerCase()) {
+      const requestedUser = await User.findOne({ username: username.trim().toLowerCase() });
+      if (!requestedUser) {
+        return res.status(404).json({ error: 'Requested parent user not found' });
+      }
+
+      // Authorization check: Is requestedUser in loggedInUser's downline tree or is loggedInUser superadmin?
+      if (loggedInUser.role !== 'superadmin') {
+        let curr = requestedUser;
+        let isDescendant = false;
+        while (curr && curr.parentId) {
+          if (curr.parentId.toString() === loggedInUser._id.toString()) {
+            isDescendant = true;
+            break;
+          }
+          curr = await User.findById(curr.parentId).lean();
+        }
+        if (!isDescendant) {
+          return res.status(403).json({ error: 'Access denied: Target user is not in your downline' });
+        }
+      }
+      targetParent = requestedUser;
+    }
+
+    const users = await User.find({ parentId: targetParent._id }).select('-password').sort({ createdAt: -1 }).lean();
     
     // Efficiently get counts for all found users
     const userIds = users.map(u => u._id);
@@ -252,7 +279,35 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
       };
     }));
 
-    res.json(usersWithCountsAndPL);
+    // Build parent hierarchy breadcrumbs from targetParent back up to loggedInUser
+    const breadcrumbs = [];
+    let ancestor = targetParent;
+    while (ancestor) {
+      breadcrumbs.unshift({
+        username: ancestor.username,
+        role: ancestor.role,
+        _id: ancestor._id.toString()
+      });
+      if (ancestor._id.toString() === loggedInUser._id.toString()) break;
+      ancestor = await User.findById(ancestor.parentId).lean();
+    }
+
+    // Calculate parent's own Client P/L for the summary row
+    const parentClientPL = await calculateUserClientPL(targetParent);
+
+    // Return object with users list, target parent info and breadcrumbs
+    res.json({
+      users: usersWithCountsAndPL,
+      parentInfo: {
+        username: targetParent.username,
+        role: targetParent.role,
+        _id: targetParent._id,
+        credit: targetParent.credit || 0,
+        walletBalance: targetParent.walletBalance || 0,
+        clientPL: parentClientPL
+      },
+      breadcrumbs
+    });
   } catch (err) {
     console.error("Downline Error:", err);
     res.status(500).json({ error: 'Server error fetching downline' });
@@ -948,17 +1003,38 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
 
+    let allowedUsernames = [currentUser.username];
+    if (currentUser.role === 'superadmin') {
+      const allUsers = await User.find({}).select('username').lean();
+      allowedUsernames = allUsers.map(u => u.username);
+    } else {
+      const getDownlines = async (parentId) => {
+        const children = await User.find({ parentId }).select('_id username').lean();
+        let list = [...children];
+        for (const child of children) {
+          const sub = await getDownlines(child._id);
+          list = [...list, ...sub];
+        }
+        return list;
+      };
+      const downlineUsers = await getDownlines(currentUser._id);
+      allowedUsernames = [currentUser.username, ...downlineUsers.map(u => u.username)];
+    }
+
     let query = { 
       $or: [
-        { userId: currentUser.username },
-        { downline: currentUser.username, type: 'SETTLEMENT' }
+        { userId: { $in: allowedUsernames } },
+        { downline: { $in: allowedUsernames } }
       ],
       type: { $in: types }
     };
 
     let startDate, endDate;
     
-    if (reportType === 'monthly' && month) {
+    if (reportType === 'all') {
+      startDate = new Date(0);
+      endDate = new Date(9999, 11, 31, 23, 59, 59, 999);
+    } else if (reportType === 'monthly' && month) {
       // month is "YYYY-MM"
       const [y, m] = month.split('-').map(Number);
       startDate = new Date(y, m - 1, 1, 0, 0, 0, 0);
@@ -1011,29 +1087,11 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
 
 router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
   try {
-    const { bettor, type, reportType, date, month, year, startDate: sDate, endDate: eDate } = req.query;
+    const { bettor, type } = req.query;
     
     if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
 
-    let start, end;
-    if (reportType === 'monthly') {
-      const [y, m] = month.split('-').map(Number);
-      start = new Date(y, m - 1, 1);
-      end = new Date(y, m, 0, 23, 59, 59, 999);
-    } else if (reportType === 'yearly') {
-      const y = parseInt(year);
-      start = new Date(y, 0, 1);
-      end = new Date(y, 11, 31, 23, 59, 59, 999);
-    } else if (reportType === 'range') {
-      start = new Date(sDate);
-      start.setHours(0, 0, 0, 0);
-      end = new Date(eDate);
-      end.setHours(23, 59, 59, 999);
-    } else {
-      const [y, m, d] = date.split('-').map(Number);
-      start = new Date(y, m - 1, d, 0, 0, 0, 0);
-      end = new Date(y, m - 1, d, 23, 59, 59, 999);
-    }
+    const { start, end } = parseReportDates(req);
 
     const query = {
       userId: req.user.userId,

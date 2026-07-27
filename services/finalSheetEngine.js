@@ -94,17 +94,12 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   const bettorSummary = {};
   const settlementSummary = {};
+  const seenBetEventKeys = new Set();
 
   txs.forEach(tx => {
     if (!tx.bettor || tx.type === 'SETTLEMENT') {
-      let sourceName = tx.downline || tx.bettor || 'Unknown';
+      let sourceName = tx.userId || tx.downline || 'Unknown';
       let txAmount = tx.amount;
-
-      // Handle parent settlements (where current user is the downline)
-      if (tx.downline === currentUser.username) {
-        sourceName = parentName;
-        txAmount = -tx.amount; // invert sign to match current user's perspective
-      }
 
       if (sourceName === currentUser.username) {
         return; // Skip self transactions
@@ -114,9 +109,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
         settlementSummary[sourceName] = { green: 0, red: 0 };
       }
       if (txAmount > 0) {
-        settlementSummary[sourceName].red += txAmount;
+        settlementSummary[sourceName].green += txAmount;
       } else if (txAmount < 0) {
-        settlementSummary[sourceName].green += Math.abs(txAmount);
+        settlementSummary[sourceName].red += Math.abs(txAmount);
       }
       return;
     }
@@ -139,6 +134,12 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const aShare = aUser ? (aUser.share || 0) : 0;
     const saShare = Math.max(0, 85 - aShare - mShare);
 
+    // Deduplicate multiple transaction records generated for the exact same bet event
+    const betKey = `${tx.bettor}_${tx.matchName || ''}_${tx.selection || ''}_${new Date(tx.createdAt).getTime()}_${tx.category || ''}`;
+    if (seenBetEventKeys.has(betKey)) {
+      return;
+    }
+
     if (currentUser.role === 'superadmin' && saShare > 0 && tx.type === 'BOOK_SHARE') {
       return;
     }
@@ -151,7 +152,16 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       else sharePercent = saShare;
     }
 
+    // Fallback sharePercent if currentUser's tier share is 0 (e.g. for superadmin or admin calculating bettor net)
+    if (sharePercent <= 0) {
+      if (tx.type === 'BOOK_SHARE') sharePercent = 15;
+      else if (mShare > 0) sharePercent = mShare;
+      else if (aShare > 0) sharePercent = aShare;
+      else sharePercent = 85;
+    }
+
     if (sharePercent > 0) {
+      seenBetEventKeys.add(betKey);
       const bettorNetForTx = - (tx.amount / (sharePercent / 100));
       if (!bettorSummary[bettorName]) {
         bettorSummary[bettorName] = { 
@@ -242,13 +252,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const aShare = aUser ? (aUser.share || 0) : 0;
     const saShare = Math.max(0, 85 - aShare - mShare);
 
-    // Compute share portions — identical for both daily report and final sheet.
-    // 85% is split: Master gets mShare%, Admin gets aShare%, SuperAdmin gets (85 - aShare - mShare)%.
-    // 15% always goes to Book (platform).
+    // Compute share portions matching direct share model in hierarchyService
     const mPortion    = Math.abs(bNet) * (mShare / 100);
-    const aPortion    = Math.abs(bNet) * (Math.max(0, aShare - mShare) / 100);
-    const saPortion   = Math.abs(bNet) * (Math.max(0, 85 - aShare) / 100);
-    const bookPortion = Math.abs(bNet) * (bookShare / 100); // always 15%
+    const aPortion    = Math.abs(bNet) * (aShare / 100);
+    const saPortion   = Math.abs(bNet) * (saShare / 100);
+    const bookPortion = Math.abs(bNet) * (bookShare / 100); // 15%
 
     const parentPortion = Math.abs(bNet) - mPortion;
     const adminParentPortion = parentPortion - aPortion;
