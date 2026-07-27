@@ -109,9 +109,13 @@ router.get('/results', auth, async (req, res) => {
   }
 });
 
-// Get User Profit & Loss
+// Get User Profit & Loss (Restricted to Master, Admin, and SuperAdmin)
 router.get('/profit-loss', auth, async (req, res) => {
   try {
+    if (req.user.role === 'user') {
+      return res.status(403).json({ error: 'Access denied. Client P/L is only available for master, admin, and superadmin accounts.' });
+    }
+
     const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
     const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
     const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } });
