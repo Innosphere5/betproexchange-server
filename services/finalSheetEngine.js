@@ -236,39 +236,73 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const amountAbs = Math.abs(bNet);
 
     if (currentUser.role === 'master') {
-      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
+      // MASTER ROLE (Final Sheet & Daily Report both show Bettors):
       addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
-      
-      // Other side: Master and Admin (parent)
       if (mPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, mPortion, 'master');
       if (parentPortion > 0) addEntry(otherSide, parentName, parentName, parentPortion, 'admin');
       
       netAmount += bNet > 0 ? -mPortion : mPortion;
       
     } else if (currentUser.role === 'admin') {
-      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
-      addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
-      
-      // Other side: Master, Admin, and SuperAdmin (parent)
-      const masterName = mUser ? mUser.username : 'Unknown Master';
-      if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
-      if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
-      if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+      if (!isDailyReport) {
+        // FINAL SHEET MODE FOR ADMIN:
+        // Master, Admin, and SuperAdmin show. NOT Bettor.
+        if (mUser && mUser.username !== currentUser.username) {
+          // Rollup to Master if bettor is under a Master
+          const masterObligation = aPortion + adminParentPortion;
+          addEntry(bettorSide, mUser.username, mUser.username, masterObligation, 'master');
+          if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
+          if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+        } else {
+          // Direct bettor under Admin (no master): Bettor MUST NOT show on Admin Final Sheet.
+          if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
+          if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+        }
+      } else {
+        // DAILY REPORT MODE (UNTOUCHED):
+        addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
+        const masterName = mUser ? mUser.username : 'Unknown Master';
+        if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+        if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
+        if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+      }
       
       netAmount += bNet > 0 ? -aPortion : aPortion;
       
     } else if (currentUser.role === 'superadmin') {
-      // Green side: Bettor (when bettor wins) / Red side: Bettor (when bettor loses)
-      addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
-      
-      // Other side: Master, Admin, SuperAdmin, and Book
       const masterName = mUser ? mUser.username : 'Unknown Master';
       const adminName = aUser ? aUser.username : 'Unknown Admin';
-      
-      if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
-      if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
-      if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
-      if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+
+      if (!isDailyReport) {
+        // FINAL SHEET MODE FOR SUPERADMIN:
+        // ONLY Admin, Superadmin, and BOOK amount show. NOT Bettor, NOT Master.
+        if (aUser && aUser.username !== currentUser.username) {
+          // Downline is under an Admin (e.g. haji or 50)
+          const upstreamObligation = saPortion + bookPortion;
+          addEntry(bettorSide, aUser.username, aUser.username, upstreamObligation, 'admin');
+          if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+          if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+        } else if (mUser && mUser.username !== currentUser.username) {
+          // Downline is Master directly under SuperAdmin (no Admin in between)
+          // Map to 'admin' role entry so only admin, superadmin, and book show
+          const upstreamObligation = saPortion + bookPortion;
+          addEntry(bettorSide, mUser.username, mUser.username, upstreamObligation, 'admin');
+          if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+          if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+        } else {
+          // Direct bettor under SuperAdmin (e.g. kadir)
+          // Bettor MUST NOT show on SuperAdmin Final Sheet.
+          if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+          if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+        }
+      } else {
+        // DAILY REPORT MODE (UNTOUCHED):
+        addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
+        if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+        if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
+        if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+        if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+      }
       
       netAmount += bNet > 0 ? -saPortion : saPortion;
     }

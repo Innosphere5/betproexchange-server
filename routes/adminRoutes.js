@@ -124,7 +124,9 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     }
 
     const balance = parseFloat(initialBalance) || 0;
-    const skipBalanceCheck = req.user.role === 'superadmin';
+    if (isNaN(balance) || balance < 0) {
+      return res.status(400).json({ error: 'Invalid initial balance' });
+    }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
@@ -165,24 +167,22 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         await parentTx.save();
       }
     } else {
-      // Default: Cash
-      if (!skipBalanceCheck && parent.walletBalance < balance) {
-        return res.status(400).json({ error: 'Insufficient balance in parent account' });
-      }
+      // Default: Cash Deposit
+      if (balance > 0) {
+        // Atomic deduction from parent's walletBalance for ALL roles (including SuperAdmin)
+        const updatedParent = await User.findOneAndUpdate(
+          { _id: parent._id, walletBalance: { $gte: balance } },
+          { $inc: { walletBalance: -balance } },
+          { new: true }
+        );
 
-      newUser = new User({
-        username: lowerUsername,
-        password: hashedPassword,
-        role,
-        share: (role === 'master' || role === 'admin') ? masterShare : 0,
-        parentId: parent._id,
-        walletBalance: balance,
-        credit: 0
-      });
+        if (!updatedParent) {
+          return res.status(400).json({ 
+            error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
+          });
+        }
 
-      if (req.user.role !== 'superadmin' && balance > 0) {
-        parent.walletBalance -= balance;
-        await parent.save();
+        parent.walletBalance = updatedParent.walletBalance;
 
         const parentTx = new Transaction({
           userId: parent.username,
@@ -195,6 +195,16 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         });
         await parentTx.save();
       }
+
+      newUser = new User({
+        username: lowerUsername,
+        password: hashedPassword,
+        role,
+        share: (role === 'master' || role === 'admin') ? masterShare : 0,
+        parentId: parent._id,
+        walletBalance: balance,
+        credit: 0
+      });
 
       if (balance > 0) {
         const newTransaction = new Transaction({
@@ -337,18 +347,26 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
     if (type === 'credit') {
       target.credit = (target.credit || 0) + addAmount;
       target.walletBalance = (target.walletBalance || 0) + addAmount;
+      await target.save();
     } else {
-      if (req.user.role !== 'superadmin') {
-        if (parent.walletBalance < addAmount) {
-          return res.status(400).json({ error: 'Insufficient balance' });
-        }
-        parent.walletBalance -= addAmount;
-        await parent.save();
-      }
-      target.walletBalance += addAmount;
-    }
+      // Cash: Deduct from parent's wallet atomically for ALL roles (including SuperAdmin)
+      const updatedParent = await User.findOneAndUpdate(
+        { _id: parent._id, walletBalance: { $gte: addAmount } },
+        { $inc: { walletBalance: -addAmount } },
+        { new: true }
+      );
 
-    await target.save();
+      if (!updatedParent) {
+        return res.status(400).json({ 
+          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${addAmount.toLocaleString('en-IN')}` 
+        });
+      }
+
+      parent.walletBalance = updatedParent.walletBalance;
+
+      target.walletBalance += addAmount;
+      await target.save();
+    }
 
     // Create Transaction Record for target
     const newTransaction = new Transaction({
@@ -420,18 +438,30 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
       }
       target.credit -= withdrawAmount;
       target.walletBalance -= withdrawAmount;
+      await target.save();
     } else {
-      // Default: Cash
-      if (target.walletBalance < withdrawAmount) {
-        return res.status(400).json({ error: 'User has insufficient balance to withdraw this amount' });
-      }
-      target.walletBalance -= withdrawAmount;
+      // Cash: Deduct from target atomically to ensure target cannot withdraw more than their wallet balance
+      const updatedTarget = await User.findOneAndUpdate(
+        { _id: target._id, walletBalance: { $gte: withdrawAmount } },
+        { $inc: { walletBalance: -withdrawAmount } },
+        { new: true }
+      );
 
-      // Give back to parent if not SuperAdmin
-      if (req.user.role !== 'superadmin') {
-        parent.walletBalance += withdrawAmount;
-        await parent.save();
+      if (!updatedTarget) {
+        return res.status(400).json({ 
+          error: `User has insufficient balance to withdraw. Available: ₹${target.walletBalance.toLocaleString('en-IN')}, requested: ₹${withdrawAmount.toLocaleString('en-IN')}` 
+        });
       }
+
+      // Return cash back to parent's wallet for ALL roles (including SuperAdmin)
+      const updatedParent = await User.findByIdAndUpdate(
+        parent._id,
+        { $inc: { walletBalance: withdrawAmount } },
+        { new: true }
+      );
+
+      target.walletBalance = updatedTarget.walletBalance;
+      parent.walletBalance = updatedParent.walletBalance;
     }
 
     await target.save();
@@ -1593,6 +1623,54 @@ router.post('/clear-final-sheet', auth, async (req, res) => {
     res.status(500).json({ error: 'Server error clearing final sheet' });
   }
 });
+
+// Full System Reset (Clean Start - SuperAdmin only)
+router.post('/reset-system', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'superadmin') {
+      return res.status(403).json({ error: 'Only SuperAdmin can perform full system reset' });
+    }
+
+    const CasinoRound = require('../models/CasinoRound');
+    const AviatorBet = require('../models/AviatorBet');
+    const AviatorRound = require('../models/AviatorRound');
+    const AviatorXBet = require('../models/AviatorXBet');
+    const AviatorXRound = require('../models/AviatorXRound');
+    const TeenPattiBet = require('../models/TeenPattiBet');
+    const TeenPattiHand = require('../models/TeenPattiHand');
+
+    // 1. Delete all downline accounts
+    const userRes = await User.deleteMany({ role: { $ne: 'superadmin' } });
+
+    // 2. Reset SuperAdmin balance to 100 Crore (₹1,000,000,000)
+    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 1000000000, credit: 0 } });
+
+    // 3. Clear transactions
+    const txRes = await Transaction.deleteMany({});
+
+    // 4. Clear all bets & game rounds
+    await Promise.all([
+      Bet.deleteMany({}),
+      CasinoBet.deleteMany({}),
+      CasinoRound.deleteMany({}),
+      AviatorBet.deleteMany({}),
+      AviatorRound.deleteMany({}),
+      AviatorXBet.deleteMany({}),
+      AviatorXRound.deleteMany({}),
+      TeenPattiBet.deleteMany({}),
+      TeenPattiHand.deleteMany({})
+    ]);
+
+    res.json({
+      success: true,
+      message: `System reset complete. ${userRes.deletedCount} accounts and ${txRes.deletedCount} transactions removed. Clean start ready.`
+    });
+  } catch (err) {
+    console.error("System Reset Error:", err);
+    res.status(500).json({ error: 'Server error during system reset' });
+  }
+});
+
 
 
 // Get Match Exposure (Runners P/L and Matched Bets)

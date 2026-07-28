@@ -25,7 +25,7 @@ const seedSuperAdmin = async () => {
         user.password = await bcrypt.hash(password, salt);
         user.role = 'superadmin';
         user.share = 100;
-        user.walletBalance = user.walletBalance || 999999999; 
+        user.walletBalance = 1000000000; // 100 Crore (₹1,000,000,000) 
 
         await user.save();
         console.log(`✅ Superadmin user ${username} created/updated successfully!`);

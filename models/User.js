@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  walletBalance: { type: Number, default: 50000 },
+  walletBalance: { type: Number, default: 0 },
   settings: {
     stake1: { type: Number, default: 2000 },
     stake2: { type: Number, default: 5000 },
