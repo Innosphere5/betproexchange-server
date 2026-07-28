@@ -24,11 +24,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
   } else if (currentUser.role === 'admin') {
     const adminDownlines = await User.find({ parentId: currentUser._id }).lean();
-    const masterIds = adminDownlines.filter(u => u.role === 'master').map(u => u._id);
-    const masterBettors = await User.find({ role: 'user', parentId: { $in: masterIds } }).lean();
-    allUsersInDb = [...adminDownlines, ...masterBettors];
-  } else if (currentUser.role === 'master') {
-    allUsersInDb = await User.find({ parentId: currentUser._id }).lean();
+    const childIds = adminDownlines.map(u => u._id);
+    const nestedUsers = await User.find({ parentId: { $in: childIds } }).lean();
+    allUsersInDb = [...adminDownlines, ...nestedUsers];
+  } else if (currentUser.role === 'supermaster' || currentUser.role === 'master') {
+    const directDownlines = await User.find({ parentId: currentUser._id }).lean();
+    const childIds = directDownlines.map(u => u._id);
+    const nestedUsers = await User.find({ parentId: { $in: childIds } }).lean();
+    allUsersInDb = [...directDownlines, ...nestedUsers];
   }
 
 

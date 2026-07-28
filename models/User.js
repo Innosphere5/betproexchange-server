@@ -14,7 +14,7 @@ const userSchema = new mongoose.Schema({
     plus3: { type: Number, default: 10000 },
     plus4: { type: Number, default: 25000 },
   },
-  role: { type: String, enum: ['user', 'master', 'admin', 'superadmin'], default: 'user' },
+  role: { type: String, enum: ['user', 'master', 'supermaster', 'admin', 'superadmin'], default: 'user' },
   share: { type: Number, default: 0, min: 0, max: 85 },
   credit: { type: Number, default: 0 },
   parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },

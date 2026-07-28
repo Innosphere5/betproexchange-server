@@ -11,9 +11,9 @@ const TeenPattiBet = require('../models/TeenPattiBet');
 const AviatorXBet = require('../models/AviatorXBet');
 const auth = require('../middleware/auth');
 
-// Middleware to check if user is Authorized (SuperAdmin, Admin or Master)
+// Middleware to check if user is Authorized (SuperAdmin, Admin, SuperMaster or Master)
 const isAuthorized = (req, res, next) => {
-  const authorizedRoles = ['superadmin', 'admin', 'master'];
+  const authorizedRoles = ['superadmin', 'admin', 'supermaster', 'master'];
   if (authorizedRoles.includes(req.user.role)) {
     next();
   } else {
@@ -84,7 +84,7 @@ async function calculateUserClientPL(user) {
 }
 
 
-// Create Downline User (Admin, Master, or Bettor)
+// Create Downline User (Admin, SuperMaster, Master, or Bettor)
 router.post('/create-user', auth, isAuthorized, async (req, res) => {
   try {
     const { username, password, role, initialBalance, balanceType, type, share } = req.body;
@@ -105,8 +105,11 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     if (req.user.role === 'master' && role !== 'user') {
       return res.status(403).json({ error: 'Masters can only create Bettors' });
     }
-    if (req.user.role === 'admin' && !['master', 'user'].includes(role)) {
-      return res.status(403).json({ error: 'Admins can only create Masters or Bettors' });
+    if (req.user.role === 'supermaster' && !['master', 'user'].includes(role)) {
+      return res.status(403).json({ error: 'SuperMasters can only create Masters or Bettors' });
+    }
+    if (req.user.role === 'admin' && !['supermaster', 'master', 'user'].includes(role)) {
+      return res.status(403).json({ error: 'Admins can only create SuperMasters, Masters, or Bettors' });
     }
 
     const lowerUsername = username.toLowerCase();
@@ -117,9 +120,9 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     if (!parent) return res.status(404).json({ error: 'Parent user not found' });
 
     // Share Hierarchy Validation
-    if (req.user.role === 'admin' && role === 'master') {
+    if (['admin', 'supermaster'].includes(req.user.role) && ['supermaster', 'master'].includes(role)) {
       if (masterShare >= parent.share) {
-        return res.status(400).json({ error: `Master share must be less than your share (${parent.share}%)` });
+        return res.status(400).json({ error: `Downline share must be less than your share (${parent.share}%)` });
       }
     }
 
