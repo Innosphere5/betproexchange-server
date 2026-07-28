@@ -1883,6 +1883,8 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Only SuperAdmin can perform a system reset.' });
     }
 
+    const { mode = 'balances' } = req.body || {};
+
     const User = require('../models/User');
     const Transaction = require('../models/Transaction');
     const Bet = require('../models/Bet');
@@ -1891,13 +1893,26 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
     const AviatorXBet = require('../models/AviatorXBet');
     const TeenPattiBet = require('../models/TeenPattiBet');
 
-    // Delete all non-superadmin users
-    const deleteUsers = await User.deleteMany({ role: { $ne: 'superadmin' } });
+    let message = '';
+
+    if (mode === 'full') {
+      // Option B: Delete all non-superadmin users
+      const deleteUsers = await User.deleteMany({ role: { $ne: 'superadmin' } });
+      message = `Full system reset complete. Deleted ${deleteUsers.deletedCount} downline accounts.`;
+    } else {
+      // Option A (Default): Reset all downline user balances to match credit limit
+      const downlineUsers = await User.find({ role: { $ne: 'superadmin' } });
+      for (const u of downlineUsers) {
+        u.walletBalance = u.credit || 0;
+        await u.save();
+      }
+      message = `Account balances reset successfully for ${downlineUsers.length} downline accounts. All balances set to credit limit.`;
+    }
 
     // Reset superadmin balance and credit
     await User.updateMany(
       { role: 'superadmin' },
-      { $set: { credit: 0, walletBalance: 1000000000, share: 100 } }
+      { $set: { credit: 0, walletBalance: 1000000000, share: 85 } }
     );
 
     // Delete all transactions and bets
@@ -1910,13 +1925,14 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
 
     res.json({ 
       success: true, 
-      message: `System reset complete. Deleted ${deleteUsers.deletedCount} downline accounts. You can now create new accounts.` 
+      message
     });
   } catch (err) {
     console.error("Reset All Accounts Error:", err);
     res.status(500).json({ error: 'Server error resetting accounts' });
   }
 });
+
 
 // Get Account Ledger Endpoint
 router.get('/account-ledger', auth, isAuthorized, async (req, res) => {

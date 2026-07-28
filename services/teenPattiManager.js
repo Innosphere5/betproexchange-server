@@ -32,6 +32,7 @@ let currentRound = null;
 let roundTimer = 0;
 let phase = 'INIT'; // INIT, OPEN, CLOSED, RESULT
 let timerInterval = null;
+let isProcessing = false;
 let history = [];
 const activePlayers = new Set();
 
@@ -257,37 +258,50 @@ async function startNewRound() {
     broadcastState();
 
     timerInterval = setInterval(async () => {
+      if (isProcessing) return;
+
       roundTimer--;
       broadcastState();
 
       if (roundTimer <= 0) {
-        if (phase === 'DEALING') {
-          // Transition to BETTING_OPEN
-          phase = 'OPEN';
-          currentRound.status = 'BETTING_OPEN';
-          await currentRound.save();
-          roundTimer = ROUND_SETTINGS.BETTING_DURATION;
-          broadcastState();
-        } else if (phase === 'OPEN') {
-          // Transition to BETTING_CLOSED
-          phase = 'CLOSED';
-          currentRound.status = 'BETTING_CLOSED';
-          await currentRound.save();
-          
-          const sanitizedClosedRound = {
-            roundId: currentRound.roundId,
-            status: currentRound.status,
-            result: 'PENDING',
-            cards: { A: [null, null, null], B: [null, null, null] },
-            handNames: null
-          };
-          io.to('teenpatti').emit('teenpatti_betting_closed', sanitizedClosedRound);
-          broadcastState();
-
-          roundTimer = ROUND_SETTINGS.SUSPENSE_DURATION;
-        } else if (phase === 'CLOSED') {
-          clearInterval(timerInterval);
-          await declareResult();
+        isProcessing = true;
+        try {
+          if (phase === 'DEALING') {
+            // Transition to BETTING_OPEN
+            phase = 'OPEN';
+            roundTimer = ROUND_SETTINGS.BETTING_DURATION;
+            currentRound.status = 'BETTING_OPEN';
+            if (currentRound._id) {
+              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_OPEN' } });
+            }
+            broadcastState();
+          } else if (phase === 'OPEN') {
+            // Transition to BETTING_CLOSED
+            phase = 'CLOSED';
+            roundTimer = ROUND_SETTINGS.SUSPENSE_DURATION;
+            currentRound.status = 'BETTING_CLOSED';
+            if (currentRound._id) {
+              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_CLOSED' } });
+            }
+            
+            const sanitizedClosedRound = {
+              roundId: currentRound.roundId,
+              status: currentRound.status,
+              result: 'PENDING',
+              cards: { A: [null, null, null], B: [null, null, null] },
+              handNames: null
+            };
+            io.to('teenpatti').emit('teenpatti_betting_closed', sanitizedClosedRound);
+            broadcastState();
+          } else if (phase === 'CLOSED') {
+            clearInterval(timerInterval);
+            timerInterval = null;
+            await declareResult();
+          }
+        } catch (err) {
+          console.error('[TEENPATTI] Error during phase transition:', err);
+        } finally {
+          isProcessing = false;
         }
       }
     }, 1000);
@@ -314,7 +328,9 @@ async function declareResult() {
 
     currentRound.result = result;
     currentRound.status = 'RESULT_DECLARED';
-    await currentRound.save();
+    if (currentRound._id) {
+      await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { result, status: 'RESULT_DECLARED' } });
+    }
 
     console.log(`[TEENPATTI] Round result: ${result} (A: ${rankA.type} vs B: ${rankB.type})`);
     

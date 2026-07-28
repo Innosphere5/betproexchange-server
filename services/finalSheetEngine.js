@@ -94,7 +94,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   const bettorSummary = {};
   const settlementSummary = {};
-  const seenBetEventKeys = new Set();
 
   txs.forEach(tx => {
     if (!tx.bettor || tx.type === 'SETTLEMENT') {
@@ -120,70 +119,38 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const bettorUser = userMap[bettorName];
     if (!bettorUser) return;
 
-    let mUser = null, aUser = null;
-    let temp = bettorUser;
-    while (temp && temp.parentId) {
-      let p = userMap[temp.parentId.toString()];
-      if (!p) break;
-      if (p.role === 'master') mUser = p;
-      else if (p.role === 'admin') aUser = p;
-      temp = p;
-    }
-
-    const mShare = mUser ? (mUser.share || 0) : 0;
-    const aShare = aUser ? (aUser.share || 0) : 0;
-    const saShare = Math.max(0, 85 - aShare - mShare);
-
-    // Deduplicate multiple transaction records generated for the exact same bet event
-    const betKey = `${tx.bettor}_${tx.matchName || ''}_${tx.selection || ''}_${new Date(tx.createdAt).getTime()}_${tx.category || ''}`;
-    if (seenBetEventKeys.has(betKey)) {
+    // Anchor bettor net calculation to the direct parent's COMMISSION_SHARE transaction (where downline === bettor)
+    if (tx.type !== 'COMMISSION_SHARE' || tx.downline !== bettorName) {
       return;
     }
 
-    if (currentUser.role === 'superadmin' && saShare > 0 && tx.type === 'BOOK_SHARE') {
-      return;
+    const parentUser = userMap[tx.userId];
+    let parentShare = parentUser ? (parentUser.share || 0) : 0;
+    if (parentShare <= 0) {
+      parentShare = (parentUser && parentUser.role === 'superadmin') ? 85 : 85;
     }
 
-    let sharePercent = 0;
-    if (currentUser.role === 'master') sharePercent = mShare;
-    else if (currentUser.role === 'admin') sharePercent = aShare;
-    else if (currentUser.role === 'superadmin') {
-      if (tx.type === 'BOOK_SHARE') sharePercent = 15;
-      else sharePercent = saShare;
+    const bettorNetForTx = - (tx.amount / (parentShare / 100));
+    if (!bettorSummary[bettorName]) {
+      bettorSummary[bettorName] = { 
+        total: 0, 
+        breakdown: { 
+          cricket: { wins: 0, losses: 0, net: 0 }, 
+          casino: { wins: 0, losses: 0, net: 0 },
+          totalNet: 0
+        } 
+      };
     }
-
-    // Fallback sharePercent if currentUser's tier share is 0 (e.g. for superadmin or admin calculating bettor net)
-    if (sharePercent <= 0) {
-      if (tx.type === 'BOOK_SHARE') sharePercent = 15;
-      else if (mShare > 0) sharePercent = mShare;
-      else if (aShare > 0) sharePercent = aShare;
-      else sharePercent = 85;
+    bettorSummary[bettorName].total += bettorNetForTx;
+    
+    const category = tx.category === 'casino' ? 'casino' : 'cricket';
+    bettorSummary[bettorName].breakdown[category].net += bettorNetForTx;
+    if (bettorNetForTx > 0) {
+      bettorSummary[bettorName].breakdown[category].wins += bettorNetForTx;
+    } else {
+      bettorSummary[bettorName].breakdown[category].losses += Math.abs(bettorNetForTx);
     }
-
-    if (sharePercent > 0) {
-      seenBetEventKeys.add(betKey);
-      const bettorNetForTx = - (tx.amount / (sharePercent / 100));
-      if (!bettorSummary[bettorName]) {
-        bettorSummary[bettorName] = { 
-          total: 0, 
-          breakdown: { 
-            cricket: { wins: 0, losses: 0, net: 0 }, 
-            casino: { wins: 0, losses: 0, net: 0 },
-            totalNet: 0
-          } 
-        };
-      }
-      bettorSummary[bettorName].total += bettorNetForTx;
-      
-      const category = tx.category === 'casino' ? 'casino' : 'cricket';
-      bettorSummary[bettorName].breakdown[category].net += bettorNetForTx;
-      if (bettorNetForTx > 0) {
-        bettorSummary[bettorName].breakdown[category].wins += bettorNetForTx;
-      } else {
-        bettorSummary[bettorName].breakdown[category].losses += Math.abs(bettorNetForTx);
-      }
-      bettorSummary[bettorName].breakdown.totalNet += bettorNetForTx;
-    }
+    bettorSummary[bettorName].breakdown.totalNet += bettorNetForTx;
   });
 
   const greenEntries = [];
