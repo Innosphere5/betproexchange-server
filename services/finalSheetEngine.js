@@ -1,9 +1,10 @@
 const User = require('../models/User');
 
 /**
- * Generate a normalized Final Sheet data structure.
+ * Generate a normalized Final Sheet or Daily Report data structure.
  * @param {Object} currentUser - The user who is viewing the report.
  * @param {Array} txs - The list of transactions to process.
+ * @param {Boolean} isDailyReport - Whether this is for Daily Report (P/L only) or Final Sheet (cumulative with cash).
  * @returns {Object} { viewer, greenEntries, redEntries, totalGreen, totalRed, netAmount, platformFee, masterInfo }
  */
 async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
@@ -33,7 +34,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const nestedUsers = await User.find({ parentId: { $in: childIds } }).lean();
     allUsersInDb = [...directDownlines, ...nestedUsers];
   }
-
 
   const userMap = {};
   [...uniqueUsersInDb, ...parents, ...grandParents, currentUser, ...allUsersInDb].forEach(u => {
@@ -99,23 +99,70 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const settlementSummary = {};
 
   txs.forEach(tx => {
-    if (!tx.bettor || tx.type === 'SETTLEMENT') {
-      let sourceName = tx.userId || tx.downline || 'Unknown';
-      let txAmount = tx.amount;
+    if (!isDailyReport) {
+      // Final Sheet mode: Process Cash & Settlement transactions
+      const parentCashTypes = ['CASH_DEPOSIT', 'CASH_WITHDRAWAL'];
+      const childCashTypes = ['LOAD_BALANCE', 'WITHDRAW'];
 
-      if (sourceName === currentUser.username) {
-        return; // Skip self transactions
+      if (parentCashTypes.includes(tx.type)) {
+        const isViewerParent = (currentUser.username === tx.userId || ['superadmin', 'admin', 'supermaster'].includes(currentUser.role));
+        if (isViewerParent && tx.downline && tx.downline !== currentUser.username) {
+          const sourceName = tx.downline;
+          const txAmount = tx.amount;
+          if (!settlementSummary[sourceName]) {
+            settlementSummary[sourceName] = { green: 0, red: 0 };
+          }
+          if (txAmount > 0) {
+            settlementSummary[sourceName].green += txAmount;
+          } else if (txAmount < 0) {
+            settlementSummary[sourceName].red += Math.abs(txAmount);
+          }
+        }
+        return;
       }
 
-      if (!settlementSummary[sourceName]) {
-        settlementSummary[sourceName] = { green: 0, red: 0 };
+      if (childCashTypes.includes(tx.type)) {
+        if (currentUser.username === tx.userId && tx.performedBy && tx.performedBy !== currentUser.username) {
+          const sourceName = tx.performedBy;
+          const txAmount = tx.amount;
+          if (!settlementSummary[sourceName]) {
+            settlementSummary[sourceName] = { green: 0, red: 0 };
+          }
+          if (txAmount > 0) {
+            settlementSummary[sourceName].green += txAmount;
+          } else if (txAmount < 0) {
+            settlementSummary[sourceName].red += Math.abs(txAmount);
+          }
+        }
+        return;
       }
-      if (txAmount > 0) {
-        settlementSummary[sourceName].green += txAmount;
-      } else if (txAmount < 0) {
-        settlementSummary[sourceName].red += Math.abs(txAmount);
+
+      if (tx.type === 'SETTLEMENT') {
+        if (tx.userId === currentUser.username) {
+          let sourceName = tx.downline;
+          if (!sourceName || sourceName === currentUser.username) {
+            sourceName = tx.performedBy;
+          }
+          if (!sourceName || sourceName === currentUser.username) return;
+
+          const txAmount = tx.amount;
+          if (!settlementSummary[sourceName]) {
+            settlementSummary[sourceName] = { green: 0, red: 0 };
+          }
+          if (txAmount > 0) {
+            settlementSummary[sourceName].green += txAmount;
+          } else if (txAmount < 0) {
+            settlementSummary[sourceName].red += Math.abs(txAmount);
+          }
+        }
+        return;
       }
-      return;
+    } else {
+      // Daily Report mode: Skip all non-betting cash/balance/credit transactions
+      const nonBettingTypes = ['SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW', 'LOAD_CREDIT', 'WITHDRAW_CREDIT', 'CREDIT_GIVEN', 'CREDIT_TAKEN'];
+      if (nonBettingTypes.includes(tx.type)) {
+        return;
+      }
     }
 
     const bettorName = tx.bettor;
@@ -163,22 +210,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   let netAmount = 0;
   let totalPlatformFee = 0;
 
-  function getRollupTarget(accountName, accountRole) {
-    return { name: accountName, role: accountRole };
-  }
-
-
   function addEntry(side, accountId, accountName, amount, role, details = {}) {
     if (amount === 0) return;
 
     let targetName = accountName;
     let targetRole = role;
-
-    if (!isDailyReport && currentUser.role !== 'master') {
-      const target = getRollupTarget(accountName, role);
-      targetName = target.name;
-      targetRole = target.role;
-    }
 
     // Auto-populate parentName if role is user (bettor)
     if (targetRole === 'user' && !details.parentName) {
@@ -222,7 +258,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const aShare = aUser ? (aUser.share || 0) : 0;
     const saShare = Math.max(0, 85 - aShare - mShare);
 
-    // Compute share portions matching direct share model in hierarchyService
     const mPortion    = Math.abs(bNet) * (mShare / 100);
     const aPortion    = Math.abs(bNet) * (aShare / 100);
     const saPortion   = Math.abs(bNet) * (saShare / 100);
@@ -231,15 +266,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const parentPortion = Math.abs(bNet) - mPortion;
     const adminParentPortion = parentPortion - aPortion;
 
-    // Determine sides based on who won:
-    // bNet > 0 means the bettor won. Bettor goes to Green, hierarchy goes to Red.
-    // bNet < 0 means the bettor lost. Bettor goes to Red, hierarchy goes to Green.
     const bettorSide = bNet > 0 ? 'green' : 'red';
     const otherSide = bNet > 0 ? 'red' : 'green';
     const amountAbs = Math.abs(bNet);
 
     if (currentUser.role === 'master') {
-      // MASTER ROLE (Final Sheet & Daily Report both show Bettors):
       addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
       if (mPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, mPortion, 'master');
       if (parentPortion > 0) addEntry(otherSide, parentName, parentName, parentPortion, 'admin');
@@ -248,21 +279,16 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       
     } else if (currentUser.role === 'admin') {
       if (!isDailyReport) {
-        // FINAL SHEET MODE FOR ADMIN:
-        // Master, Admin, and SuperAdmin show. NOT Bettor.
         if (mUser && mUser.username !== currentUser.username) {
-          // Rollup to Master if bettor is under a Master
           const masterObligation = aPortion + adminParentPortion;
           addEntry(bettorSide, mUser.username, mUser.username, masterObligation, 'master');
           if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
           if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
         } else {
-          // Direct bettor under Admin (no master): Bettor MUST NOT show on Admin Final Sheet.
           if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
           if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
         }
       } else {
-        // DAILY REPORT MODE (UNTOUCHED):
         addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
         const masterName = mUser ? mUser.username : 'Unknown Master';
         if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
@@ -277,29 +303,21 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       const adminName = aUser ? aUser.username : 'Unknown Admin';
 
       if (!isDailyReport) {
-        // FINAL SHEET MODE FOR SUPERADMIN:
-        // ONLY Admin, Superadmin, and BOOK amount show. NOT Bettor, NOT Master.
         if (aUser && aUser.username !== currentUser.username) {
-          // Downline is under an Admin (e.g. haji or 50)
           const upstreamObligation = saPortion + bookPortion;
           addEntry(bettorSide, aUser.username, aUser.username, upstreamObligation, 'admin');
           if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
           if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
         } else if (mUser && mUser.username !== currentUser.username) {
-          // Downline is Master directly under SuperAdmin (no Admin in between)
-          // Map to 'admin' role entry so only admin, superadmin, and book show
           const upstreamObligation = saPortion + bookPortion;
           addEntry(bettorSide, mUser.username, mUser.username, upstreamObligation, 'admin');
           if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
           if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
         } else {
-          // Direct bettor under SuperAdmin (e.g. kadir)
-          // Bettor MUST NOT show on SuperAdmin Final Sheet.
           if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
           if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
         }
       } else {
-        // DAILY REPORT MODE (UNTOUCHED):
         addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
         if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
         if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
@@ -311,20 +329,37 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     }
   }
 
-  // Handle explicit manual settlements
-  for (const [name, setl] of Object.entries(settlementSummary)) {
-    const netSetl = setl.green - setl.red;
-    if (netSetl === 0) continue;
-    const role = roleMap[name] || 'user';
-    
-    if (netSetl > 0) {
-      addEntry('green', name, name, netSetl, role);
-      // Double-entry balancing: the viewer (currentUser) funded this settlement (outgoing/red)
-      addEntry('red', currentUser.username, currentUser.username, netSetl, currentUser.role);
-    } else {
-      addEntry('red', name, name, Math.abs(netSetl), role);
-      // Double-entry balancing: the viewer (currentUser) received this settlement (incoming/green)
-      addEntry('green', currentUser.username, currentUser.username, Math.abs(netSetl), currentUser.role);
+  // Handle explicit manual settlements & cash entries ONLY for Final Sheet (not Daily Report)
+  if (!isDailyReport) {
+    for (const [name, setl] of Object.entries(settlementSummary)) {
+      const netSetl = setl.green - setl.red;
+      if (netSetl === 0) continue;
+      const role = roleMap[name] || 'user';
+      const isParent = (currentUser.parentId && userMap[currentUser.parentId.toString()]?.username === name);
+
+      if (isParent) {
+        // Viewer is Child, name is Parent:
+        if (netSetl > 0) {
+          // Cash deposit from parent to child: Parent on Red side, Cash on Green side
+          addEntry('red', name, name, netSetl, role);
+          addEntry('green', 'cash', 'cash', netSetl, 'cash');
+        } else {
+          // Cash withdrawal by parent from child: Parent on Green side, Cash on Red side
+          addEntry('green', name, name, Math.abs(netSetl), role);
+          addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
+        }
+      } else {
+        // Viewer is Parent/Admin, name is Child/Downline:
+        if (netSetl > 0) {
+          // Cash withdrawal from downline: Child on Green side, Cash on Red side
+          addEntry('green', name, name, netSetl, role);
+          addEntry('red', 'cash', 'cash', netSetl, 'cash');
+        } else {
+          // Cash deposit to downline: Child on Red side, Cash on Green side
+          addEntry('red', name, name, Math.abs(netSetl), role);
+          addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
+        }
+      }
     }
   }
 
@@ -366,12 +401,10 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const roundedDiff = Math.round(diff * 100) / 100;
 
     if (roundedDiff > 0) {
-      // Net Green (Incoming)
       const baseEntry = greenEntry || redEntry;
       finalGreen.push({ ...baseEntry, amount: roundedDiff });
       calculatedTotalGreen += roundedDiff;
     } else if (roundedDiff < 0) {
-      // Net Red (Outgoing)
       const baseEntry = redEntry || greenEntry;
       finalRed.push({ ...baseEntry, amount: Math.abs(roundedDiff) });
       calculatedTotalRed += Math.abs(roundedDiff);

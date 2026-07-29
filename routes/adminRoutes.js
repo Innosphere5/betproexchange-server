@@ -463,16 +463,29 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
       target.walletBalance = updatedTarget.walletBalance;
       parent.walletBalance = updatedParent.walletBalance;
     } else {
-      // Cash: Deduct from target atomically to ensure target cannot withdraw more than their wallet balance
+      // Cash Withdrawal: Check if target has enough walletBalance OR credit available
+      const availableCash = Math.max(0, target.walletBalance || 0);
+      const availableCredit = Math.max(0, target.credit || 0);
+      const totalAvailable = (target.walletBalance >= 0) ? (target.walletBalance + availableCredit) : availableCredit;
+
+      if (target.walletBalance < withdrawAmount && availableCredit < withdrawAmount && totalAvailable < withdrawAmount) {
+        return res.status(400).json({ 
+          error: `User has insufficient balance or credit to withdraw cash. Available balance: ₹${(target.walletBalance || 0).toLocaleString('en-IN')}, available credit: ₹${availableCredit.toLocaleString('en-IN')}, requested: ₹${withdrawAmount.toLocaleString('en-IN')}` 
+        });
+      }
+
+      // Calculate credit deduction (deduct from credit limit if credit exists)
+      const creditDeduction = availableCredit > 0 ? Math.min(withdrawAmount, availableCredit) : 0;
+
       const updatedTarget = await User.findOneAndUpdate(
-        { _id: target._id, walletBalance: { $gte: withdrawAmount } },
-        { $inc: { walletBalance: -withdrawAmount } },
+        { _id: target._id },
+        { $inc: { walletBalance: -withdrawAmount, credit: -creditDeduction } },
         { new: true }
       );
 
       if (!updatedTarget) {
         return res.status(400).json({ 
-          error: `User has insufficient balance to withdraw. Available: ₹${target.walletBalance.toLocaleString('en-IN')}, requested: ₹${withdrawAmount.toLocaleString('en-IN')}` 
+          error: `Failed to process cash withdrawal for ${target.username}` 
         });
       }
 
@@ -483,6 +496,7 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
         { new: true }
       );
 
+      target.credit = updatedTarget.credit;
       target.walletBalance = updatedTarget.walletBalance;
       parent.walletBalance = updatedParent.walletBalance;
     }
@@ -972,8 +986,8 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
 
     const PLATFORM_FEE_RATE = 0.05; // 5% platform commission
 
-    // 1. Fetch all betting-related share transactions for the current user
-    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
+    // 1. Fetch all betting-related share & cash transactions for the current user (Credit limit ops excluded)
+    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
     let allowedUsernames = [currentUser.username];
     if (currentUser.role === 'superadmin') {
@@ -1054,7 +1068,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
+    const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
     let allowedUsernames = [currentUser.username];
     if (currentUser.role === 'superadmin') {
