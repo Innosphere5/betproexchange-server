@@ -134,6 +134,23 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
+    if (balance > 0) {
+      // Atomic deduction from parent's walletBalance for ALL roles (including SuperAdmin) for cash & credit
+      const updatedParent = await User.findOneAndUpdate(
+        { _id: parent._id, walletBalance: { $gte: balance } },
+        { $inc: { walletBalance: -balance } },
+        { new: true }
+      );
+
+      if (!updatedParent) {
+        return res.status(400).json({ 
+          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
+        });
+      }
+
+      parent.walletBalance = updatedParent.walletBalance;
+    }
+
     let newUser;
 
     if (selectedBalanceType === 'credit') {
@@ -172,21 +189,6 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     } else {
       // Default: Cash Deposit
       if (balance > 0) {
-        // Atomic deduction from parent's walletBalance for ALL roles (including SuperAdmin)
-        const updatedParent = await User.findOneAndUpdate(
-          { _id: parent._id, walletBalance: { $gte: balance } },
-          { $inc: { walletBalance: -balance } },
-          { new: true }
-        );
-
-        if (!updatedParent) {
-          return res.status(400).json({ 
-            error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
-          });
-        }
-
-        parent.walletBalance = updatedParent.walletBalance;
-
         const parentTx = new Transaction({
           userId: parent.username,
           amount: -balance,
@@ -230,7 +232,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         role: newUser.role, 
         balance: newUser.walletBalance,
         credit: newUser.credit
-      } 
+      },
+      parentBalance: parent.walletBalance
     });
   } catch (err) {
     console.error(err);
@@ -347,27 +350,27 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only load balance for Bettors' });
     }
 
+    // Deduct from parent's wallet atomically for ALL roles (including SuperAdmin) for both cash & credit
+    const updatedParent = await User.findOneAndUpdate(
+      { _id: parent._id, walletBalance: { $gte: addAmount } },
+      { $inc: { walletBalance: -addAmount } },
+      { new: true }
+    );
+
+    if (!updatedParent) {
+      return res.status(400).json({ 
+        error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${addAmount.toLocaleString('en-IN')}` 
+      });
+    }
+
+    parent.walletBalance = updatedParent.walletBalance;
+
     if (type === 'credit') {
       target.credit = (target.credit || 0) + addAmount;
       target.walletBalance = (target.walletBalance || 0) + addAmount;
       await target.save();
     } else {
-      // Cash: Deduct from parent's wallet atomically for ALL roles (including SuperAdmin)
-      const updatedParent = await User.findOneAndUpdate(
-        { _id: parent._id, walletBalance: { $gte: addAmount } },
-        { $inc: { walletBalance: -addAmount } },
-        { new: true }
-      );
-
-      if (!updatedParent) {
-        return res.status(400).json({ 
-          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${addAmount.toLocaleString('en-IN')}` 
-        });
-      }
-
-      parent.walletBalance = updatedParent.walletBalance;
-
-      target.walletBalance += addAmount;
+      target.walletBalance = (target.walletBalance || 0) + addAmount;
       await target.save();
     }
 
@@ -436,12 +439,29 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
     }
 
     if (type === 'credit') {
-      if ((target.credit || 0) < withdrawAmount) {
-        return res.status(400).json({ error: 'User has insufficient credit to withdraw this amount' });
+      // Deduct credit & wallet balance from target atomically
+      const updatedTarget = await User.findOneAndUpdate(
+        { _id: target._id, credit: { $gte: withdrawAmount }, walletBalance: { $gte: withdrawAmount } },
+        { $inc: { credit: -withdrawAmount, walletBalance: -withdrawAmount } },
+        { new: true }
+      );
+
+      if (!updatedTarget) {
+        return res.status(400).json({ 
+          error: `User has insufficient credit or balance to withdraw. Available credit: ₹${(target.credit || 0).toLocaleString('en-IN')}, available balance: ₹${(target.walletBalance || 0).toLocaleString('en-IN')}, requested: ₹${withdrawAmount.toLocaleString('en-IN')}` 
+        });
       }
-      target.credit -= withdrawAmount;
-      target.walletBalance -= withdrawAmount;
-      await target.save();
+
+      // Return credit back to parent's wallet balance
+      const updatedParent = await User.findByIdAndUpdate(
+        parent._id,
+        { $inc: { walletBalance: withdrawAmount } },
+        { new: true }
+      );
+
+      target.credit = updatedTarget.credit;
+      target.walletBalance = updatedTarget.walletBalance;
+      parent.walletBalance = updatedParent.walletBalance;
     } else {
       // Cash: Deduct from target atomically to ensure target cannot withdraw more than their wallet balance
       const updatedTarget = await User.findOneAndUpdate(
