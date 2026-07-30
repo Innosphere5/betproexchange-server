@@ -273,13 +273,35 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const mShare = mUser ? (mUser.share || 0) : 0;
     const smShare = smUser ? (smUser.share || 0) : 0;
     const aShare = aUser ? (aUser.share || 0) : 0;
-    const saShare = Math.max(0, 85 - aShare - smShare - mShare);
 
-    const mPortion    = Math.abs(bNet) * (mShare / 100);
-    const smPortion   = Math.abs(bNet) * (smShare / 100);
-    const aPortion    = Math.abs(bNet) * (aShare / 100);
-    const saPortion   = Math.abs(bNet) * (saShare / 100);
-    const bookPortion = Math.abs(bNet) * (bookShare / 100); // 15%
+    // Cumulative share limits up the hierarchy chain
+    const mCum = mUser ? mShare : 0;
+    const smCum = smUser ? Math.max(smShare, mCum) : mCum;
+    const aCum = aUser ? Math.max(aShare, smCum) : smCum;
+
+    // Net percentage for each role
+    const mNetShare = mUser ? mCum : 0;
+    const smNetShare = smUser ? Math.max(0, smCum - mCum) : 0;
+    const aNetShare = aUser ? Math.max(0, aCum - smCum) : 0;
+
+    let saNetShare = 0;
+    let bookNetShare = 0;
+
+    if (!isDailyReport) {
+      // Final Sheet: SuperAdmin gets 85 - aCum, BOOK gets 15
+      saNetShare = Math.max(0, 85 - aCum);
+      bookNetShare = 15;
+    } else {
+      // Daily Report: BOOK is removed (0%), SuperAdmin gets 100 - aCum so accounts total 100%
+      saNetShare = Math.max(0, 100 - aCum);
+      bookNetShare = 0;
+    }
+
+    const mPortion    = Math.abs(bNet) * (mNetShare / 100);
+    const smPortion   = Math.abs(bNet) * (smNetShare / 100);
+    const aPortion    = Math.abs(bNet) * (aNetShare / 100);
+    const saPortion   = Math.abs(bNet) * (saNetShare / 100);
+    const bookPortion = Math.abs(bNet) * (bookNetShare / 100);
 
     const bettorSide = bNet > 0 ? 'green' : 'red';
     const otherSide = bNet > 0 ? 'red' : 'green';
@@ -376,7 +398,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
         if (smPortion > 0 && superMasterName) addEntry(otherSide, superMasterName, superMasterName, smPortion, 'supermaster');
         if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
         if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
-        if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
       }
       
       netAmount += bNet > 0 ? -saPortion : saPortion;

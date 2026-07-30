@@ -86,12 +86,6 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
         // ──────────────────────────────────────────────
         // 2. HIERARCHY DISTRIBUTION (85% split among chain)
         // ──────────────────────────────────────────────
-        // Collect all child shares first (excluding SuperAdmin)
-        let totalChildShares = 0;
-        for (let i = 0; i < chain.length - 1; i++) {
-            totalChildShares += (chain[i].share || 0);
-        }
-
         // Casino Profit Commission Logic (5% taken from house profit)
         let commissionAmount = 0;
         if (isCasino && amount > 0) {
@@ -108,14 +102,20 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             // Direct Downline Name for the Final Sheet labeling
             const downlineName = (i === 0) ? username : chain[i - 1].username;
 
-            // Each entity gets their FULL share percentage directly
+            // Net share calculation for hierarchical chain:
+            // Master gets master.share
+            // SuperMaster gets max(0, supermaster.share - master.share)
+            // Admin gets max(0, admin.share - max(supermaster.share, master.share))
+            // SuperAdmin gets max(0, 85 - highest downline share)
             let sharePercent;
             if (isTopLevel) {
-                // SuperAdmin gets 85% minus all child shares
-                sharePercent = SUPERADMIN_TOTAL_PERCENT - totalChildShares;
+                const maxDownlineShare = (i > 0) ? (chain[i - 1].share || 0) : 0;
+                sharePercent = SUPERADMIN_TOTAL_PERCENT - maxDownlineShare;
                 if (sharePercent < 0) sharePercent = 0;
             } else {
-                sharePercent = user.share || 0;
+                const userShare = user.share || 0;
+                const prevShare = (i > 0) ? (chain[i - 1].share || 0) : 0;
+                sharePercent = Math.max(0, userShare - prevShare);
             }
 
             let earnings = (sharePercent / 100) * amount;
