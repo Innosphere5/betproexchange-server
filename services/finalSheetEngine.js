@@ -15,10 +15,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const allUsernamesToLoad = [...new Set([...uniqueBettorNames, ...uniqueUsernamesFromTxs, currentUser.username])];
 
   const uniqueUsersInDb = await User.find({ username: { $in: allUsernamesToLoad } }).lean();
-  const parentIds = uniqueUsersInDb.map(u => u.parentId).filter(Boolean);
-  const parents = await User.find({ _id: { $in: parentIds } }).lean();
-  const grandParentIds = parents.map(p => p.parentId).filter(Boolean);
-  const grandParents = await User.find({ _id: { $in: grandParentIds } }).lean();
 
   let allUsersInDb = [];
   if (currentUser.role === 'superadmin') {
@@ -36,12 +32,31 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   }
 
   const userMap = {};
-  [...uniqueUsersInDb, ...parents, ...grandParents, currentUser, ...allUsersInDb].forEach(u => {
+  [...uniqueUsersInDb, currentUser, ...allUsersInDb].forEach(u => {
     if (u) {
       userMap[u.username] = u;
       userMap[u._id.toString()] = u;
     }
   });
+
+  // Recursively fetch any missing ancestor parents up the hierarchy chain
+  let missingParentIds = Object.values(userMap)
+    .map(u => u?.parentId)
+    .filter(pid => pid && !userMap[pid.toString()]);
+
+  while (missingParentIds.length > 0) {
+    const fetchedAncestors = await User.find({ _id: { $in: missingParentIds } }).lean();
+    missingParentIds = [];
+    fetchedAncestors.forEach(a => {
+      if (a) {
+        userMap[a.username] = a;
+        userMap[a._id.toString()] = a;
+        if (a.parentId && !userMap[a.parentId.toString()]) {
+          missingParentIds.push(a.parentId);
+        }
+      }
+    });
+  }
 
   const roleMap = {};
   Object.values(userMap).forEach(u => {
