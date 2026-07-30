@@ -102,14 +102,17 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     }
 
     // Role restriction logic
-    if (req.user.role === 'master' && role !== 'user') {
-      return res.status(403).json({ error: 'Masters can only create Bettors' });
+    if (req.user.role === 'superadmin' && !['admin', 'user'].includes(role)) {
+      return res.status(403).json({ error: 'SuperAdmins can only create Admins or Bettors' });
+    }
+    if (req.user.role === 'admin' && !['supermaster', 'user'].includes(role)) {
+      return res.status(403).json({ error: 'Admins can only create SuperMasters or Bettors' });
     }
     if (req.user.role === 'supermaster' && !['master', 'user'].includes(role)) {
       return res.status(403).json({ error: 'SuperMasters can only create Masters or Bettors' });
     }
-    if (req.user.role === 'admin' && !['supermaster', 'master', 'user'].includes(role)) {
-      return res.status(403).json({ error: 'Admins can only create SuperMasters, Masters, or Bettors' });
+    if (req.user.role === 'master' && role !== 'user') {
+      return res.status(403).json({ error: 'Masters can only create Bettors' });
     }
 
     const lowerUsername = username.toLowerCase();
@@ -120,9 +123,13 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     if (!parent) return res.status(404).json({ error: 'Parent user not found' });
 
     // Share Hierarchy Validation
-    if (['admin', 'supermaster'].includes(req.user.role) && ['supermaster', 'master'].includes(role)) {
-      if (masterShare >= parent.share) {
-        return res.status(400).json({ error: `Downline share must be less than your share (${parent.share}%)` });
+    if (['admin', 'supermaster', 'master'].includes(role)) {
+      const parentShareLimit = req.user.role === 'superadmin' ? 85 : (parent.share || 0);
+      if (req.user.role !== 'superadmin' && masterShare > parentShareLimit) {
+        return res.status(400).json({ error: `Downline share cannot exceed your share (${parentShareLimit}%)` });
+      }
+      if (req.user.role === 'superadmin' && masterShare > 85) {
+        return res.status(400).json({ error: 'Share must be between 0 and 85 (15% is reserved for Book)' });
       }
     }
 
@@ -158,7 +165,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         username: lowerUsername,
         password: hashedPassword,
         role,
-        share: (role === 'master' || role === 'admin') ? masterShare : 0,
+        share: ['admin', 'supermaster', 'master'].includes(role) ? masterShare : 0,
         parentId: parent._id,
         walletBalance: balance,
         credit: balance
@@ -205,7 +212,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         username: lowerUsername,
         password: hashedPassword,
         role,
-        share: (role === 'master' || role === 'admin') ? masterShare : 0,
+        share: ['admin', 'supermaster', 'master'].includes(role) ? masterShare : 0,
         parentId: parent._id,
         walletBalance: balance,
         credit: 0
@@ -320,6 +327,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         _id: targetParent._id,
         credit: targetParent.credit || 0,
         walletBalance: targetParent.walletBalance || 0,
+        share: targetParent.share || 0,
         clientPL: parentClientPL
       },
       breadcrumbs
@@ -633,8 +641,8 @@ router.post('/update-user', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only edit Bettors' });
     }
 
-    // Share is immutable for admin and master roles after creation
-    if ((target.role === 'admin' || target.role === 'master') && share !== undefined) {
+    // Share is immutable for admin, supermaster and master roles after creation
+    if (['admin', 'supermaster', 'master'].includes(target.role) && share !== undefined) {
       const upShare = parseFloat(share);
       if (!isNaN(upShare) && upShare !== target.share) {
         return res.status(400).json({ error: 'Share cannot be changed after account creation' });
