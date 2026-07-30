@@ -244,42 +244,72 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     
     const bUser = userMap[bName];
     if (!bUser) continue;
-    let mUser = null, aUser = null;
+    let mUser = null, smUser = null, aUser = null;
     let temp = bUser;
     while (temp && temp.parentId) {
       let p = userMap[temp.parentId.toString()];
       if (!p) break;
       if (p.role === 'master') mUser = p;
+      else if (p.role === 'supermaster') smUser = p;
       else if (p.role === 'admin') aUser = p;
       temp = p;
     }
 
     const mShare = mUser ? (mUser.share || 0) : 0;
+    const smShare = smUser ? (smUser.share || 0) : 0;
     const aShare = aUser ? (aUser.share || 0) : 0;
-    const saShare = Math.max(0, 85 - aShare - mShare);
+    const saShare = Math.max(0, 85 - aShare - smShare - mShare);
 
     const mPortion    = Math.abs(bNet) * (mShare / 100);
+    const smPortion   = Math.abs(bNet) * (smShare / 100);
     const aPortion    = Math.abs(bNet) * (aShare / 100);
     const saPortion   = Math.abs(bNet) * (saShare / 100);
     const bookPortion = Math.abs(bNet) * (bookShare / 100); // 15%
-
-    const parentPortion = Math.abs(bNet) - mPortion;
-    const adminParentPortion = parentPortion - aPortion;
 
     const bettorSide = bNet > 0 ? 'green' : 'red';
     const otherSide = bNet > 0 ? 'red' : 'green';
     const amountAbs = Math.abs(bNet);
 
     if (currentUser.role === 'master') {
+      const parentPortion = Math.abs(bNet) - mPortion;
       addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
       if (mPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, mPortion, 'master');
-      if (parentPortion > 0) addEntry(otherSide, parentName, parentName, parentPortion, 'admin');
+      if (parentPortion > 0) addEntry(otherSide, parentName, parentName, parentPortion, parentRole);
       
       netAmount += bNet > 0 ? -mPortion : mPortion;
       
-    } else if (currentUser.role === 'admin') {
+    } else if (currentUser.role === 'supermaster') {
+      const upstreamPortion = aPortion + saPortion + bookPortion;
       if (!isDailyReport) {
         if (mUser && mUser.username !== currentUser.username) {
+          const masterObligation = smPortion + upstreamPortion;
+          addEntry(bettorSide, mUser.username, mUser.username, masterObligation, 'master');
+          if (smPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, smPortion, 'supermaster');
+          if (upstreamPortion > 0) addEntry(otherSide, parentName, parentName, upstreamPortion, parentRole);
+        } else {
+          addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
+          if (smPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, smPortion, 'supermaster');
+          if (upstreamPortion > 0) addEntry(otherSide, parentName, parentName, upstreamPortion, parentRole);
+        }
+      } else {
+        addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
+        const masterName = mUser ? mUser.username : 'Unknown Master';
+        if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+        if (smPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, smPortion, 'supermaster');
+        if (upstreamPortion > 0) addEntry(otherSide, parentName, parentName, upstreamPortion, parentRole);
+      }
+
+      netAmount += bNet > 0 ? -smPortion : smPortion;
+
+    } else if (currentUser.role === 'admin') {
+      const adminParentPortion = saPortion + bookPortion;
+      if (!isDailyReport) {
+        if (smUser && smUser.username !== currentUser.username) {
+          const downlineObligation = aPortion + adminParentPortion;
+          addEntry(bettorSide, smUser.username, smUser.username, downlineObligation, 'supermaster');
+          if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
+          if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
+        } else if (mUser && mUser.username !== currentUser.username) {
           const masterObligation = aPortion + adminParentPortion;
           addEntry(bettorSide, mUser.username, mUser.username, masterObligation, 'master');
           if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
@@ -291,7 +321,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       } else {
         addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
         const masterName = mUser ? mUser.username : 'Unknown Master';
+        const superMasterName = smUser ? smUser.username : null;
         if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+        if (smPortion > 0 && superMasterName) addEntry(otherSide, superMasterName, superMasterName, smPortion, 'supermaster');
         if (aPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, aPortion, 'admin');
         if (adminParentPortion > 0) addEntry(otherSide, parentName, parentName, adminParentPortion, 'superadmin');
       }
@@ -300,6 +332,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       
     } else if (currentUser.role === 'superadmin') {
       const masterName = mUser ? mUser.username : 'Unknown Master';
+      const superMasterName = smUser ? smUser.username : null;
       const adminName = aUser ? aUser.username : 'Unknown Admin';
 
       if (!isDailyReport) {
@@ -308,9 +341,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
           addEntry(bettorSide, aUser.username, aUser.username, upstreamObligation, 'admin');
           if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
           if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
+        } else if (smUser && smUser.username !== currentUser.username) {
+          const upstreamObligation = saPortion + bookPortion;
+          addEntry(bettorSide, smUser.username, smUser.username, upstreamObligation, 'supermaster');
+          if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
+          if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
         } else if (mUser && mUser.username !== currentUser.username) {
           const upstreamObligation = saPortion + bookPortion;
-          addEntry(bettorSide, mUser.username, mUser.username, upstreamObligation, 'admin');
+          addEntry(bettorSide, mUser.username, mUser.username, upstreamObligation, 'master');
           if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
           if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
         } else {
@@ -320,6 +358,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       } else {
         addEntry(bettorSide, bName, bName, amountAbs, 'user', { breakdown: bBreakdown });
         if (mPortion > 0) addEntry(otherSide, masterName, masterName, mPortion, 'master');
+        if (smPortion > 0 && superMasterName) addEntry(otherSide, superMasterName, superMasterName, smPortion, 'supermaster');
         if (aPortion > 0) addEntry(otherSide, adminName, adminName, aPortion, 'admin');
         if (saPortion > 0) addEntry(otherSide, currentUser.username, currentUser.username, saPortion, 'superadmin');
         if (bookPortion > 0) addEntry(otherSide, 'BOOK', 'BOOK', bookPortion, 'book');
