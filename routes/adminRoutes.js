@@ -10,6 +10,7 @@ const AviatorBet = require('../models/AviatorBet');
 const TeenPattiBet = require('../models/TeenPattiBet');
 const AviatorXBet = require('../models/AviatorXBet');
 const auth = require('../middleware/auth');
+const { generateFinalSheet } = require('../services/finalSheetEngine');
 
 // Middleware to check if user is Authorized (SuperAdmin, Admin, SuperMaster or Master)
 const isAuthorized = (req, res, next) => {
@@ -21,67 +22,59 @@ const isAuthorized = (req, res, next) => {
   }
 };
 
-// Helper function to calculate Client Net P/L
-async function calculateUserClientPL(user) {
-  let pl = 0;
-  if (user.role === 'user') {
-    const winStatuses = ['won', 'WIN', 'WON', 'win'];
-    const loseStatuses = ['lost', 'LOSE', 'LOST', 'lose'];
+// Helper functions for Final Sheet based Client P/L calculation
+async function getFinalSheetForUser(viewerUser) {
+  const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
-    const [cricket, casino, aviator, teenPatti, aviatorX, settlements] = await Promise.all([
-      Bet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
-      CasinoBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
-      AviatorBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
-      TeenPattiBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
-      AviatorXBet.find({ userId: user.username, status: { $in: [...winStatuses, ...loseStatuses] } }).lean(),
-      Transaction.find({ userId: user.username, type: 'SETTLEMENT' }).lean()
-    ]);
-
-    cricket.forEach(b => {
-      const stake = b.stake || b.amount || 0;
-      if (winStatuses.includes(b.status)) pl += ((b.payout || (stake * (b.odds || 2.0))) - stake);
-      else if (loseStatuses.includes(b.status)) pl -= stake;
-    });
-
-    casino.forEach(b => {
-      const amt = b.amount || b.stake || 0;
-      if (winStatuses.includes(b.status)) pl += (b.winAmount ? (b.winAmount - amt) : (amt * ((b.odds || 2.0) - 1) * 0.95));
-      else if (loseStatuses.includes(b.status)) pl -= amt;
-    });
-
-    aviator.forEach(b => {
-      const stake = b.stake || b.amount || 0;
-      if (winStatuses.includes(b.status)) pl += ((b.payout || 0) - stake);
-      else if (loseStatuses.includes(b.status)) pl -= stake;
-    });
-
-    teenPatti.forEach(b => {
-      const amt = b.amount || b.stake || 0;
-      if (winStatuses.includes(b.status)) pl += (b.payout ? (b.payout - amt) : (b.winAmount ? (b.winAmount - amt) : (amt * 0.95)));
-      else if (loseStatuses.includes(b.status)) pl -= amt;
-    });
-
-    aviatorX.forEach(b => {
-      const stake = b.stake || b.amount || 0;
-      if (winStatuses.includes(b.status)) pl += ((b.payout || 0) - stake);
-      else if (loseStatuses.includes(b.status)) pl -= stake;
-    });
-
-    settlements.forEach(s => {
-      pl += (s.amount || 0);
-    });
+  let allowedUsernames = [viewerUser.username];
+  if (viewerUser.role === 'superadmin') {
+    const allUsers = await User.find({}).select('username').lean();
+    allowedUsernames = allUsers.map(u => u.username);
   } else {
-    const childUsers = await User.find({ parentId: user._id }).lean();
-    for (const child of childUsers) {
-      pl += await calculateUserClientPL(child);
-    }
-    const ownSettlements = await Transaction.find({ userId: user.username, type: 'SETTLEMENT' }).lean();
-    ownSettlements.forEach(s => {
-      pl += (s.amount || 0);
+    const getDownlines = async (parentId) => {
+      const children = await User.find({ parentId }).select('_id username').lean();
+      let list = [...children];
+      for (const child of children) {
+        const sub = await getDownlines(child._id);
+        list = [...list, ...sub];
+      }
+      return list;
+    };
+    const downlineUsers = await getDownlines(viewerUser._id);
+    allowedUsernames = [viewerUser.username, ...downlineUsers.map(u => u.username)];
+  }
+
+  const query = { 
+    $or: [
+      { userId: { $in: allowedUsernames } },
+      { downline: { $in: allowedUsernames } }
+    ],
+    type: { $in: types }
+  };
+
+  const txs = await Transaction.find(query).sort({ createdAt: -1 });
+  return await generateFinalSheet(viewerUser, txs);
+}
+
+function extractPlMapFromFinalSheet(finalSheetData) {
+  const plMap = {};
+  if (finalSheetData && finalSheetData.greenEntries) {
+    finalSheetData.greenEntries.forEach(e => {
+      if (e.accountName && e.accountName !== 'cash' && e.accountName !== 'BOOK') {
+        plMap[e.accountName] = (plMap[e.accountName] || 0) + e.amount;
+      }
     });
   }
-  return Math.round(pl * 100) / 100;
+  if (finalSheetData && finalSheetData.redEntries) {
+    finalSheetData.redEntries.forEach(e => {
+      if (e.accountName && e.accountName !== 'cash' && e.accountName !== 'BOOK') {
+        plMap[e.accountName] = (plMap[e.accountName] || 0) - e.amount;
+      }
+    });
+  }
+  return plMap;
 }
+
 
 
 // Create Downline User (Admin, SuperMaster, Master, or Bettor)
@@ -293,14 +286,18 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const countMap = {};
     counts.forEach(c => countMap[c._id.toString()] = c.count);
 
-    const usersWithCountsAndPL = await Promise.all(users.map(async u => {
-      const clientPL = await calculateUserClientPL(u);
+    const targetParentFinalSheet = await getFinalSheetForUser(targetParent);
+    const targetPlMap = extractPlMapFromFinalSheet(targetParentFinalSheet);
+
+    const usersWithCountsAndPL = users.map(u => {
+      const rawPL = targetPlMap[u.username] || 0;
+      const clientPL = Math.round(rawPL * 100) / 100;
       return {
         ...u,
         downlineCount: countMap[u._id.toString()] || 0,
         clientPL
       };
-    }));
+    });
 
     // Build parent hierarchy breadcrumbs from targetParent back up to loggedInUser
     const breadcrumbs = [];
@@ -316,7 +313,15 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     }
 
     // Calculate parent's own Client P/L for the summary row
-    const parentClientPL = await calculateUserClientPL(targetParent);
+    let parentClientPL = 0;
+    if (targetParent._id.toString() === loggedInUser._id.toString()) {
+      parentClientPL = targetParentFinalSheet.netAmount || 0;
+    } else {
+      const loggedInUserFinalSheet = await getFinalSheetForUser(loggedInUser);
+      const loggedInPlMap = extractPlMapFromFinalSheet(loggedInUserFinalSheet);
+      parentClientPL = loggedInPlMap[targetParent.username] || 0;
+    }
+    parentClientPL = Math.round(parentClientPL * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -581,11 +586,13 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only settle Bettors' });
     }
 
-    // Calculate current P/L to determine settlement direction
-    const clientPL = await calculateUserClientPL(target);
+    // Calculate current P/L to determine settlement direction using Final Sheet engine
+    const parentFinalSheet = await getFinalSheetForUser(parent);
+    const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
+    const clientPL = parentPlMap[target.username] || 0;
     const settleAmount = Math.abs(rawAmount);
 
-    const isTargetCredit = (clientPL < 0 || (clientPL === 0 && rawAmount > 0));
+    const isTargetCredit = (clientPL > 0 || (clientPL === 0 && rawAmount > 0));
 
     const desc = description && description.trim() !== '' ? description.trim() : 'P/L to Cash transfer';
 
@@ -982,8 +989,6 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
     res.status(500).json({ error: 'Server error fetching commission report' });
   }
 });
-
-const { generateFinalSheet } = require('../services/finalSheetEngine');
 
 // Get Final Sheet (Green/Red/Net Ledger - cumulative running totals or date filtered)
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
