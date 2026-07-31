@@ -113,6 +113,59 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const bettorSummary = {};
   const settlementSummary = {};
 
+  function getRollupAccountForViewer(targetUsername, currentUser, userMap) {
+    if (!targetUsername || targetUsername === 'cash' || targetUsername === 'BOOK') {
+      return targetUsername;
+    }
+    const u = userMap[targetUsername];
+    if (!u) return targetUsername;
+    if (u.username === currentUser.username) return targetUsername;
+
+    if (currentUser.role === 'superadmin') {
+      let temp = u;
+      let adminAccount = null;
+      let childOfSuperAdmin = null;
+
+      while (temp) {
+        if (temp.role === 'admin') {
+          adminAccount = temp;
+        }
+        if (temp.parentId && userMap[temp.parentId.toString()]) {
+          const parent = userMap[temp.parentId.toString()];
+          if (parent.role === 'superadmin' || parent.username === currentUser.username) {
+            childOfSuperAdmin = temp;
+          }
+          temp = parent;
+        } else {
+          break;
+        }
+      }
+      if (adminAccount) return adminAccount.username;
+      if (childOfSuperAdmin) return childOfSuperAdmin.username;
+      return targetUsername;
+    }
+
+    let curr = u;
+    let childOfViewer = null;
+    while (curr) {
+      if (!curr.parentId) break;
+      const parent = userMap[curr.parentId.toString()];
+      if (!parent) break;
+
+      if (parent.username === currentUser.username || parent._id.toString() === currentUser._id.toString()) {
+        childOfViewer = curr;
+        break;
+      }
+      curr = parent;
+    }
+
+    if (childOfViewer) {
+      return childOfViewer.username;
+    }
+
+    return targetUsername;
+  }
+
   txs.forEach(tx => {
     if (!isDailyReport) {
       // Final Sheet mode: Process Cash & Settlement transactions
@@ -122,7 +175,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (parentCashTypes.includes(tx.type)) {
         const isViewerParent = (currentUser.username === tx.userId || ['superadmin', 'admin', 'supermaster'].includes(currentUser.role));
         if (isViewerParent && tx.downline && tx.downline !== currentUser.username) {
-          const sourceName = tx.downline;
+          const rawSourceName = tx.downline;
+          const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
+          if (sourceName === currentUser.username) return;
           const txAmount = tx.amount;
           if (!settlementSummary[sourceName]) {
             settlementSummary[sourceName] = { green: 0, red: 0 };
@@ -138,7 +193,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
       if (childCashTypes.includes(tx.type)) {
         if (currentUser.username === tx.userId && tx.performedBy && tx.performedBy !== currentUser.username) {
-          const sourceName = tx.performedBy;
+          const rawSourceName = tx.performedBy;
+          const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
+          if (sourceName === currentUser.username) return;
           const txAmount = tx.amount;
           if (!settlementSummary[sourceName]) {
             settlementSummary[sourceName] = { green: 0, red: 0 };
@@ -154,11 +211,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
       if (tx.type === 'SETTLEMENT') {
         if (tx.userId === currentUser.username) {
-          let sourceName = tx.downline;
-          if (!sourceName || sourceName === currentUser.username) {
-            sourceName = tx.performedBy;
+          let rawSourceName = tx.downline;
+          if (!rawSourceName || rawSourceName === currentUser.username) {
+            rawSourceName = tx.performedBy;
           }
-          if (!sourceName || sourceName === currentUser.username) return;
+          if (!rawSourceName || rawSourceName === currentUser.username) return;
+
+          const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
+          if (sourceName === currentUser.username) return;
 
           const txAmount = tx.amount;
           if (!settlementSummary[sourceName]) {
