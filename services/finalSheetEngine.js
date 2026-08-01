@@ -475,24 +475,24 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (isParent) {
         // Viewer is Child, name is Parent:
         if (netSetl > 0) {
-          // Cash deposit from parent to child: Parent on Red side, Cash on Green side
-          addEntry('red', name, name, netSetl, role);
-          addEntry('green', 'cash', 'cash', netSetl, 'cash');
-        } else {
           // Cash withdrawal by parent from child: Parent on Green side, Cash on Red side
-          addEntry('green', name, name, Math.abs(netSetl), role);
-          addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
+          addEntry('green', name, name, netSetl, role);
+          addEntry('red', 'cash', 'cash', netSetl, 'cash');
+        } else {
+          // Cash deposit from parent to child: Parent on Red side, Cash on Green side
+          addEntry('red', name, name, Math.abs(netSetl), role);
+          addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
       } else {
         // Viewer is Parent/Admin, name is Child/Downline:
         if (netSetl > 0) {
-          // Cash withdrawal from downline: Child on Green side, Cash on Red side
-          addEntry('green', name, name, netSetl, role);
-          addEntry('red', 'cash', 'cash', netSetl, 'cash');
+          // Cash withdrawal from downline: Child on Red side, Cash on Green side
+          addEntry('red', name, name, netSetl, role);
+          addEntry('green', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Cash deposit to downline: Child on Red side, Cash on Green side
-          addEntry('red', name, name, Math.abs(netSetl), role);
-          addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
+          // Cash deposit to downline: Child on Green side, Cash on Red side
+          addEntry('green', name, name, Math.abs(netSetl), role);
+          addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
       }
     }
