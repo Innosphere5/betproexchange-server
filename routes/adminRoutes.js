@@ -677,7 +677,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     // Target user transaction
     const targetTx = new Transaction({
       userId: target.username,
-      amount: isTargetCredit ? settleAmount : -settleAmount,
+      amount: isTargetCredit ? -settleAmount : settleAmount,
       type: 'SETTLEMENT',
       category: 'wallet',
       description: desc,
@@ -689,7 +689,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     // Parent user transaction for ledger and final sheet
     const parentTx = new Transaction({
       userId: parent.username,
-      amount: isTargetCredit ? -settleAmount : settleAmount,
+      amount: isTargetCredit ? settleAmount : -settleAmount,
       type: 'SETTLEMENT',
       category: 'wallet',
       downline: target.username,
