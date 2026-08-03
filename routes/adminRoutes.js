@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Match = require('../models/Match');
@@ -11,6 +12,26 @@ const TeenPattiBet = require('../models/TeenPattiBet');
 const AviatorXBet = require('../models/AviatorXBet');
 const auth = require('../middleware/auth');
 const { generateFinalSheet } = require('../services/finalSheetEngine');
+
+// Helper to reliably find a user from JWT req.user payload across username casing or ID
+const findUserFromReq = async (reqUser) => {
+  if (!reqUser) return null;
+  const key = reqUser.userId || reqUser.id || reqUser._id;
+  if (!key) return null;
+
+  let user = await User.findOne({ username: key });
+  if (!user && typeof key === 'string') {
+    user = await User.findOne({ username: key.trim().toLowerCase() });
+  }
+  if (!user && typeof key === 'string') {
+    const safeStr = key.trim().replace(/[/\\^$*+?.()|[\]{}]/g, '\\$&');
+    user = await User.findOne({ username: { $regex: new RegExp(`^${safeStr}$`, 'i') } });
+  }
+  if (!user && mongoose.Types.ObjectId.isValid(key)) {
+    user = await User.findById(key);
+  }
+  return user;
+};
 
 // Middleware to check if user is Authorized (SuperAdmin, Admin, SuperMaster or Master)
 const isAuthorized = (req, res, next) => {
@@ -244,14 +265,19 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
 // Get Downline Users with sub-user counts and Client P/L (Supports optional ?username= for hierarchy drill-down)
 router.get('/downline', auth, isAuthorized, async (req, res) => {
   try {
-    const loggedInUser = await User.findOne({ username: req.user.userId });
+    const loggedInUser = await findUserFromReq(req.user);
     if (!loggedInUser) return res.status(404).json({ error: 'User not found' });
 
     let targetParent = loggedInUser;
     const { username } = req.query;
 
     if (username && username.trim() !== '' && username.trim().toLowerCase() !== loggedInUser.username.toLowerCase()) {
-      const requestedUser = await User.findOne({ username: username.trim().toLowerCase() });
+      const targetLower = username.trim().toLowerCase();
+      let requestedUser = await User.findOne({ username: targetLower });
+      if (!requestedUser) {
+        const safeTarget = username.trim().replace(/[/\\^$*+?.()|[\]{}]/g, '\\$&');
+        requestedUser = await User.findOne({ username: { $regex: new RegExp(`^${safeTarget}$`, 'i') } });
+      }
       if (!requestedUser) {
         return res.status(404).json({ error: 'Requested parent user not found' });
       }
