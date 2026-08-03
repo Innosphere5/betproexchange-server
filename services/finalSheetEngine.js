@@ -173,7 +173,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       const childCashTypes = ['LOAD_BALANCE', 'WITHDRAW'];
 
       if (parentCashTypes.includes(tx.type)) {
-        const isViewerParent = (currentUser.username === tx.userId || ['superadmin', 'admin', 'supermaster'].includes(currentUser.role));
+        const isViewerParent = (currentUser.username === tx.userId);
         if (isViewerParent && tx.downline && tx.downline !== currentUser.username) {
           const rawSourceName = tx.downline;
           const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
@@ -543,6 +543,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       const baseEntry = redEntry || greenEntry;
       finalRed.push({ ...baseEntry, amount: Math.abs(roundedDiff) });
       calculatedTotalRed += Math.abs(roundedDiff);
+    } else {
+      const baseEntry = greenEntry || redEntry;
+      if (baseEntry && baseEntry.accountId !== 'cash' && baseEntry.accountId !== 'BOOK') {
+        finalGreen.push({ ...baseEntry, amount: 0 });
+      }
     }
   }
 
