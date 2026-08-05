@@ -319,11 +319,17 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const parentUsernames = users.filter(u => u.role !== 'user').map(u => u.username);
     const sharePlMap = {};
     if (parentUsernames.length > 0) {
+      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
+      const bettorUsernames = bettorDocs.map(u => u.username);
+
       const sharePlAgg = await Transaction.aggregate([
         {
           $match: {
             userId: { $in: parentUsernames },
-            type: { $in: ['COMMISSION_SHARE', 'SETTLEMENT'] }
+            $or: [
+              { type: 'COMMISSION_SHARE' },
+              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames } }
+            ]
           }
         },
         {
@@ -379,11 +385,17 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
 
     let parentSharePL = 0;
     if (targetParent.role !== 'user') {
+      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
+      const bettorUsernames = bettorDocs.map(u => u.username);
+
       const pShareAgg = await Transaction.aggregate([
         {
           $match: {
             userId: targetParent.username,
-            type: { $in: ['COMMISSION_SHARE', 'SETTLEMENT'] }
+            $or: [
+              { type: 'COMMISSION_SHARE' },
+              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames }, performedBy: { $ne: targetParent.username } }
+            ]
           }
         },
         {
@@ -663,15 +675,58 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only settle Bettors' });
     }
 
-    // Calculate current P/L to determine settlement direction using Final Sheet engine
-    const parentFinalSheet = await getFinalSheetForUser(parent);
-    const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
-    const clientPL = parentPlMap[target.username] || 0;
+    // Calculate current balance to determine settlement direction:
+    // - For AGENTS (Admin, SuperMaster, Master): settle target's Available Balance (sharePL)
+    // - For BETTORS (user): settle target's Client P/L
+    let currentBalanceToSettle = 0;
+
+    if (target.role !== 'user') {
+      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
+      const bettorUsernames = bettorDocs.map(u => u.username);
+
+      const sharePlAgg = await Transaction.aggregate([
+        {
+          $match: {
+            userId: target.username,
+            $or: [
+              { type: 'COMMISSION_SHARE' },
+              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames } }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: "$userId",
+            totalSharePL: { $sum: "$amount" }
+          }
+        }
+      ]);
+      currentBalanceToSettle = sharePlAgg.length > 0 ? (Math.round(sharePlAgg[0].totalSharePL * 100) / 100) : 0;
+    } else {
+      const parentFinalSheet = await getFinalSheetForUser(parent);
+      const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
+      currentBalanceToSettle = parentPlMap[target.username] || 0;
+    }
+
     const settleAmount = Math.abs(rawAmount);
 
-    const isTargetCredit = (clientPL > 0 || (clientPL === 0 && rawAmount > 0));
+    // Direction logic:
+    // If currentBalanceToSettle > 0 (Green balance): credit balance.
+    //   Settling reduces Green balance towards 0. Target gets -settleAmount, Parent gets +settleAmount.
+    // If currentBalanceToSettle < 0 (Red balance): debit balance.
+    //   Settling reduces Red balance towards 0. Target gets +settleAmount, Parent gets -settleAmount.
+    // If currentBalanceToSettle === 0 (Zero balance): follow input sign (rawAmount >= 0 => target credit, rawAmount < 0 => target debit).
+    let isTargetCredit;
+    if (currentBalanceToSettle > 0) {
+      isTargetCredit = true;
+    } else if (currentBalanceToSettle < 0) {
+      isTargetCredit = false;
+    } else {
+      isTargetCredit = (rawAmount >= 0);
+    }
 
     const desc = description && description.trim() !== '' ? description.trim() : 'P/L to Cash transfer';
+    const isAgent = (target.role !== 'user');
 
     // Double entry transactions:
     // Target user transaction
@@ -679,7 +734,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       userId: target.username,
       amount: isTargetCredit ? -settleAmount : settleAmount,
       type: 'SETTLEMENT',
-      category: 'wallet',
+      category: isAgent ? 'share_settlement' : 'wallet',
       description: desc,
       downline: parent.username,
       performedBy: parent.username
@@ -691,9 +746,9 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       userId: parent.username,
       amount: isTargetCredit ? settleAmount : -settleAmount,
       type: 'SETTLEMENT',
-      category: 'wallet',
-      downline: target.username,
+      category: isAgent ? 'share_settlement' : 'wallet',
       description: desc,
+      downline: target.username,
       performedBy: parent.username
     });
     await parentTx.save();

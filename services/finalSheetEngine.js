@@ -210,6 +210,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       }
 
       if (tx.type === 'SETTLEMENT') {
+        if (tx.category === 'share_settlement') return;
         if (tx.userId === currentUser.username) {
           let rawSourceName = tx.downline;
           if (!rawSourceName || rawSourceName === currentUser.username) {
