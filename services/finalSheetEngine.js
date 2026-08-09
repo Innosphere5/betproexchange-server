@@ -19,16 +19,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   let allUsersInDb = [];
   if (currentUser.role === 'superadmin') {
     allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
-  } else if (currentUser.role === 'admin') {
-    const adminDownlines = await User.find({ parentId: currentUser._id }).lean();
-    const childIds = adminDownlines.map(u => u._id);
-    const nestedUsers = await User.find({ parentId: { $in: childIds } }).lean();
-    allUsersInDb = [...adminDownlines, ...nestedUsers];
-  } else if (currentUser.role === 'supermaster' || currentUser.role === 'master') {
-    const directDownlines = await User.find({ parentId: currentUser._id }).lean();
-    const childIds = directDownlines.map(u => u._id);
-    const nestedUsers = await User.find({ parentId: { $in: childIds } }).lean();
-    allUsersInDb = [...directDownlines, ...nestedUsers];
+  } else {
+    let parentsToFetch = [currentUser._id];
+    while (parentsToFetch.length > 0) {
+      const children = await User.find({ parentId: { $in: parentsToFetch } }).lean();
+      if (!children || children.length === 0) break;
+      allUsersInDb.push(...children);
+      parentsToFetch = children.map(c => c._id);
+    }
   }
 
   const userMap = {};
@@ -521,6 +519,13 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   // 2. Net the amounts for each unique accountId
   const allAccountIds = new Set([...Object.keys(greenTotalsMap), ...Object.keys(redTotalsMap)]);
+  allUsersInDb.forEach(u => {
+    const isDirectChild = u && u.parentId && u.parentId.toString() === currentUser._id.toString();
+    if (isDirectChild && u.username && u.username !== currentUser.username && u.username !== 'cash' && u.username !== 'BOOK') {
+      allAccountIds.add(u.username);
+    }
+  });
+
   const finalGreen = [];
   const finalRed = [];
   let calculatedTotalGreen = 0;
@@ -548,6 +553,21 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       const baseEntry = greenEntry || redEntry;
       if (baseEntry && baseEntry.accountId !== 'cash' && baseEntry.accountId !== 'BOOK') {
         finalGreen.push({ ...baseEntry, amount: 0 });
+      } else if (id !== 'cash' && id !== 'BOOK' && id !== currentUser.username) {
+        const uDoc = userMap[id];
+        const uRole = uDoc ? uDoc.role : 'user';
+        let parentName = null;
+        if (uDoc && uDoc.parentId) {
+          const pDoc = userMap[uDoc.parentId.toString()];
+          if (pDoc) parentName = pDoc.username;
+        }
+        finalGreen.push({
+          accountId: id,
+          accountName: id,
+          amount: 0,
+          role: uRole,
+          parentName
+        });
       }
     }
   }
