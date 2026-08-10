@@ -315,49 +315,57 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const targetParentFinalSheet = await getFinalSheetForUser(targetParent);
     const targetPlMap = extractPlMapFromFinalSheet(targetParentFinalSheet);
 
-    // Calculate Share P/L for parent downline users (master, supermaster, admin)
-    const parentUsernames = users.filter(u => u.role !== 'user').map(u => u.username);
-    const sharePlMap = {};
-    if (parentUsernames.length > 0) {
-      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
-      const bettorUsernames = bettorDocs.map(u => u.username);
+    const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
+    const bettorUsernames = bettorDocs.map(u => u.username);
 
-      const sharePlAgg = await Transaction.aggregate([
-        {
-          $match: {
-            userId: { $in: parentUsernames },
-            $or: [
-              { type: 'COMMISSION_SHARE' },
-              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames } }
-            ]
+    const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
+      let clientPL = 0;
+      let sharePL = 0;
+
+      if (u.role === 'user') {
+        const rawPL = targetPlMap[u.username] || 0;
+        clientPL = Math.round(rawPL * 100) / 100;
+        sharePL = 0;
+      } else {
+        const uFinalSheet = await getFinalSheetForUser(u);
+        clientPL = Math.round((uFinalSheet.netAmount || 0) * 100) / 100;
+
+        const pShareAgg = await Transaction.aggregate([
+          {
+            $match: {
+              userId: u.username,
+              $or: [
+                { type: 'COMMISSION_SHARE' },
+                { type: 'SETTLEMENT', downline: { $nin: bettorUsernames }, performedBy: { $ne: u.username } }
+              ]
+            }
+          },
+          {
+            $group: {
+              _id: "$userId",
+              totalSharePL: { $sum: "$amount" }
+            }
           }
-        },
-        {
-          $group: {
-            _id: "$userId",
-            totalSharePL: { $sum: "$amount" }
-          }
+        ]);
+        if (pShareAgg.length > 0) {
+          sharePL = Math.round(pShareAgg[0].totalSharePL * 100) / 100;
         }
-      ]);
-      sharePlAgg.forEach(item => {
-        sharePlMap[item._id] = Math.round(item.totalSharePL * 100) / 100;
-      });
-    }
+      }
 
-    const usersWithCountsAndPL = users.map(u => {
-      const rawPL = targetPlMap[u.username] || 0;
-      const clientPL = Math.round(rawPL * 100) / 100;
-      const sharePL = u.role !== 'user' ? (sharePlMap[u.username] || 0) : 0;
+      const balanceUpline = clientPL;
+      const plDownline = u.role === 'user' ? clientPL : sharePL;
       const availableBalance = u.role === 'user' ? (u.walletBalance || 0) : sharePL;
 
       return {
         ...u,
         downlineCount: countMap[u._id.toString()] || 0,
         clientPL,
+        balanceUpline,
         sharePL,
+        plDownline,
         availableBalance
       };
-    });
+    }));
 
     // Build parent hierarchy breadcrumbs from targetParent back up to loggedInUser
     const breadcrumbs = [];
@@ -421,7 +429,9 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         walletBalance: targetParent.walletBalance || 0,
         share: targetParent.share || 0,
         clientPL: parentClientPL,
+        balanceUpline: parentClientPL,
         sharePL: parentSharePL,
+        plDownline: parentSharePL,
         availableBalance: targetParent.role === 'user' ? (targetParent.walletBalance || 0) : parentSharePL
       },
       breadcrumbs
