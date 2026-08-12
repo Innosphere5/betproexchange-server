@@ -208,7 +208,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       }
 
       if (tx.type === 'SETTLEMENT') {
-        if (tx.category === 'share_settlement') return;
         if (tx.userId === currentUser.username) {
           let rawSourceName = tx.downline;
           if (!rawSourceName || rawSourceName === currentUser.username) {
@@ -474,22 +473,22 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (isParent) {
         // Viewer is Child, name is Parent:
         if (netSetl > 0) {
-          // Cash withdrawal by parent from child: Parent on Green side, Cash on Red side
+          // Child received cash deposit / parent debited: Parent on Green side
           addEntry('green', name, name, netSetl, role);
           addEntry('red', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Cash deposit from parent to child: Parent on Red side, Cash on Green side
+          // Child paid cash withdrawal / parent credited: Parent on Red side
           addEntry('red', name, name, Math.abs(netSetl), role);
           addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
       } else {
         // Viewer is Parent/Admin, name is Child/Downline:
         if (netSetl > 0) {
-          // Cash withdrawal from downline: Child on Red side, Cash on Green side
+          // Cash withdrawal from downline / settlement of green balance: Child on Red side (deducts P/L)
           addEntry('red', name, name, netSetl, role);
           addEntry('green', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Cash deposit to downline: Child on Green side, Cash on Red side
+          // Cash deposit to downline / settlement of red balance: Child on Green side (adds P/L)
           addEntry('green', name, name, Math.abs(netSetl), role);
           addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
@@ -519,12 +518,14 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   // 2. Net the amounts for each unique accountId
   const allAccountIds = new Set([...Object.keys(greenTotalsMap), ...Object.keys(redTotalsMap)]);
-  allUsersInDb.forEach(u => {
-    const isDirectChild = u && u.parentId && u.parentId.toString() === currentUser._id.toString();
-    if (isDirectChild && u.username && u.username !== currentUser.username && u.username !== 'cash' && u.username !== 'BOOK') {
-      allAccountIds.add(u.username);
-    }
-  });
+  if (!isDailyReport) {
+    allUsersInDb.forEach(u => {
+      const isDirectChild = u && u.parentId && u.parentId.toString() === currentUser._id.toString();
+      if (isDirectChild && u.username && u.username !== currentUser.username && u.username !== 'cash' && u.username !== 'BOOK') {
+        allAccountIds.add(u.username);
+      }
+    });
+  }
 
   const finalGreen = [];
   const finalRed = [];
@@ -550,24 +551,26 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       finalRed.push({ ...baseEntry, amount: Math.abs(roundedDiff) });
       calculatedTotalRed += Math.abs(roundedDiff);
     } else {
-      const baseEntry = greenEntry || redEntry;
-      if (baseEntry && baseEntry.accountId !== 'cash' && baseEntry.accountId !== 'BOOK') {
-        finalGreen.push({ ...baseEntry, amount: 0 });
-      } else if (id !== 'cash' && id !== 'BOOK' && id !== currentUser.username) {
-        const uDoc = userMap[id];
-        const uRole = uDoc ? uDoc.role : 'user';
-        let parentName = null;
-        if (uDoc && uDoc.parentId) {
-          const pDoc = userMap[uDoc.parentId.toString()];
-          if (pDoc) parentName = pDoc.username;
+      if (!isDailyReport) {
+        const baseEntry = greenEntry || redEntry;
+        if (baseEntry && baseEntry.accountId !== 'cash' && baseEntry.accountId !== 'BOOK') {
+          finalGreen.push({ ...baseEntry, amount: 0 });
+        } else if (id !== 'cash' && id !== 'BOOK' && id !== currentUser.username) {
+          const uDoc = userMap[id];
+          const uRole = uDoc ? uDoc.role : 'user';
+          let parentName = null;
+          if (uDoc && uDoc.parentId) {
+            const pDoc = userMap[uDoc.parentId.toString()];
+            if (pDoc) parentName = pDoc.username;
+          }
+          finalGreen.push({
+            accountId: id,
+            accountName: id,
+            amount: 0,
+            role: uRole,
+            parentName
+          });
         }
-        finalGreen.push({
-          accountId: id,
-          accountName: id,
-          amount: 0,
-          role: uRole,
-          parentName
-        });
       }
     }
   }

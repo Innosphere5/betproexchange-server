@@ -319,49 +319,27 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const bettorUsernames = bettorDocs.map(u => u.username);
 
     const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
-      let clientPL = 0;
-      let sharePL = 0;
-
-      if (u.role === 'user') {
-        const rawPL = targetPlMap[u.username] || 0;
-        clientPL = Math.round(rawPL * 100) / 100;
-        sharePL = 0;
-      } else {
-        const uFinalSheet = await getFinalSheetForUser(u);
-        clientPL = Math.round((uFinalSheet.netAmount || 0) * 100) / 100;
-
-        const pShareAgg = await Transaction.aggregate([
-          {
-            $match: {
-              userId: u.username,
-              $or: [
-                { type: 'COMMISSION_SHARE' },
-                { type: 'SETTLEMENT', downline: { $nin: bettorUsernames }, performedBy: { $ne: u.username } }
-              ]
-            }
-          },
-          {
-            $group: {
-              _id: "$userId",
-              totalSharePL: { $sum: "$amount" }
-            }
-          }
-        ]);
-        if (pShareAgg.length > 0) {
-          sharePL = Math.round(pShareAgg[0].totalSharePL * 100) / 100;
-        }
-      }
-
+      const rawPL = targetPlMap[u.username] || 0;
+      const clientPL = Math.round(rawPL * 100) / 100;
       const balanceUpline = clientPL;
-      const plDownline = u.role === 'user' ? clientPL : sharePL;
-      const availableBalance = u.role === 'user' ? (u.walletBalance || 0) : sharePL;
+
+      let plDownline = clientPL;
+      let availableBalance = u.role === 'user' ? (u.walletBalance || 0) : clientPL;
+
+      if (u.role !== 'user') {
+        const uFinalSheet = await getFinalSheetForUser(u);
+        const uPlMap = extractPlMapFromFinalSheet(uFinalSheet);
+        const downlineNet = Object.values(uPlMap).reduce((sum, val) => sum + val, 0);
+        plDownline = Math.round(downlineNet * 100) / 100;
+        availableBalance = plDownline;
+      }
 
       return {
         ...u,
         downlineCount: countMap[u._id.toString()] || 0,
         clientPL,
         balanceUpline,
-        sharePL,
+        sharePL: plDownline,
         plDownline,
         availableBalance
       };
@@ -391,32 +369,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     }
     parentClientPL = Math.round(parentClientPL * 100) / 100;
 
-    let parentSharePL = 0;
-    if (targetParent.role !== 'user') {
-      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
-      const bettorUsernames = bettorDocs.map(u => u.username);
-
-      const pShareAgg = await Transaction.aggregate([
-        {
-          $match: {
-            userId: targetParent.username,
-            $or: [
-              { type: 'COMMISSION_SHARE' },
-              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames }, performedBy: { $ne: targetParent.username } }
-            ]
-          }
-        },
-        {
-          $group: {
-            _id: "$userId",
-            totalSharePL: { $sum: "$amount" }
-          }
-        }
-      ]);
-      if (pShareAgg.length > 0) {
-        parentSharePL = Math.round(pShareAgg[0].totalSharePL * 100) / 100;
-      }
-    }
+    const parentSharePL = Math.round(usersWithCountsAndPL.reduce((sum, u) => sum + (u.plDownline || 0), 0) * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -742,7 +695,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     // Target user transaction
     const targetTx = new Transaction({
       userId: target.username,
-      amount: isTargetCredit ? -settleAmount : settleAmount,
+      amount: isTargetCredit ? settleAmount : -settleAmount,
       type: 'SETTLEMENT',
       category: isAgent ? 'share_settlement' : 'wallet',
       description: desc,
