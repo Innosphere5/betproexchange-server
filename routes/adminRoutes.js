@@ -319,19 +319,19 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const bettorUsernames = bettorDocs.map(u => u.username);
 
     const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
-      const rawPL = targetPlMap[u.username] || 0;
-      const clientPL = Math.round(rawPL * 100) / 100;
-      const balanceUpline = clientPL;
+      const finalSheetPL = Math.round((targetPlMap[u.username] || 0) * 100) / 100;
 
-      let plDownline = clientPL;
-      let availableBalance = u.role === 'user' ? (u.walletBalance || 0) : clientPL;
+      let clientPL = finalSheetPL;
+      let balanceUpline = finalSheetPL;
+      let plDownline = finalSheetPL;
+      let availableBalance = u.role === 'user' ? (u.walletBalance || 0) : finalSheetPL;
 
       if (u.role !== 'user') {
         const uFinalSheet = await getFinalSheetForUser(u);
-        const uPlMap = extractPlMapFromFinalSheet(uFinalSheet);
-        const downlineNet = Object.values(uPlMap).reduce((sum, val) => sum + val, 0);
-        plDownline = Math.round(downlineNet * 100) / 100;
-        availableBalance = plDownline;
+        const downlineClientPL = Math.round((uFinalSheet.netAmount || 0) * 100) / 100;
+        clientPL = downlineClientPL;
+        plDownline = downlineClientPL;
+        availableBalance = finalSheetPL;
       }
 
       return {
@@ -369,7 +369,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     }
     parentClientPL = Math.round(parentClientPL * 100) / 100;
 
-    const parentSharePL = Math.round(usersWithCountsAndPL.reduce((sum, u) => sum + (u.plDownline || 0), 0) * 100) / 100;
+    const parentSharePL = Math.round((targetParentFinalSheet.netAmount || 0) * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -638,38 +638,11 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only settle Bettors' });
     }
 
-    // Calculate current balance to determine settlement direction:
-    // - For AGENTS (Admin, SuperMaster, Master): settle target's Available Balance (sharePL)
-    // - For BETTORS (user): settle target's Client P/L
-    let currentBalanceToSettle = 0;
-
-    if (target.role !== 'user') {
-      const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
-      const bettorUsernames = bettorDocs.map(u => u.username);
-
-      const sharePlAgg = await Transaction.aggregate([
-        {
-          $match: {
-            userId: target.username,
-            $or: [
-              { type: 'COMMISSION_SHARE' },
-              { type: 'SETTLEMENT', downline: { $nin: bettorUsernames } }
-            ]
-          }
-        },
-        {
-          $group: {
-            _id: "$userId",
-            totalSharePL: { $sum: "$amount" }
-          }
-        }
-      ]);
-      currentBalanceToSettle = sharePlAgg.length > 0 ? (Math.round(sharePlAgg[0].totalSharePL * 100) / 100) : 0;
-    } else {
-      const parentFinalSheet = await getFinalSheetForUser(parent);
-      const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
-      currentBalanceToSettle = parentPlMap[target.username] || 0;
-    }
+    // Calculate current balance to determine settlement direction via Parent's Final Sheet:
+    // This connects Settlement Available Balance directly with Final Sheet for both Agents & Bettors.
+    const parentFinalSheet = await getFinalSheetForUser(parent);
+    const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
+    const currentBalanceToSettle = Math.round((parentPlMap[target.username] || 0) * 100) / 100;
 
     const settleAmount = Math.abs(rawAmount);
 
