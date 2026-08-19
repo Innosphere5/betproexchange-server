@@ -44,7 +44,7 @@ const isAuthorized = (req, res, next) => {
 };
 
 // Helper functions for Final Sheet based Client P/L calculation
-async function getFinalSheetForUser(viewerUser) {
+async function getFinalSheetForUser(viewerUser, isDailyReport = false) {
   const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
   let allowedUsernames = [viewerUser.username];
@@ -74,7 +74,7 @@ async function getFinalSheetForUser(viewerUser) {
   };
 
   const txs = await Transaction.find(query).sort({ createdAt: -1 });
-  return await generateFinalSheet(viewerUser, txs);
+  return await generateFinalSheet(viewerUser, txs, isDailyReport);
 }
 
 function extractPlMapFromFinalSheet(finalSheetData) {
@@ -312,26 +312,27 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const countMap = {};
     counts.forEach(c => countMap[c._id.toString()] = c.count);
 
-    const targetParentFinalSheet = await getFinalSheetForUser(targetParent);
-    const targetPlMap = extractPlMapFromFinalSheet(targetParentFinalSheet);
+    const targetParentBettingSheet = await getFinalSheetForUser(targetParent, true);
+    const targetParentSettlementSheet = await getFinalSheetForUser(targetParent, false);
 
-    const bettorDocs = await User.find({ role: 'user' }).select('username').lean();
-    const bettorUsernames = bettorDocs.map(u => u.username);
+    const bettingPlMap = extractPlMapFromFinalSheet(targetParentBettingSheet);
+    const settlementPlMap = extractPlMapFromFinalSheet(targetParentSettlementSheet);
 
     const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
-      const finalSheetPL = Math.round((targetPlMap[u.username] || 0) * 100) / 100;
+      const bettingPL = Math.round((bettingPlMap[u.username] || 0) * 100) / 100;
+      const settlementPL = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
 
-      let clientPL = finalSheetPL;
-      let balanceUpline = finalSheetPL;
-      let plDownline = finalSheetPL;
-      let availableBalance = u.role === 'user' ? (u.walletBalance || 0) : finalSheetPL;
+      let clientPL = bettingPL;
+      let balanceUpline = settlementPL;
+      let plDownline = bettingPL;
+      let availableBalance = settlementPL;
 
       if (u.role !== 'user') {
-        const uFinalSheet = await getFinalSheetForUser(u);
-        const downlineClientPL = Math.round((uFinalSheet.netAmount || 0) * 100) / 100;
+        const uBettingSheet = await getFinalSheetForUser(u, true);
+        const downlineClientPL = Math.round((uBettingSheet.netAmount || 0) * 100) / 100;
         clientPL = downlineClientPL;
         plDownline = downlineClientPL;
-        availableBalance = finalSheetPL;
+        availableBalance = settlementPL;
       }
 
       return {
@@ -361,15 +362,16 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     // Calculate parent's own Client P/L & Share P/L for the summary row
     let parentClientPL = 0;
     if (targetParent._id.toString() === loggedInUser._id.toString()) {
-      parentClientPL = targetParentFinalSheet.netAmount || 0;
+      parentClientPL = targetParentBettingSheet.netAmount || 0;
     } else {
-      const loggedInUserFinalSheet = await getFinalSheetForUser(loggedInUser);
-      const loggedInPlMap = extractPlMapFromFinalSheet(loggedInUserFinalSheet);
-      parentClientPL = loggedInPlMap[targetParent.username] || 0;
+      const loggedInUserBettingSheet = await getFinalSheetForUser(loggedInUser, true);
+      const loggedInBettingPlMap = extractPlMapFromFinalSheet(loggedInUserBettingSheet);
+      parentClientPL = loggedInBettingPlMap[targetParent.username] || 0;
     }
     parentClientPL = Math.round(parentClientPL * 100) / 100;
 
-    const parentSharePL = Math.round((targetParentFinalSheet.netAmount || 0) * 100) / 100;
+    const parentSharePL = Math.round((targetParentBettingSheet.netAmount || 0) * 100) / 100;
+    const parentAvailableBalance = Math.round((targetParentSettlementSheet.netAmount || 0) * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -385,7 +387,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         balanceUpline: parentClientPL,
         sharePL: parentSharePL,
         plDownline: parentSharePL,
-        availableBalance: targetParent.role === 'user' ? (targetParent.walletBalance || 0) : parentSharePL
+        availableBalance: parentAvailableBalance
       },
       breadcrumbs
     });
@@ -638,9 +640,16 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only settle Bettors' });
     }
 
-    // Calculate current balance to determine settlement direction via Parent's Final Sheet:
+    // Resolve direct parent of target user
+    let directParent = parent;
+    if (target.parentId) {
+      const fetchedParent = await User.findById(target.parentId);
+      if (fetchedParent) directParent = fetchedParent;
+    }
+
+    // Calculate current balance to determine settlement direction via Direct Parent's Final Sheet:
     // This connects Settlement Available Balance directly with Final Sheet for both Agents & Bettors.
-    const parentFinalSheet = await getFinalSheetForUser(parent);
+    const parentFinalSheet = await getFinalSheetForUser(directParent);
     const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
     const currentBalanceToSettle = Math.round((parentPlMap[target.username] || 0) * 100) / 100;
 
@@ -672,14 +681,14 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       type: 'SETTLEMENT',
       category: isAgent ? 'share_settlement' : 'wallet',
       description: desc,
-      downline: parent.username,
+      downline: directParent.username,
       performedBy: parent.username
     });
     await targetTx.save();
 
-    // Parent user transaction for ledger and final sheet
+    // Direct Parent user transaction for ledger and final sheet
     const parentTx = new Transaction({
-      userId: parent.username,
+      userId: directParent.username,
       amount: isTargetCredit ? settleAmount : -settleAmount,
       type: 'SETTLEMENT',
       category: isAgent ? 'share_settlement' : 'wallet',
@@ -693,7 +702,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       success: true,
       message: 'Account settled successfully',
       newTargetBalance: target.walletBalance,
-      parentBalance: parent.walletBalance
+      parentBalance: directParent.walletBalance
     });
   } catch (err) {
     console.error("Settle Account Error:", err);
