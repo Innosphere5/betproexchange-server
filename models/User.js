@@ -19,6 +19,7 @@ const userSchema = new mongoose.Schema({
   credit: { type: Number, default: 0 },
   parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  allowSettlement: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
 

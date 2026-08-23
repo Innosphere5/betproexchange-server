@@ -101,8 +101,9 @@ function extractPlMapFromFinalSheet(finalSheetData) {
 // Create Downline User (Admin, SuperMaster, Master, or Bettor)
 router.post('/create-user', auth, isAuthorized, async (req, res) => {
   try {
-    const { username, password, role, initialBalance, balanceType, type, share } = req.body;
+    const { username, password, role, initialBalance, balanceType, type, share, allowSettlement } = req.body;
     const selectedBalanceType = balanceType || type || 'cash';
+    const settlementAllowed = allowSettlement !== undefined ? Boolean(allowSettlement) : true;
 
     // Validation
     if (!username || !password || !role) {
@@ -182,7 +183,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         share: ['admin', 'supermaster', 'master'].includes(role) ? masterShare : 0,
         parentId: parent._id,
         walletBalance: balance,
-        credit: balance
+        credit: balance,
+        allowSettlement: role === 'user' ? false : settlementAllowed
       });
 
       if (balance > 0) {
@@ -229,7 +231,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         share: ['admin', 'supermaster', 'master'].includes(role) ? masterShare : 0,
         parentId: parent._id,
         walletBalance: balance,
-        credit: 0
+        credit: 0,
+        allowSettlement: role === 'user' ? false : settlementAllowed
       });
 
       if (balance > 0) {
@@ -319,30 +322,53 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const settlementPlMap = extractPlMapFromFinalSheet(targetParentSettlementSheet);
 
     const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
-      const bettingPL = Math.round((bettingPlMap[u.username] || 0) * 100) / 100;
-      const settlementPL = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
-
-      let clientPL = bettingPL;
-      let balanceUpline = settlementPL;
-      let plDownline = bettingPL;
-      let availableBalance = settlementPL;
-
-      if (u.role !== 'user') {
-        const uBettingSheet = await getFinalSheetForUser(u, true);
-        const downlineClientPL = Math.round((uBettingSheet.netAmount || 0) * 100) / 100;
-        clientPL = downlineClientPL;
-        plDownline = downlineClientPL;
-        availableBalance = settlementPL;
+      if (u.role === 'user') {
+        const bettorClientPL = Math.round(((u.walletBalance || 0) - (u.credit || 0)) * 100) / 100;
+        return {
+          ...u,
+          downlineCount: countMap[u._id.toString()] || 0,
+          clientPL: bettorClientPL,
+          balanceUpline: 0,
+          sharePL: 0,
+          plDownline: 0,
+          availableBalance: u.walletBalance || 0
+        };
       }
+
+      // 1. Gross Share P/L from betting (base value for both fields)
+      const uBettingSheet = await getFinalSheetForUser(u, true);
+      const grossSharePL = Math.round((uBettingSheet.netAmount || 0) * 100) / 100;
+
+      // 2. Client (P/L) = Gross P/L minus cash withdrawn/deposited via C button (nills to 0 when fully cashed out)
+      const uCashTxs = await Transaction.find({
+        type: { $in: ['CASH_WITHDRAWAL', 'CASH_DEPOSIT'] },
+        userId: targetParent.username,
+        downline: u.username
+      }).lean();
+      let cashCleared = 0;
+      uCashTxs.forEach(t => {
+        if (t.type === 'CASH_WITHDRAWAL') cashCleared += Math.abs(t.amount);
+        else if (t.type === 'CASH_DEPOSIT') cashCleared -= Math.abs(t.amount);
+      });
+      const clientPL = Math.round((grossSharePL - cashCleared) * 100) / 100;
+
+      // 3. Available Balance = Gross P/L minus settled via S button (nills to 0 when fully settled)
+      const uSettlements = await Transaction.find({
+        type: 'SETTLEMENT',
+        userId: targetParent.username,
+        downline: u.username
+      }).lean();
+      const settledAmount = uSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+      const settlementAvailableBalance = Math.round((grossSharePL - settledAmount) * 100) / 100;
 
       return {
         ...u,
         downlineCount: countMap[u._id.toString()] || 0,
-        clientPL,
-        balanceUpline,
-        sharePL: plDownline,
-        plDownline,
-        availableBalance
+        clientPL: clientPL,
+        balanceUpline: settlementAvailableBalance,
+        sharePL: clientPL,
+        plDownline: clientPL,
+        availableBalance: settlementAvailableBalance
       };
     }));
 
@@ -361,7 +387,9 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
 
     // Calculate parent's own Client P/L & Share P/L for the summary row
     let parentClientPL = 0;
-    if (targetParent._id.toString() === loggedInUser._id.toString()) {
+    if (targetParent.role === 'master') {
+      parentClientPL = usersWithCountsAndPL.reduce((sum, u) => sum + (u.clientPL || 0), 0);
+    } else if (targetParent._id.toString() === loggedInUser._id.toString()) {
       parentClientPL = targetParentBettingSheet.netAmount || 0;
     } else {
       const loggedInUserBettingSheet = await getFinalSheetForUser(loggedInUser, true);
@@ -370,8 +398,18 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     }
     parentClientPL = Math.round(parentClientPL * 100) / 100;
 
-    const parentSharePL = Math.round((targetParentBettingSheet.netAmount || 0) * 100) / 100;
-    const parentAvailableBalance = Math.round((targetParentSettlementSheet.netAmount || 0) * 100) / 100;
+    const parentOwnBettingSheet = await getFinalSheetForUser(targetParent, true);
+    const parentGrossPL = Math.round((parentOwnBettingSheet.netAmount || 0) * 100) / 100;
+
+    let parentSettledAmt = 0;
+    if (targetParent.parentId) {
+      const parentOfTarget = await User.findById(targetParent.parentId).lean();
+      if (parentOfTarget) {
+        const pSettlements = await Transaction.find({ type: 'SETTLEMENT', userId: parentOfTarget.username, downline: targetParent.username }).lean();
+        parentSettledAmt = pSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+      }
+    }
+    const parentAvailableBalance = Math.round((parentGrossPL - parentSettledAmt) * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -384,9 +422,9 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         walletBalance: targetParent.walletBalance || 0,
         share: targetParent.share || 0,
         clientPL: parentClientPL,
-        balanceUpline: parentClientPL,
-        sharePL: parentSharePL,
-        plDownline: parentSharePL,
+        balanceUpline: parentAvailableBalance,
+        sharePL: parentClientPL,
+        plDownline: parentClientPL,
         availableBalance: parentAvailableBalance
       },
       breadcrumbs
@@ -541,12 +579,9 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
         });
       }
 
-      // Calculate credit deduction (deduct from credit limit if credit exists)
-      const creditDeduction = availableCredit > 0 ? Math.min(withdrawAmount, availableCredit) : 0;
-
       const updatedTarget = await User.findOneAndUpdate(
         { _id: target._id },
-        { $inc: { walletBalance: -withdrawAmount, credit: -creditDeduction } },
+        { $inc: { walletBalance: -withdrawAmount } },
         { new: true }
       );
 
@@ -635,9 +670,9 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 
     if (!target) return res.status(404).json({ error: 'Downline user not found' });
 
-    // Restriction: Master can only settle Bettors
-    if (req.user.role === 'master' && target.role !== 'user') {
-      return res.status(403).json({ error: 'Masters can only settle Bettors' });
+    // Restriction: Cannot settle Bettor accounts
+    if (target.role === 'user' || req.user.role === 'master') {
+      return res.status(403).json({ error: 'Settlement is not available for bettor accounts' });
     }
 
     // Resolve direct parent of target user
@@ -647,24 +682,29 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       if (fetchedParent) directParent = fetchedParent;
     }
 
-    // Calculate current balance to determine settlement direction via Direct Parent's Final Sheet:
-    // This connects Settlement Available Balance directly with Final Sheet for both Agents & Bettors.
-    const parentFinalSheet = await getFinalSheetForUser(directParent);
-    const parentPlMap = extractPlMapFromFinalSheet(parentFinalSheet);
-    const currentBalanceToSettle = Math.round((parentPlMap[target.username] || 0) * 100) / 100;
+    // Calculate the current Available Balance (gross P/L minus already settled) to determine settlement direction
+    // This matches exactly what the downline table shows
+    const targetBettingSheet = await getFinalSheetForUser(target, true);
+    const grossSharePL = Math.round((targetBettingSheet.netAmount || 0) * 100) / 100;
+
+    const existingSettlements = await Transaction.find({
+      type: 'SETTLEMENT',
+      userId: directParent.username,
+      downline: target.username
+    }).lean();
+    const alreadySettled = existingSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+    const currentAvailableBalance = Math.round((grossSharePL - alreadySettled) * 100) / 100;
 
     const settleAmount = Math.abs(rawAmount);
 
-    // Direction logic:
-    // If currentBalanceToSettle > 0 (Green balance): credit balance.
-    //   Settling reduces Green balance towards 0. Target gets -settleAmount, Parent gets +settleAmount.
-    // If currentBalanceToSettle < 0 (Red balance): debit balance.
-    //   Settling reduces Red balance towards 0. Target gets +settleAmount, Parent gets -settleAmount.
-    // If currentBalanceToSettle === 0 (Zero balance): follow input sign (rawAmount >= 0 => target credit, rawAmount < 0 => target debit).
+    // Direction logic based on Available Balance:
+    // If currentAvailableBalance > 0: settling reduces it towards 0. Store POSITIVE settlement amount.
+    // If currentAvailableBalance < 0: settling reduces it towards 0. Store POSITIVE settlement amount.
+    // The settlement always stores a POSITIVE amount, meaning "this much was settled".
     let isTargetCredit;
-    if (currentBalanceToSettle > 0) {
+    if (currentAvailableBalance > 0) {
       isTargetCredit = true;
-    } else if (currentBalanceToSettle < 0) {
+    } else if (currentAvailableBalance < 0) {
       isTargetCredit = false;
     } else {
       isTargetCredit = (rawAmount >= 0);
@@ -698,11 +738,26 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     });
     await parentTx.save();
 
+    // Update wallet balances atomically in MongoDB (transfer settled P/L amount between target and parent)
+    const targetWalletInc = isTargetCredit ? settleAmount : -settleAmount;
+    const parentWalletInc = isTargetCredit ? -settleAmount : settleAmount;
+
+    const updatedTarget = await User.findByIdAndUpdate(
+      target._id,
+      { $inc: { walletBalance: targetWalletInc } },
+      { new: true }
+    );
+    const updatedParent = await User.findByIdAndUpdate(
+      directParent._id,
+      { $inc: { walletBalance: parentWalletInc } },
+      { new: true }
+    );
+
     res.json({
       success: true,
       message: 'Account settled successfully',
-      newTargetBalance: target.walletBalance,
-      parentBalance: directParent.walletBalance
+      newTargetBalance: updatedTarget ? updatedTarget.walletBalance : target.walletBalance,
+      parentBalance: updatedParent ? updatedParent.walletBalance : directParent.walletBalance
     });
   } catch (err) {
     console.error("Settle Account Error:", err);
@@ -714,7 +769,7 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 // Update Downline User Detail (Share, Password, etc.)
 router.post('/update-user', auth, isAuthorized, async (req, res) => {
   try {
-    const { targetUsername, share, newPassword } = req.body;
+    const { targetUsername, share, newPassword, allowSettlement } = req.body;
     const parent = await User.findOne({ username: req.user.userId });
     
     const target = await User.findOne({ username: targetUsername, parentId: parent._id });
@@ -739,8 +794,14 @@ router.post('/update-user', auth, isAuthorized, async (req, res) => {
       target.password = await bcrypt.hash(newPassword, salt);
     }
 
+    if (target.role === 'user') {
+      target.allowSettlement = false;
+    } else if (allowSettlement !== undefined) {
+      target.allowSettlement = Boolean(allowSettlement);
+    }
+
     await target.save();
-    res.json({ success: true, user: { username: target.username, share: target.share, role: target.role } });
+    res.json({ success: true, user: { username: target.username, share: target.share, role: target.role, allowSettlement: target.allowSettlement } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });
