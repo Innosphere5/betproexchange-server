@@ -189,7 +189,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
         }
         return;
       }
-
       // Cash Deposit / Withdrawal processing
       if (tx.type === 'CASH_WITHDRAWAL' && tx.userId === currentUser.username) {
         let rawSourceName = tx.downline || tx.performedBy;

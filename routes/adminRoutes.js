@@ -335,31 +335,14 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         };
       }
 
-      // 1. Gross Share P/L from betting (base value for both fields)
-      const uBettingSheet = await getFinalSheetForUser(u, true);
-      const grossSharePL = Math.round((uBettingSheet.netAmount || 0) * 100) / 100;
+      // 1. Gross Share P/L from betting in targetParent's pipeline
+      const grossSharePL = Math.round((bettingPlMap[u.username] || 0) * 100) / 100;
 
-      // 2. Client (P/L) = Gross P/L minus cash withdrawn/deposited via C button (nills to 0 when fully cashed out)
-      const uCashTxs = await Transaction.find({
-        type: { $in: ['CASH_WITHDRAWAL', 'CASH_DEPOSIT'] },
-        userId: targetParent.username,
-        downline: u.username
-      }).lean();
-      let cashCleared = 0;
-      uCashTxs.forEach(t => {
-        if (t.type === 'CASH_WITHDRAWAL') cashCleared += Math.abs(t.amount);
-        else if (t.type === 'CASH_DEPOSIT') cashCleared -= Math.abs(t.amount);
-      });
-      const clientPL = Math.round((grossSharePL - cashCleared) * 100) / 100;
+      // 2. Client P/L = Betting Share P/L (Independent of Cash Deposit/Withdrawal via C button)
+      const clientPL = grossSharePL;
 
-      // 3. Available Balance = Gross P/L minus settled via S button (nills to 0 when fully settled)
-      const uSettlements = await Transaction.find({
-        type: 'SETTLEMENT',
-        userId: targetParent.username,
-        downline: u.username
-      }).lean();
-      const settledAmount = uSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
-      const settlementAvailableBalance = Math.round((grossSharePL - settledAmount) * 100) / 100;
+      // 3. Available Balance = Net P/L on targetParent's cumulative Final Sheet (nills to 0 when fully settled via S button)
+      const settlementAvailableBalance = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
 
       return {
         ...u,
@@ -398,18 +381,17 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     }
     parentClientPL = Math.round(parentClientPL * 100) / 100;
 
-    const parentOwnBettingSheet = await getFinalSheetForUser(targetParent, true);
-    const parentGrossPL = Math.round((parentOwnBettingSheet.netAmount || 0) * 100) / 100;
-
-    let parentSettledAmt = 0;
+    let parentAvailableBalance = 0;
     if (targetParent.parentId) {
       const parentOfTarget = await User.findById(targetParent.parentId).lean();
       if (parentOfTarget) {
-        const pSettlements = await Transaction.find({ type: 'SETTLEMENT', userId: parentOfTarget.username, downline: targetParent.username }).lean();
-        parentSettledAmt = pSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
+        const parentOfTargetSettlementSheet = await getFinalSheetForUser(parentOfTarget, false);
+        const parentSettlementPlMap = extractPlMapFromFinalSheet(parentOfTargetSettlementSheet);
+        parentAvailableBalance = Math.round((parentSettlementPlMap[targetParent.username] || 0) * 100) / 100;
       }
+    } else if (targetParent.role === 'superadmin') {
+      parentAvailableBalance = Math.round((targetParentSettlementSheet.netAmount || 0) * 100) / 100;
     }
-    const parentAvailableBalance = Math.round((parentGrossPL - parentSettledAmt) * 100) / 100;
 
     // Return object with users list, target parent info and breadcrumbs
     res.json({
@@ -682,18 +664,10 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       if (fetchedParent) directParent = fetchedParent;
     }
 
-    // Calculate the current Available Balance (gross P/L minus already settled) to determine settlement direction
-    // This matches exactly what the downline table shows
-    const targetBettingSheet = await getFinalSheetForUser(target, true);
-    const grossSharePL = Math.round((targetBettingSheet.netAmount || 0) * 100) / 100;
-
-    const existingSettlements = await Transaction.find({
-      type: 'SETTLEMENT',
-      userId: directParent.username,
-      downline: target.username
-    }).lean();
-    const alreadySettled = existingSettlements.reduce((sum, t) => sum + Math.abs(t.amount || 0), 0);
-    const currentAvailableBalance = Math.round((grossSharePL - alreadySettled) * 100) / 100;
+    // Calculate the current Available Balance directly from directParent's cumulative Final Sheet
+    const parentSettlementSheet = await getFinalSheetForUser(directParent, false);
+    const settlementPlMap = extractPlMapFromFinalSheet(parentSettlementSheet);
+    const currentAvailableBalance = Math.round((settlementPlMap[target.username] || 0) * 100) / 100;
 
     const settleAmount = Math.abs(rawAmount);
 
@@ -1830,8 +1804,8 @@ router.post('/reset-system', auth, async (req, res) => {
     // 1. Delete all downline accounts
     const userRes = await User.deleteMany({ role: { $ne: 'superadmin' } });
 
-    // 2. Reset SuperAdmin balance to 100 Crore (₹1,000,000,000)
-    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 1000000000, credit: 0 } });
+    // 2. Reset SuperAdmin balance to Infinity (₹999,999,999,999,999)
+    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 999999999999999, credit: 0 } });
 
     // 3. Clear transactions
     const txRes = await Transaction.deleteMany({});
@@ -2178,7 +2152,7 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
     // Reset superadmin balance and credit
     await User.updateMany(
       { role: 'superadmin' },
-      { $set: { credit: 0, walletBalance: 1000000000, share: 85 } }
+      { $set: { credit: 0, walletBalance: 999999999999999, share: 85 } }
     );
 
     // Delete all transactions and bets

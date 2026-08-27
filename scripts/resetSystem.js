@@ -25,12 +25,12 @@ async function resetSystem() {
     const deletedUsers = await User.deleteMany({ role: { $ne: 'superadmin' } });
     console.log(`Deleted ${deletedUsers.deletedCount} non-superadmin accounts.`);
 
-    // Reset SuperAdmin account balances to 100 Crore (₹1,000,000,000)
+    // Reset SuperAdmin account balances to 10 Crore (₹100,000,000)
     const superadminRes = await User.updateMany(
       { role: 'superadmin' },
-      { $set: { walletBalance: 1000000000, credit: 0 } }
+      { $set: { walletBalance: 100000000, credit: 0 } }
     );
-    console.log(`Reset ${superadminRes.modifiedCount} superadmin account(s) wallet balance to 100 Crore (₹1,000,000,000).`);
+    console.log(`Reset ${superadminRes.modifiedCount} superadmin account(s) wallet balance to 10 Crore (₹100,000,000).`);
 
     console.log('--- 2. Clearing Transactions & Ledgers ---');
     const deletedTxs = await Transaction.deleteMany({});
