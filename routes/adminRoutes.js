@@ -45,7 +45,7 @@ const isAuthorized = (req, res, next) => {
 
 // Helper functions for Final Sheet based Client P/L calculation
 async function getFinalSheetForUser(viewerUser, isDailyReport = false) {
-  const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
+  const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
 
   let allowedUsernames = [viewerUser.username];
   if (viewerUser.role === 'superadmin') {
@@ -338,10 +338,20 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
       // 1. Gross Share P/L from betting in targetParent's pipeline
       const grossSharePL = Math.round((bettingPlMap[u.username] || 0) * 100) / 100;
 
-      // 2. Client P/L = Betting Share P/L (Independent of Cash Deposit/Withdrawal via C button)
-      const clientPL = grossSharePL;
+      // 2. Client (P/L) = Gross P/L minus cash withdrawn/deposited via C button (clears to 0 when cash is paid/received)
+      const uCashTxs = await Transaction.find({
+        type: { $in: ['CASH_WITHDRAWAL', 'CASH_DEPOSIT'] },
+        userId: targetParent.username,
+        downline: u.username
+      }).lean();
+      let netCashPaidToDownline = 0;
+      uCashTxs.forEach(t => {
+        if (t.type === 'CASH_DEPOSIT') netCashPaidToDownline += Math.abs(t.amount);
+        else if (t.type === 'CASH_WITHDRAWAL') netCashPaidToDownline -= Math.abs(t.amount);
+      });
+      const clientPL = Math.round((grossSharePL - netCashPaidToDownline) * 100) / 100;
 
-      // 3. Available Balance = Net P/L on targetParent's cumulative Final Sheet (nills to 0 when fully settled via S button)
+      // 3. Available Balance = Net P/L on targetParent's cumulative Final Sheet (derived purely from betting P/L and S button settlements)
       const settlementAvailableBalance = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
 
       return {
@@ -669,19 +679,25 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
     const settlementPlMap = extractPlMapFromFinalSheet(parentSettlementSheet);
     const currentAvailableBalance = Math.round((settlementPlMap[target.username] || 0) * 100) / 100;
 
-    const settleAmount = Math.abs(rawAmount);
+    if (currentAvailableBalance === 0) {
+      return res.status(400).json({ error: 'Settlement available balance is 0. Nothing to settle until new profit/loss arrives.' });
+    }
+
+    const absAvailableBalance = Math.abs(currentAvailableBalance);
+    let settleAmount = Math.abs(rawAmount);
+
+    if (settleAmount > absAvailableBalance) {
+      settleAmount = absAvailableBalance;
+    }
 
     // Direction logic based on Available Balance:
-    // If currentAvailableBalance > 0: settling reduces it towards 0. Store POSITIVE settlement amount.
-    // If currentAvailableBalance < 0: settling reduces it towards 0. Store POSITIVE settlement amount.
-    // The settlement always stores a POSITIVE amount, meaning "this much was settled".
+    // If currentAvailableBalance > 0: settling reduces it towards 0 (Green to 0).
+    // If currentAvailableBalance < 0: settling reduces it towards 0 (Red to 0).
     let isTargetCredit;
     if (currentAvailableBalance > 0) {
       isTargetCredit = true;
-    } else if (currentAvailableBalance < 0) {
-      isTargetCredit = false;
     } else {
-      isTargetCredit = (rawAmount >= 0);
+      isTargetCredit = false;
     }
 
     const desc = description && description.trim() !== '' ? description.trim() : 'P/L to Cash transfer';

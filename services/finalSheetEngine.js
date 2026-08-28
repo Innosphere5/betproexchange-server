@@ -166,7 +166,8 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   txs.forEach(tx => {
     if (!isDailyReport) {
-      if (tx.type === 'SETTLEMENT') {
+      const cashSettlementTypes = ['SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
+      if (cashSettlementTypes.includes(tx.type)) {
         if (tx.userId === currentUser.username) {
           let rawSourceName = tx.downline;
           if (!rawSourceName || rawSourceName === currentUser.username) {
@@ -188,51 +189,6 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
           }
         }
         return;
-      }
-      // Cash Deposit / Withdrawal processing
-      if (tx.type === 'CASH_WITHDRAWAL' && tx.userId === currentUser.username) {
-        let rawSourceName = tx.downline || tx.performedBy;
-        if (rawSourceName && rawSourceName !== currentUser.username) {
-          const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
-          if (sourceName !== currentUser.username) {
-            if (!settlementSummary[sourceName]) settlementSummary[sourceName] = { green: 0, red: 0 };
-            settlementSummary[sourceName].green += Math.abs(tx.amount);
-          }
-        }
-        return;
-      }
-
-      if (tx.type === 'CASH_DEPOSIT' && tx.userId === currentUser.username) {
-        let rawSourceName = tx.downline || tx.performedBy;
-        if (rawSourceName && rawSourceName !== currentUser.username) {
-          const sourceName = getRollupAccountForViewer(rawSourceName, currentUser, userMap);
-          if (sourceName !== currentUser.username) {
-            if (!settlementSummary[sourceName]) settlementSummary[sourceName] = { green: 0, red: 0 };
-            settlementSummary[sourceName].red += Math.abs(tx.amount);
-          }
-        }
-        return;
-      }
-
-      if (tx.userId === currentUser.username) {
-        if (tx.type === 'WITHDRAW') {
-          const parentUser = currentUser.parentId ? userMap[currentUser.parentId.toString()] : null;
-          const parentName = parentUser ? parentUser.username : null;
-          if (parentName) {
-            if (!settlementSummary[parentName]) settlementSummary[parentName] = { green: 0, red: 0 };
-            settlementSummary[parentName].red += Math.abs(tx.amount);
-          }
-          return;
-        }
-        if (tx.type === 'LOAD_BALANCE') {
-          const parentUser = currentUser.parentId ? userMap[currentUser.parentId.toString()] : null;
-          const parentName = parentUser ? parentUser.username : null;
-          if (parentName) {
-            if (!settlementSummary[parentName]) settlementSummary[parentName] = { green: 0, red: 0 };
-            settlementSummary[parentName].green += Math.abs(tx.amount);
-          }
-          return;
-        }
       }
     } else {
       // Daily Report mode: Skip all non-betting cash/balance/credit transactions
