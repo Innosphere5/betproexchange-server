@@ -166,7 +166,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
 
   txs.forEach(tx => {
     if (!isDailyReport) {
-      const cashSettlementTypes = ['SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
+      const cashSettlementTypes = ['CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
       if (cashSettlementTypes.includes(tx.type)) {
         if (tx.userId === currentUser.username) {
           let rawSourceName = tx.downline;
@@ -207,13 +207,17 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       return;
     }
 
-    const parentUser = userMap[tx.userId];
-    let parentShare = parentUser ? (parentUser.share || 0) : 0;
-    if (parentShare <= 0) {
-      parentShare = (parentUser && parentUser.role === 'superadmin') ? 85 : 85;
+    let bettorNetForTx = 0;
+    if (tx.bettorNet !== undefined && tx.bettorNet !== null && !isNaN(tx.bettorNet)) {
+      bettorNetForTx = tx.bettorNet;
+    } else {
+      const parentUser = userMap[tx.userId];
+      let parentShare = parentUser ? (parentUser.share || 0) : 0;
+      if (parentShare <= 0) {
+        parentShare = (parentUser && parentUser.role === 'superadmin') ? 85 : 85;
+      }
+      bettorNetForTx = - (tx.amount / (parentShare / 100));
     }
-
-    const bettorNetForTx = - (tx.amount / (parentShare / 100));
     if (!bettorSummary[bettorName]) {
       bettorSummary[bettorName] = { 
         total: 0, 
@@ -445,11 +449,11 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       } else {
         // Viewer is Parent/Admin, name is Child/Downline:
         if (netSetl > 0) {
-          // Cash withdrawal from downline / settlement of green balance: Child on Red side (deducts P/L)
+          // Cash paid to downline / settlement of green balance: Child on Red side (clears P/L), Cash on Green side
           addEntry('red', name, name, netSetl, role);
           addEntry('green', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Cash deposit to downline / settlement of red balance: Child on Green side (adds P/L)
+          // Cash collected from downline / settlement of red balance: Child on Green side (clears P/L), Cash on Red side
           addEntry('green', name, name, Math.abs(netSetl), role);
           addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }

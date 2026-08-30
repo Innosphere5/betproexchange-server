@@ -45,7 +45,7 @@ const isAuthorized = (req, res, next) => {
 
 // Helper functions for Final Sheet based Client P/L calculation
 async function getFinalSheetForUser(viewerUser, isDailyReport = false) {
-  const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'];
+  const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
   let allowedUsernames = [viewerUser.username];
   if (viewerUser.role === 'superadmin') {
@@ -338,21 +338,20 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
       // 1. Gross Share P/L from betting in targetParent's pipeline
       const grossSharePL = Math.round((bettingPlMap[u.username] || 0) * 100) / 100;
 
-      // 2. Client (P/L) = Gross P/L minus cash withdrawn/deposited via C button (clears to 0 when cash is paid/received)
-      const uCashTxs = await Transaction.find({
-        type: { $in: ['CASH_WITHDRAWAL', 'CASH_DEPOSIT'] },
+      // 2. Client (P/L) = Exact net balance on targetParent's Final Sheet (clears to 0 when cash deposited/withdrawn)
+      const clientPL = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
+
+      // 3. Available Balance = Gross Share P/L minus total S-button SETTLEMENT transactions
+      const uSettleTxs = await Transaction.find({
+        type: 'SETTLEMENT',
         userId: targetParent.username,
         downline: u.username
       }).lean();
-      let netCashPaidToDownline = 0;
-      uCashTxs.forEach(t => {
-        if (t.type === 'CASH_DEPOSIT') netCashPaidToDownline += Math.abs(t.amount);
-        else if (t.type === 'CASH_WITHDRAWAL') netCashPaidToDownline -= Math.abs(t.amount);
+      let totalSettledAmount = 0;
+      uSettleTxs.forEach(t => {
+        totalSettledAmount += (t.amount || 0);
       });
-      const clientPL = Math.round((grossSharePL - netCashPaidToDownline) * 100) / 100;
-
-      // 3. Available Balance = Net P/L on targetParent's cumulative Final Sheet (derived purely from betting P/L and S button settlements)
-      const settlementAvailableBalance = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
+      const settlementAvailableBalance = Math.round((grossSharePL - totalSettledAmount) * 100) / 100;
 
       return {
         ...u,
@@ -498,7 +497,7 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
     } else {
       const settlementTx = new Transaction({
         userId: parent.username,
-        amount: -addAmount,
+        amount: addAmount,
         type: 'CASH_DEPOSIT',
         category: 'wallet',
         downline: target.username,
@@ -624,7 +623,7 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
     } else {
       const settlementTx = new Transaction({
         userId: parent.username,
-        amount: withdrawAmount,
+        amount: -withdrawAmount,
         type: 'CASH_WITHDRAWAL',
         category: 'wallet',
         downline: target.username,
@@ -662,9 +661,9 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 
     if (!target) return res.status(404).json({ error: 'Downline user not found' });
 
-    // Restriction: Cannot settle Bettor accounts
-    if (target.role === 'user' || req.user.role === 'master') {
-      return res.status(403).json({ error: 'Settlement is not available for bettor accounts' });
+    // Check if settlement is allowed for target
+    if (target.allowSettlement === false) {
+      return res.status(403).json({ error: 'Settlement is disabled for this user account' });
     }
 
     // Resolve direct parent of target user
@@ -674,10 +673,21 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       if (fetchedParent) directParent = fetchedParent;
     }
 
-    // Calculate the current Available Balance directly from directParent's cumulative Final Sheet
-    const parentSettlementSheet = await getFinalSheetForUser(directParent, false);
-    const settlementPlMap = extractPlMapFromFinalSheet(parentSettlementSheet);
-    const currentAvailableBalance = Math.round((settlementPlMap[target.username] || 0) * 100) / 100;
+    // Calculate the current Available Balance (Gross Share P/L minus total S-button SETTLEMENT transactions)
+    const parentBettingSheet = await getFinalSheetForUser(directParent, true);
+    const bettingPlMap = extractPlMapFromFinalSheet(parentBettingSheet);
+    const grossSharePL = Math.round((bettingPlMap[target.username] || 0) * 100) / 100;
+
+    const uSettleTxs = await Transaction.find({
+      type: 'SETTLEMENT',
+      userId: directParent.username,
+      downline: target.username
+    }).lean();
+    let totalSettledAmount = 0;
+    uSettleTxs.forEach(t => {
+      totalSettledAmount += (t.amount || 0);
+    });
+    const currentAvailableBalance = Math.round((grossSharePL - totalSettledAmount) * 100) / 100;
 
     if (currentAvailableBalance === 0) {
       return res.status(400).json({ error: 'Settlement available balance is 0. Nothing to settle until new profit/loss arrives.' });

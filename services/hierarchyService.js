@@ -76,6 +76,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                 selection: matchDetails?.selection,
                 category: isCasino ? 'casino' : 'cricket',
                 bettor: username,
+                bettorNet: -amount,
                 downline: 'BOOK',
                 performedBy: 'SYSTEM'
             });
@@ -98,9 +99,10 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
         for (let i = 0; i < chain.length; i++) {
             const user = chain[i];
             const isTopLevel = (i === chain.length - 1);
+            const isDirectParent = (i === 0);
 
             // Direct Downline Name for the Final Sheet labeling
-            const downlineName = (i === 0) ? username : chain[i - 1].username;
+            const downlineName = isDirectParent ? username : chain[i - 1].username;
 
             // Net share calculation for hierarchical chain:
             // Master gets master.share
@@ -134,13 +136,16 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     selection: matchDetails?.selection,
                     category: isCasino ? 'casino' : 'cricket',
                     bettor: username,
+                    bettorNet: -amount,
                     downline: downlineName,
                     performedBy: 'SYSTEM'
                 });
             }
 
-            if (earnings !== 0) {
-                await User.findByIdAndUpdate(user._id, { $inc: { walletBalance: earnings } });
+            if (earnings !== 0 || isDirectParent) {
+                if (earnings !== 0) {
+                    await User.findByIdAndUpdate(user._id, { $inc: { walletBalance: earnings } });
+                }
 
                 await Transaction.create({
                     userId: user.username,
@@ -151,6 +156,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     selection: matchDetails?.selection,
                     category: isCasino ? 'casino' : 'cricket',
                     bettor: username,
+                    bettorNet: -amount,
                     downline: downlineName,
                     performedBy: 'SYSTEM'
                 });
