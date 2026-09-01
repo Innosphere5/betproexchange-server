@@ -438,24 +438,24 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
         netAmount += netSetl;
         // Viewer is Child, name is Parent:
         if (netSetl > 0) {
-          // Child received cash deposit / parent debited: Parent on Green side
-          addEntry('green', name, name, netSetl, role);
-          addEntry('red', 'cash', 'cash', netSetl, 'cash');
+          // Parent deposited cash to child: Parent on Red side in child's sheet (reduces child's debt to parent)
+          addEntry('red', name, name, netSetl, role);
+          addEntry('green', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Child paid cash withdrawal / parent credited: Parent on Red side
-          addEntry('red', name, name, Math.abs(netSetl), role);
-          addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
+          // Parent withdrew cash from child: Parent on Green side in child's sheet (reduces parent's debt to child)
+          addEntry('green', name, name, Math.abs(netSetl), role);
+          addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
       } else {
         // Viewer is Parent/Admin, name is Child/Downline:
         if (netSetl > 0) {
-          // Cash paid to downline / settlement of green balance: Child on Red side (clears P/L), Cash on Green side
-          addEntry('red', name, name, netSetl, role);
-          addEntry('green', 'cash', 'cash', netSetl, 'cash');
+          // Cash deposit to downline: Child on Green side (reduces/nills downline's RED P/L)
+          addEntry('green', name, name, netSetl, role);
+          addEntry('red', 'cash', 'cash', netSetl, 'cash');
         } else {
-          // Cash collected from downline / settlement of red balance: Child on Green side (clears P/L), Cash on Red side
-          addEntry('green', name, name, Math.abs(netSetl), role);
-          addEntry('red', 'cash', 'cash', Math.abs(netSetl), 'cash');
+          // Cash withdrawal from downline: Child on Red side (reduces/nills downline's GREEN P/L)
+          addEntry('red', name, name, Math.abs(netSetl), role);
+          addEntry('green', 'cash', 'cash', Math.abs(netSetl), 'cash');
         }
       }
     }
