@@ -12,25 +12,18 @@ const TeenPattiBet = require('../models/TeenPattiBet');
 const AviatorXBet = require('../models/AviatorXBet');
 const auth = require('../middleware/auth');
 const { generateFinalSheet } = require('../services/finalSheetEngine');
+const {
+  findUserByKey,
+  getAllDescendants,
+  getAllDescendantUsernames,
+  getAncestorChain
+} = require('../services/hierarchyHelper');
 
 // Helper to reliably find a user from JWT req.user payload across username casing or ID
 const findUserFromReq = async (reqUser) => {
   if (!reqUser) return null;
   const key = reqUser.userId || reqUser.id || reqUser._id;
-  if (!key) return null;
-
-  let user = await User.findOne({ username: key });
-  if (!user && typeof key === 'string') {
-    user = await User.findOne({ username: key.trim().toLowerCase() });
-  }
-  if (!user && typeof key === 'string') {
-    const safeStr = key.trim().replace(/[/\\^$*+?.()|[\]{}]/g, '\\$&');
-    user = await User.findOne({ username: { $regex: new RegExp(`^${safeStr}$`, 'i') } });
-  }
-  if (!user && mongoose.Types.ObjectId.isValid(key)) {
-    user = await User.findById(key);
-  }
-  return user;
+  return await findUserByKey(key);
 };
 
 // Middleware to check if user is Authorized (SuperAdmin, Admin, SuperMaster or Master)
@@ -47,23 +40,7 @@ const isAuthorized = (req, res, next) => {
 async function getFinalSheetForUser(viewerUser, isDailyReport = false) {
   const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
-  let allowedUsernames = [viewerUser.username];
-  if (viewerUser.role === 'superadmin') {
-    const allUsers = await User.find({}).select('username').lean();
-    allowedUsernames = allUsers.map(u => u.username);
-  } else {
-    const getDownlines = async (parentId) => {
-      const children = await User.find({ parentId }).select('_id username').lean();
-      let list = [...children];
-      for (const child of children) {
-        const sub = await getDownlines(child._id);
-        list = [...list, ...sub];
-      }
-      return list;
-    };
-    const downlineUsers = await getDownlines(viewerUser._id);
-    allowedUsernames = [viewerUser.username, ...downlineUsers.map(u => u.username)];
-  }
+  const allowedUsernames = await getAllDescendantUsernames(viewerUser);
 
   const query = { 
     $or: [
@@ -73,7 +50,7 @@ async function getFinalSheetForUser(viewerUser, isDailyReport = false) {
     type: { $in: types }
   };
 
-  const txs = await Transaction.find(query).sort({ createdAt: -1 });
+  const txs = await Transaction.find(query).sort({ createdAt: -1 }).lean();
   return await generateFinalSheet(viewerUser, txs, isDailyReport);
 }
 
@@ -127,11 +104,16 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only create Bettors' });
     }
 
-    const lowerUsername = username.toLowerCase();
-    let existingUser = await User.findOne({ username: lowerUsername });
-    if (existingUser) return res.status(400).json({ error: 'Username already exists' });
+    const lowerUsername = username.toLowerCase().trim();
 
-    const parent = await User.findOne({ username: req.user.userId });
+    // Parallelize username existence check, parent lookup, and password hashing
+    const [existingUser, parent, hashedPassword] = await Promise.all([
+      User.findOne({ username: lowerUsername }).select('_id').lean(),
+      findUserByKey(req.user.userId),
+      bcrypt.hash(password, 10)
+    ]);
+
+    if (existingUser) return res.status(400).json({ error: 'Username already exists' });
     if (!parent) return res.status(404).json({ error: 'Parent user not found' });
 
     // Dynamic share limit based on SuperAdmin's share (e.g., 85 for adnan, 97 for MD97FS, 100 for MD202FS)
@@ -157,8 +139,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Invalid initial balance' });
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+    let parentCurrentBalance = parent.walletBalance || 0;
 
     if (balance > 0) {
       // Atomic deduction from parent's walletBalance for ALL roles (including SuperAdmin) for cash & credit
@@ -166,17 +147,18 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         { _id: parent._id, walletBalance: { $gte: balance } },
         { $inc: { walletBalance: -balance } },
         { new: true }
-      );
+      ).lean();
 
       if (!updatedParent) {
         return res.status(400).json({ 
-          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
+          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${(parent.walletBalance || 0).toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
         });
       }
 
-      parent.walletBalance = updatedParent.walletBalance;
+      parentCurrentBalance = updatedParent.walletBalance;
     }
 
+    const txsToInsert = [];
     let newUser;
 
     if (selectedBalanceType === 'credit') {
@@ -192,7 +174,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       });
 
       if (balance > 0) {
-        const newTransaction = new Transaction({
+        txsToInsert.push({
           userId: lowerUsername,
           amount: balance,
           type: 'LOAD_CREDIT',
@@ -200,9 +182,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
           description: `Initial Credit Received from ${parent.role} ${parent.username} (Credit)`,
           performedBy: parent.username
         });
-        await newTransaction.save();
-
-        const parentTx = new Transaction({
+        txsToInsert.push({
           userId: parent.username,
           amount: -balance,
           type: 'CREDIT_GIVEN',
@@ -211,12 +191,11 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
           description: `Initial Credit Issued to ${lowerUsername} (Credit)`,
           performedBy: parent.username
         });
-        await parentTx.save();
       }
     } else {
       // Default: Cash Deposit
       if (balance > 0) {
-        const parentTx = new Transaction({
+        txsToInsert.push({
           userId: parent.username,
           amount: -balance,
           type: 'CASH_DEPOSIT',
@@ -225,7 +204,14 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
           description: `Initial Cash Deposit to ${lowerUsername}`,
           performedBy: parent.username
         });
-        await parentTx.save();
+        txsToInsert.push({
+          userId: lowerUsername,
+          amount: balance,
+          type: 'LOAD_BALANCE',
+          category: 'wallet',
+          description: `Initial Cash Deposit from ${parent.role} ${parent.username}`,
+          performedBy: parent.username
+        });
       }
 
       newUser = new User({
@@ -238,21 +224,14 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         credit: 0,
         allowSettlement: role === 'user' ? false : settlementAllowed
       });
-
-      if (balance > 0) {
-        const newTransaction = new Transaction({
-          userId: lowerUsername,
-          amount: balance,
-          type: 'LOAD_BALANCE',
-          category: 'wallet',
-          description: `Initial Cash Deposit from ${parent.role} ${parent.username}`,
-          performedBy: parent.username
-        });
-        await newTransaction.save();
-      }
     }
 
-    await newUser.save();
+    // Save user and batch insert transactions concurrently
+    await Promise.all([
+      newUser.save(),
+      txsToInsert.length > 0 ? Transaction.insertMany(txsToInsert) : Promise.resolve()
+    ]);
+
     res.json({ 
       success: true, 
       user: { 
@@ -261,7 +240,7 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
         balance: newUser.walletBalance,
         credit: newUser.credit
       },
-      parentBalance: parent.walletBalance
+      parentBalance: parentCurrentBalance
     });
   } catch (err) {
     console.error(err);
@@ -279,12 +258,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
     const { username } = req.query;
 
     if (username && username.trim() !== '' && username.trim().toLowerCase() !== loggedInUser.username.toLowerCase()) {
-      const targetLower = username.trim().toLowerCase();
-      let requestedUser = await User.findOne({ username: targetLower });
-      if (!requestedUser) {
-        const safeTarget = username.trim().replace(/[/\\^$*+?.()|[\]{}]/g, '\\$&');
-        requestedUser = await User.findOne({ username: { $regex: new RegExp(`^${safeTarget}$`, 'i') } });
-      }
+      const requestedUser = await findUserByKey(username);
       if (!requestedUser) {
         return res.status(404).json({ error: 'Requested parent user not found' });
       }
@@ -298,7 +272,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
             isDescendant = true;
             break;
           }
-          curr = await User.findById(curr.parentId).lean();
+          curr = await User.findById(curr.parentId).select('_id parentId').lean();
         }
         if (!isDescendant) {
           return res.status(403).json({ error: 'Access denied: Target user is not in your downline' });
@@ -307,25 +281,42 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
       targetParent = requestedUser;
     }
 
+    // Fetch direct children of targetParent
     const users = await User.find({ parentId: targetParent._id }).select('-password').sort({ createdAt: -1 }).lean();
     
-    // Efficiently get counts for all found users
+    // Efficiently get counts for all found users in one aggregation
     const userIds = users.map(u => u._id);
-    const counts = await User.aggregate([
+    const counts = userIds.length > 0 ? await User.aggregate([
       { $match: { parentId: { $in: userIds } } },
       { $group: { _id: "$parentId", count: { $sum: 1 } } }
-    ]);
+    ]) : [];
 
     const countMap = {};
     counts.forEach(c => countMap[c._id.toString()] = c.count);
 
-    const targetParentBettingSheet = await getFinalSheetForUser(targetParent, true);
-    const targetParentSettlementSheet = await getFinalSheetForUser(targetParent, false);
+    // Compute sheets for targetParent in parallel
+    const [targetParentBettingSheet, targetParentSettlementSheet] = await Promise.all([
+      getFinalSheetForUser(targetParent, true),
+      getFinalSheetForUser(targetParent, false)
+    ]);
 
     const bettingPlMap = extractPlMapFromFinalSheet(targetParentBettingSheet);
     const settlementPlMap = extractPlMapFromFinalSheet(targetParentSettlementSheet);
 
-    const usersWithCountsAndPL = await Promise.all(users.map(async (u) => {
+    // Batch fetch settlement transactions for all non-bettors in a single aggregation query
+    const nonBettorUsernames = users.filter(u => u.role !== 'user').map(u => u.username);
+    const settleMap = {};
+    if (nonBettorUsernames.length > 0) {
+      const uSettleAgg = await Transaction.aggregate([
+        { $match: { type: 'SETTLEMENT', userId: targetParent.username, downline: { $in: nonBettorUsernames } } },
+        { $group: { _id: "$downline", total: { $sum: "$amount" } } }
+      ]);
+      uSettleAgg.forEach(s => {
+        settleMap[s._id] = s.total || 0;
+      });
+    }
+
+    const usersWithCountsAndPL = users.map((u) => {
       if (u.role === 'user') {
         const bettorClientPL = Math.round(((u.walletBalance || 0) - (u.credit || 0)) * 100) / 100;
         return {
@@ -346,15 +337,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
       const clientPL = Math.round((settlementPlMap[u.username] || 0) * 100) / 100;
 
       // 3. Available Balance = Gross Share P/L minus total S-button SETTLEMENT transactions
-      const uSettleTxs = await Transaction.find({
-        type: 'SETTLEMENT',
-        userId: targetParent.username,
-        downline: u.username
-      }).lean();
-      let totalSettledAmount = 0;
-      uSettleTxs.forEach(t => {
-        totalSettledAmount += (t.amount || 0);
-      });
+      const totalSettledAmount = settleMap[u.username] || 0;
       const settlementAvailableBalance = Math.round((grossSharePL - totalSettledAmount) * 100) / 100;
 
       return {
@@ -366,7 +349,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         plDownline: clientPL,
         availableBalance: settlementAvailableBalance
       };
-    }));
+    });
 
     // Build parent hierarchy breadcrumbs from targetParent back up to loggedInUser
     const breadcrumbs = [];
@@ -378,7 +361,7 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         _id: ancestor._id.toString()
       });
       if (ancestor._id.toString() === loggedInUser._id.toString()) break;
-      ancestor = await User.findById(ancestor.parentId).lean();
+      ancestor = ancestor.parentId ? await User.findById(ancestor.parentId).select('username role _id parentId').lean() : null;
     }
 
     // Calculate parent's own Client P/L & Share P/L for the summary row
@@ -1136,7 +1119,7 @@ router.get('/commission-report', auth, isAuthorized, async (req, res) => {
 router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
   try {
     const { date, month, year, reportType, startDate: sDate, endDate: eDate } = req.query;
-    const currentUser = await User.findOne({ username: req.user.userId });
+    const currentUser = await findUserByKey(req.user.userId);
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
     const PLATFORM_FEE_RATE = 0.05; // 5% platform commission
@@ -1144,23 +1127,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     // 1. Fetch all betting-related share & cash transactions for the current user (Credit limit ops excluded)
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
-    let allowedUsernames = [currentUser.username];
-    if (currentUser.role === 'superadmin') {
-      const allUsers = await User.find({}).select('username').lean();
-      allowedUsernames = allUsers.map(u => u.username);
-    } else {
-      const getDownlines = async (parentId) => {
-        const children = await User.find({ parentId }).select('_id username').lean();
-        let list = [...children];
-        for (const child of children) {
-          const sub = await getDownlines(child._id);
-          list = [...list, ...sub];
-        }
-        return list;
-      };
-      const downlineUsers = await getDownlines(currentUser._id);
-      allowedUsernames = [currentUser.username, ...downlineUsers.map(u => u.username)];
-    }
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
 
     let query = { 
       $or: [
@@ -1198,7 +1165,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
       };
     }
 
-    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    const txs = await Transaction.find(query).sort({ createdAt: -1 }).lean();
 
     const finalSheetData = await generateFinalSheet(currentUser, txs);
 
@@ -1220,28 +1187,12 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
 router.get('/daily-report', auth, isAuthorized, async (req, res) => {
   try {
     const { date, month, year, reportType = 'daily' } = req.query;
-    const currentUser = await User.findOne({ username: req.user.userId });
+    const currentUser = await findUserByKey(req.user.userId);
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
 
-    let allowedUsernames = [currentUser.username];
-    if (currentUser.role === 'superadmin') {
-      const allUsers = await User.find({}).select('username').lean();
-      allowedUsernames = allUsers.map(u => u.username);
-    } else {
-      const getDownlines = async (parentId) => {
-        const children = await User.find({ parentId }).select('_id username').lean();
-        let list = [...children];
-        for (const child of children) {
-          const sub = await getDownlines(child._id);
-          list = [...list, ...sub];
-        }
-        return list;
-      };
-      const downlineUsers = await getDownlines(currentUser._id);
-      allowedUsernames = [currentUser.username, ...downlineUsers.map(u => u.username)];
-    }
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
 
     let query = { 
       $or: [
@@ -1289,7 +1240,7 @@ router.get('/daily-report', auth, isAuthorized, async (req, res) => {
     
     query.createdAt = { $gte: startDate, $lte: endDate };
 
-    const txs = await Transaction.find(query).sort({ createdAt: -1 });
+    const txs = await Transaction.find(query).sort({ createdAt: -1 }).lean();
 
     const finalSheetData = await generateFinalSheet(currentUser, txs, true);
 

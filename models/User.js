@@ -24,5 +24,8 @@ const userSchema = new mongoose.Schema({
 });
 
 userSchema.index({ parentId: 1 });
+userSchema.index({ parentId: 1, role: 1 }); // Hierarchy traversal with role filter
+userSchema.index({ role: 1 }); // Role-based queries
+userSchema.index({ status: 1 }); // Status filtering
 
 module.exports = mongoose.model('User', userSchema);

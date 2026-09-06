@@ -8,6 +8,7 @@ const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 require('dotenv').config();
 
+const compression = require('compression');
 const User = require('./models/User');
 const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
@@ -36,13 +37,14 @@ const aviatorxRoutes = require('./routes/aviatorxRoutes');
 const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
 
+app.use(compression());
 app.use(cors({
   origin: true, // Reflects the origin of the request (safe for dev)
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
@@ -56,8 +58,8 @@ mongoose.set('bufferCommands', true);
 
 mongoose.connect(process.env.MONGO_URI, {
   autoIndex: false,
-  maxPoolSize: 10,
-  minPoolSize: 2,
+  maxPoolSize: 20,
+  minPoolSize: 5,
   serverSelectionTimeoutMS: 5000,
   socketTimeoutMS: 45000,
   heartbeatFrequencyMS: 10000,

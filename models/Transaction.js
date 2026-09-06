@@ -17,5 +17,9 @@ const transactionSchema = new mongoose.Schema({
 
 transactionSchema.index({ userId: 1, type: 1 });
 transactionSchema.index({ userId: 1, createdAt: -1 });
+transactionSchema.index({ userId: 1, downline: 1, type: 1 }); // Settlement lookups in /downline
+transactionSchema.index({ downline: 1, type: 1 }); // Settlement queries by downline
+transactionSchema.index({ type: 1, userId: 1, createdAt: -1 }); // Final sheet & report queries
+transactionSchema.index({ bettor: 1, type: 1, createdAt: -1 }); // Daily report detail queries
 
 module.exports = mongoose.model('Transaction', transactionSchema);
