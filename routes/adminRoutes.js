@@ -110,11 +110,8 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Share Validation (0-85, since 15% is reserved for Book)
+    // Share Validation (dynamic based on SuperAdmin's share)
     const masterShare = parseFloat(share) || 0;
-    if (masterShare < 0 || masterShare > 85) {
-      return res.status(400).json({ error: 'Share must be between 0 and 85 (15% is reserved for Book)' });
-    }
 
     // Role restriction logic
     if (req.user.role === 'superadmin' && !['admin', 'user'].includes(role)) {
@@ -137,14 +134,21 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'Parent user not found' });
 
+    // Dynamic share limit based on SuperAdmin's share (e.g., 85 for adnan, 97 for MD97FS, 100 for MD202FS)
+    const superAdminShareLimit = req.user.role === 'superadmin' ? (parent.share || 85) : 85;
+    const bookSharePercent = Math.max(0, 100 - superAdminShareLimit);
+    if (masterShare < 0 || masterShare > superAdminShareLimit) {
+      return res.status(400).json({ error: `Share must be between 0 and ${superAdminShareLimit} (${bookSharePercent}% is reserved for Book)` });
+    }
+
     // Share Hierarchy Validation
     if (['admin', 'supermaster', 'master'].includes(role)) {
-      const parentShareLimit = req.user.role === 'superadmin' ? 85 : (parent.share || 0);
+      const parentShareLimit = req.user.role === 'superadmin' ? superAdminShareLimit : (parent.share || 0);
       if (req.user.role !== 'superadmin' && masterShare > parentShareLimit) {
         return res.status(400).json({ error: `Downline share cannot exceed your share (${parentShareLimit}%)` });
       }
-      if (req.user.role === 'superadmin' && masterShare > 85) {
-        return res.status(400).json({ error: 'Share must be between 0 and 85 (15% is reserved for Book)' });
+      if (req.user.role === 'superadmin' && masterShare > superAdminShareLimit) {
+        return res.status(400).json({ error: `Share must be between 0 and ${superAdminShareLimit} (${bookSharePercent}% is reserved for Book)` });
       }
     }
 
@@ -1005,7 +1009,7 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
             // Direct share model: each entity gets their full share %
             if (req.user.role === 'master') return mShare;
             if (req.user.role === 'admin') return aShare;
-            if (req.user.role === 'superadmin') return 85 - aShare - mShare;
+            if (req.user.role === 'superadmin') return (parent.share ?? 85) - aShare - mShare;
             return 0;
           };
 
@@ -1353,7 +1357,10 @@ router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
           }
           const mShare = mUser ? (mUser.share || 0) : 0;
           const aShare = aUser ? (aUser.share || 0) : 0;
-          const saShare = Math.max(0, 85 - aShare - mShare);
+          // Find the superadmin in the hierarchy for dynamic share
+          let saUser = temp; while (saUser && saUser.role !== 'superadmin' && saUser.parentId) { saUser = userMap[saUser.parentId.toString()] || null; }
+          const saTotal = (saUser && saUser.role === 'superadmin') ? (saUser.share ?? 85) : 85;
+          const saShare = Math.max(0, saTotal - aShare - mShare);
           if (saShare > 0) continue;
         }
       }
@@ -1432,25 +1439,28 @@ function computeBettorNet(tx, userMap, viewerRole) {
   const bettorUser = userMap[tx.bettor];
   if (!bettorUser) return 0;
 
-  let mUser = null, aUser = null;
+  let mUser = null, aUser = null, saUserTop = null;
   let temp = bettorUser;
   while (temp && temp.parentId) {
     let p = userMap[temp.parentId.toString()];
     if (!p) break;
     if (p.role === 'master') mUser = p;
     else if (p.role === 'admin') aUser = p;
+    else if (p.role === 'superadmin') saUserTop = p;
     temp = p;
   }
 
   const mShare = mUser ? (mUser.share || 0) : 0;
   const aShare = aUser ? (aUser.share || 0) : 0;
-  const saShare = Math.max(0, 85 - aShare - mShare);
+  const saTotal = (saUserTop && saUserTop.role === 'superadmin') ? (saUserTop.share ?? 85) : 85;
+  const saShare = Math.max(0, saTotal - aShare - mShare);
+  const bookSharePct = Math.max(0, 100 - saTotal);
 
   let sharePercent = 0;
   if (viewerRole === 'master') sharePercent = mShare;
   else if (viewerRole === 'admin') sharePercent = aShare;
   else if (viewerRole === 'superadmin') {
-    if (tx.type === 'BOOK_SHARE') sharePercent = 15;
+    if (tx.type === 'BOOK_SHARE') sharePercent = bookSharePct;
     else sharePercent = saShare;
   }
 
@@ -1492,7 +1502,9 @@ router.get('/daily-report-sportwise', auth, isAuthorized, async (req, res) => {
           }
           const mShare = mUser ? (mUser.share || 0) : 0;
           const aShare = aUser ? (aUser.share || 0) : 0;
-          const saShare = Math.max(0, 85 - aShare - mShare);
+          let saUser2 = temp; while (saUser2 && saUser2.role !== 'superadmin' && saUser2.parentId) { saUser2 = userMap[saUser2.parentId.toString()] || null; }
+          const saTotal2 = (saUser2 && saUser2.role === 'superadmin') ? (saUser2.share ?? 85) : 85;
+          const saShare = Math.max(0, saTotal2 - aShare - mShare);
           if (saShare > 0) continue;
         }
       }
@@ -1572,7 +1584,9 @@ router.get('/daily-report-market-details', auth, isAuthorized, async (req, res) 
           }
           const mShare = mUser ? (mUser.share || 0) : 0;
           const aShare = aUser ? (aUser.share || 0) : 0;
-          const saShare = Math.max(0, 85 - aShare - mShare);
+          let saUser3 = temp; while (saUser3 && saUser3.role !== 'superadmin' && saUser3.parentId) { saUser3 = userMap[saUser3.parentId.toString()] || null; }
+          const saTotal3 = (saUser3 && saUser3.role === 'superadmin') ? (saUser3.share ?? 85) : 85;
+          const saShare = Math.max(0, saTotal3 - aShare - mShare);
           if (saShare > 0) continue;
         }
       }
@@ -1944,8 +1958,8 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
         } else if (requesterRole === 'admin') {
             return aShare;
         } else if (requesterRole === 'superadmin') {
-            // SuperAdmin gets 85% minus all child shares
-            return 85 - aShare - mShare;
+            // SuperAdmin gets their share% minus all child shares
+            return (requester.share ?? 85) - aShare - mShare;
         }
         return 0;
     };
@@ -2178,7 +2192,7 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
     // Reset superadmin balance and credit
     await User.updateMany(
       { role: 'superadmin' },
-      { $set: { credit: 0, walletBalance: 999999999999999, share: 85 } }
+      { $set: { credit: 0, walletBalance: 999999999999999 } }
     );
 
     // Delete all transactions and bets

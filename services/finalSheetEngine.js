@@ -84,9 +84,25 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     }
   }
 
+  // Dynamically determine SuperAdmin total share and book share
+  // Walk up to find the top-level superadmin for this user's chain
+  let topSuperAdmin = null;
+  if (currentUser.role === 'superadmin') {
+    topSuperAdmin = currentUser;
+  } else {
+    let walker = currentUser;
+    while (walker && walker.parentId) {
+      const par = userMap[walker.parentId.toString()];
+      if (!par) break;
+      if (par.role === 'superadmin') { topSuperAdmin = par; break; }
+      walker = par;
+    }
+  }
+  const saShareTotal = topSuperAdmin ? (topSuperAdmin.share ?? 85) : 85;
+  const bookShare = Math.max(0, 100 - saShareTotal);
+
   const masterShare = currentUser.share || 0;
-  const superAdminEffectiveShare = Math.max(0, 85 - parentShare - masterShare);
-  const bookShare = 15;
+  const superAdminEffectiveShare = Math.max(0, saShareTotal - parentShare - masterShare);
 
   let masterInfo = {
     masterName: currentUser.username,
@@ -105,7 +121,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     masterInfo.upstreamShare = superAdminEffectiveShare + bookShare;
   } else if (currentUser.role === 'superadmin') {
     masterInfo.upstreamShare = bookShare;
-    masterInfo.parentName = 'BOOK';
+    masterInfo.parentName = bookShare > 0 ? 'BOOK' : null;
   }
 
   const bettorSummary = {};
@@ -214,7 +230,8 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       const parentUser = userMap[tx.userId];
       let parentShare = parentUser ? (parentUser.share || 0) : 0;
       if (parentShare <= 0) {
-        parentShare = (parentUser && parentUser.role === 'superadmin') ? 85 : 85;
+        // Use the superadmin's actual share instead of hardcoded 85
+        parentShare = (parentUser && parentUser.role === 'superadmin') ? (parentUser.share ?? 85) : 85;
       }
       bettorNetForTx = - (tx.amount / (parentShare / 100));
     }
@@ -281,7 +298,7 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     
     const bUser = userMap[bName];
     if (!bUser) continue;
-    let mUser = null, smUser = null, aUser = null;
+    let mUser = null, smUser = null, aUser = null, bettorSuperAdmin = null;
     let temp = bUser;
     while (temp && temp.parentId) {
       let p = userMap[temp.parentId.toString()];
@@ -289,8 +306,13 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       if (p.role === 'master') mUser = p;
       else if (p.role === 'supermaster') smUser = p;
       else if (p.role === 'admin') aUser = p;
+      else if (p.role === 'superadmin') bettorSuperAdmin = p;
       temp = p;
     }
+
+    // Dynamic share percentages based on bettor's top-level superadmin
+    const bettorSaShareTotal = bettorSuperAdmin ? (bettorSuperAdmin.share ?? 85) : 85;
+    const bettorBookShare = Math.max(0, 100 - bettorSaShareTotal);
 
     const mShare = mUser ? (mUser.share || 0) : 0;
     const smShare = smUser ? (smUser.share || 0) : 0;
@@ -310,9 +332,9 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     let bookNetShare = 0;
 
     if (!isDailyReport) {
-      // Final Sheet: SuperAdmin gets 85 - aCum, BOOK gets 15
-      saNetShare = Math.max(0, 85 - aCum);
-      bookNetShare = 15;
+      // Final Sheet: SuperAdmin gets (saShareTotal - aCum), BOOK gets (100 - saShareTotal)
+      saNetShare = Math.max(0, bettorSaShareTotal - aCum);
+      bookNetShare = bettorBookShare;
     } else {
       // Daily Report: BOOK is removed (0%), SuperAdmin gets 100 - aCum so accounts total 100%
       saNetShare = Math.max(0, 100 - aCum);

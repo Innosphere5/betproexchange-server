@@ -39,8 +39,8 @@ router.post('/login', async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Exact lookup using lowercase
-    const user = await User.findOne({ username: username.toLowerCase() });
+    // Case-insensitive lookup for SuperAdmin accounts like MD97FS, MD202FS
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${username.trim()}$`, 'i') } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
     if (user.status === 'inactive') {
@@ -53,7 +53,7 @@ router.post('/login', async (req, res) => {
     const payload = { userId: user.username, role: user.role };
     const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings, role: user.role } });
+    res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings, role: user.role, share: user.share || 0 } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Server error' });

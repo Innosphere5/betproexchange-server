@@ -2,26 +2,21 @@ const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 
 /**
- * UNIVERSAL SHARE SPLIT:
- *   85% → SuperAdmin hierarchy (SuperAdmin + Admin + Master)
- *   15% → Book (Platform)
+ * DYNAMIC SHARE SPLIT (per SuperAdmin):
+ *   SuperAdmin.share% → SuperAdmin hierarchy (SuperAdmin + Admin + Master)
+ *   (100 - SuperAdmin.share)% → Book (Platform)
  *
  * Each entity gets their FULL share percentage of the total amount:
  *   - Master gets (master.share)% of total
  *   - Admin gets (admin.share)% of total
- *   - SuperAdmin gets (85 - admin.share - master.share)% of total
- *   - Book gets 15% of total
+ *   - SuperAdmin gets (superAdmin.share - admin.share - master.share)% of total
+ *   - Book gets (100 - superAdmin.share)% of total
  *
- * Example: Bettor loses 1000, Admin=30%, Master=20%
- *   Master: 20% × 1000 = 200
- *   Admin:  30% × 1000 = 300
- *   Super:  35% × 1000 = 350  (85 - 30 - 20 = 35)
- *   Book:   15% × 1000 = 150
- *   Total = 1000 ✓
+ * Examples:
+ *   adnan (share=85):   Book=15%, Hierarchy=85%
+ *   MD97FS (share=97):  Book=3%,  Hierarchy=97%
+ *   MD202FS (share=100): Book=0%, Hierarchy=100%
  */
-
-const BOOK_SHARE_PERCENT = 15;
-const SUPERADMIN_TOTAL_PERCENT = 85;
 
 /**
  * Distribute profit/loss up the hierarchy chain using Direct Share logic.
@@ -52,7 +47,12 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             return;
         }
 
-        console.log(`[HIERARCHY] Starting ${isCasino ? 'CASINO' : 'CRICKET'} Distribution of ${amount.toFixed(2)} for ${username}`);
+        // Dynamically determine Book Share and SuperAdmin Total from the top-level SuperAdmin
+        const superAdmin = chain[chain.length - 1];
+        const SUPERADMIN_TOTAL_PERCENT = superAdmin.share ?? 85;
+        const BOOK_SHARE_PERCENT = Math.max(0, 100 - SUPERADMIN_TOTAL_PERCENT);
+
+        console.log(`[HIERARCHY] Starting ${isCasino ? 'CASINO' : 'CRICKET'} Distribution of ${amount.toFixed(2)} for ${username} (SuperAdmin: ${superAdmin.username}, HierarchyShare: ${SUPERADMIN_TOTAL_PERCENT}%, BookShare: ${BOOK_SHARE_PERCENT}%)`);
 
         let desc = isCasino ? 'Casino Game' : 'Cricket Match';
         if (matchDetails && matchDetails.matchName) {
@@ -60,13 +60,10 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
         }
 
         // ──────────────────────────────────────────────
-        // 1. BOOK SHARE (15% Universal)
+        // 1. BOOK SHARE (Dynamic % based on SuperAdmin)
         // ──────────────────────────────────────────────
         const bookAmount = (BOOK_SHARE_PERCENT / 100) * amount;
-        if (bookAmount !== 0) {
-            // Find the SuperAdmin (top of chain) to store book transaction under
-            const superAdmin = chain[chain.length - 1];
-            
+        if (bookAmount !== 0 && BOOK_SHARE_PERCENT > 0) {
             await Transaction.create({
                 userId: superAdmin.username,
                 amount: bookAmount,
@@ -82,10 +79,12 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             });
 
             console.log(`[HIERARCHY] Book Share (${BOOK_SHARE_PERCENT}%): ${bookAmount.toFixed(2)}`);
+        } else {
+            console.log(`[HIERARCHY] Book Share skipped (0% for ${superAdmin.username})`);
         }
 
         // ──────────────────────────────────────────────
-        // 2. HIERARCHY DISTRIBUTION (85% split among chain)
+        // 2. HIERARCHY DISTRIBUTION (SuperAdmin.share% split among chain)
         // ──────────────────────────────────────────────
         // Casino Profit Commission Logic (5% taken from house profit)
         let commissionAmount = 0;
@@ -108,7 +107,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             // Master gets master.share
             // SuperMaster gets max(0, supermaster.share - master.share)
             // Admin gets max(0, admin.share - max(supermaster.share, master.share))
-            // SuperAdmin gets max(0, 85 - highest downline share)
+            // SuperAdmin gets max(0, SUPERADMIN_TOTAL_PERCENT - highest downline share)
             let sharePercent;
             if (isTopLevel) {
                 const maxDownlineShare = (i > 0) ? (chain[i - 1].share || 0) : 0;
