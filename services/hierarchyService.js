@@ -86,11 +86,11 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
         // ──────────────────────────────────────────────
         // 2. HIERARCHY DISTRIBUTION (SuperAdmin.share% split among chain)
         // ──────────────────────────────────────────────
-        // Casino Profit Commission Logic (5% taken from house profit)
+        // Casino Profit Commission Logic (2% taken from house profit)
         let commissionAmount = 0;
         if (isCasino && amount > 0) {
-            commissionAmount = amount * 0.05;
-            console.log(`[HIERARCHY] Casino Commission (5%): ${commissionAmount.toFixed(2)}`);
+            commissionAmount = amount * 0.02;
+            console.log(`[HIERARCHY] Casino Commission (2%): ${commissionAmount.toFixed(2)}`);
         }
 
         let distributedSoFar = 0;

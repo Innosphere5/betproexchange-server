@@ -240,7 +240,7 @@ async function evaluateAutoCashouts(currentMultiplier) {
       const now = Date.now();
       const actualMultiplier = bet.autoCashoutMultiplier; // Cashout exactly at their preset
       const grossPayout = Math.round(bet.stake * actualMultiplier * 100) / 100;
-      const netProfit = Math.round((grossPayout - bet.stake) * 0.95 * 100) / 100;
+      const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100;
       const netPayout = bet.stake + netProfit;
 
       // Atomic lock and update
@@ -416,7 +416,7 @@ async function cashout(userId, betSlot) {
   }
 
   const grossPayout = Math.round(bet.stake * currentMultiplier * 100) / 100;
-  const netProfit = Math.round((grossPayout - bet.stake) * 0.95 * 100) / 100;
+  const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100;
   const netPayout = bet.stake + netProfit;
 
   // Atomic state protection

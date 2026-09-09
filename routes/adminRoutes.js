@@ -1122,7 +1122,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     const currentUser = await findUserByKey(req.user.userId);
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    const PLATFORM_FEE_RATE = 0.05; // 5% platform commission
+    const PLATFORM_FEE_RATE = 0.02; // 2% platform commission
 
     // 1. Fetch all betting-related share & cash transactions for the current user (Credit limit ops excluded)
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
@@ -1618,8 +1618,8 @@ router.get('/daily-report-bet-statement', auth, isAuthorized, async (req, res) =
         let betComm = 0;
         if (bet.status === 'WIN') {
           const profit = bet.amount * ((bet.odds || 2.0) - 1);
-          const netProfit = profit * 0.95;
-          betComm = profit * 0.05;
+          const netProfit = profit * 0.98;
+          betComm = profit * 0.02;
           pl = netProfit;
           totalGrossProfit += profit;
           totalCommission += betComm;
@@ -1780,8 +1780,12 @@ router.post('/clear-final-sheet', auth, async (req, res) => {
 // Full System Reset (Clean Start - SuperAdmin only)
 router.post('/reset-system', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin') {
+    const requester = await User.findOne({ username: req.user.userId });
+    if (!requester || requester.role !== 'superadmin') {
       return res.status(403).json({ error: 'Only SuperAdmin can perform full system reset' });
+    }
+    if (requester.share >= 97 || requester.share === 97 || requester.share === 100 || requester.username?.toLowerCase() === 'md97fs' || requester.username?.toLowerCase() === 'md202fs') {
+      return res.status(403).json({ error: 'System reset is disabled for 97% and 100% accounts.' });
     }
 
     const CasinoRound = require('../models/CasinoRound');
@@ -1795,8 +1799,8 @@ router.post('/reset-system', auth, async (req, res) => {
     // 1. Delete all downline accounts
     const userRes = await User.deleteMany({ role: { $ne: 'superadmin' } });
 
-    // 2. Reset SuperAdmin balance to Infinity (₹999,999,999,999,999)
-    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 999999999999999, credit: 0 } });
+    // 2. Reset SuperAdmin balance to 1 Crore (₹10,000,000)
+    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 10000000, credit: 0 } });
 
     // 3. Clear transactions
     const txRes = await Transaction.deleteMany({});
@@ -2110,13 +2114,15 @@ router.get('/global-open-bets', auth, isAuthorized, async (req, res) => {
 // Reset All Accounts (SuperAdmin only)
 router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin') {
+    const requester = await User.findOne({ username: req.user.userId });
+    if (!requester || requester.role !== 'superadmin') {
       return res.status(403).json({ error: 'Only SuperAdmin can perform a system reset.' });
+    }
+    if (requester.share >= 97 || requester.share === 97 || requester.share === 100 || requester.username?.toLowerCase() === 'md97fs' || requester.username?.toLowerCase() === 'md202fs') {
+      return res.status(403).json({ error: 'System reset is disabled for 97% and 100% accounts.' });
     }
 
     const { mode = 'balances' } = req.body || {};
-
-    const User = require('../models/User');
     const Transaction = require('../models/Transaction');
     const Bet = require('../models/Bet');
     const CasinoBet = require('../models/CasinoBet');
@@ -2140,10 +2146,10 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
       message = `Account balances reset successfully for ${downlineUsers.length} downline accounts. All balances set to credit limit.`;
     }
 
-    // Reset superadmin balance and credit
+    // Reset superadmin balance and credit to 1 Crore (₹10,000,000)
     await User.updateMany(
       { role: 'superadmin' },
-      { $set: { credit: 0, walletBalance: 999999999999999 } }
+      { $set: { credit: 0, walletBalance: 10000000 } }
     );
 
     // Delete all transactions and bets

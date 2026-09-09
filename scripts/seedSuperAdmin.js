@@ -11,19 +11,19 @@ const SUPERADMINS = [
         username: 'adnan',
         password: 'waqas',
         share: 85,           // 85% partnership, 15% book share
-        walletBalance: 999999999999999
+        walletBalance: 10000000 // 1 Crore (₹10,000,000)
     },
     {
         username: 'md97fs',  // stored lowercase per app convention
         password: '97',
         share: 97,           // 97% partnership, 3% book share
-        walletBalance: 999999999999999
+        walletBalance: 10000000 // 1 Crore (₹10,000,000)
     },
     {
         username: 'md202fs', // stored lowercase per app convention
         password: '100',
         share: 100,          // 100% partnership, 0% book share (no book)
-        walletBalance: 999999999999999
+        walletBalance: 10000000 // 1 Crore (₹10,000,000)
     }
 ];
 

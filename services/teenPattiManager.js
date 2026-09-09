@@ -391,7 +391,7 @@ async function settleBets(winningChoice, rankA, rankB) {
         bet.status = 'WIN';
         // Profit calculation
         const grossProfit = bet.amount * (finalOdds - 1);
-        const netProfit = grossProfit * 0.95; // 5% house commission
+        const netProfit = grossProfit * 0.98; // 2% platform commission
         const payout = bet.amount + netProfit;
 
         // Atomic wallet credit

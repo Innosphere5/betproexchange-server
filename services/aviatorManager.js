@@ -299,7 +299,7 @@ async function evaluateAutoCashouts(currentMultiplier) {
       const now = Date.now();
       const actualMultiplier = bet.autoCashoutMultiplier; 
       const grossPayout = Math.round(bet.stake * actualMultiplier * 100) / 100;
-      const netProfit = Math.round((grossPayout - bet.stake) * 0.95 * 100) / 100; // 5% house commission
+      const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
       const netPayout = bet.stake + netProfit;
 
       const updatedBet = await AviatorBet.findOneAndUpdate(
@@ -470,7 +470,7 @@ async function cashout(userId, betSlot) {
   }
 
   const grossPayout = Math.round(bet.stake * currentMultiplier * 100) / 100;
-  const netProfit = Math.round((grossPayout - bet.stake) * 0.95 * 100) / 100; // 5% house commission
+  const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
   const netPayout = bet.stake + netProfit;
 
   // Atomic state protection to avoid double cashouts

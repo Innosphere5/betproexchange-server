@@ -250,7 +250,7 @@ async function declareResult() {
         if (bet.choice === winResult) {
           bet.status = 'WIN';
           const profit = bet.amount * ((bet.odds || 2.0) - 1);
-          const netProfit = profit * 0.95;
+          const netProfit = profit * 0.98;
           const netPayout = bet.amount + netProfit;
 
           // Atomic wallet balance update

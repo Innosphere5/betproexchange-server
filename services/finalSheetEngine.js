@@ -8,7 +8,7 @@ const User = require('../models/User');
  * @returns {Object} { viewer, greenEntries, redEntries, totalGreen, totalRed, netAmount, platformFee, masterInfo }
  */
 async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
-  const PLATFORM_FEE_RATE = 0.05;
+  const PLATFORM_FEE_RATE = 0.02;
 
   const uniqueBettorNames = [...new Set(txs.map(tx => tx.bettor).filter(Boolean))];
   const uniqueUsernamesFromTxs = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];
