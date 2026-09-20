@@ -206,6 +206,7 @@ router.get('/bets', auth, async (req, res) => {
 });
 
 const User = require('../models/User');
+const { getAllDescendants, getAllDescendantUsernames } = require('../services/hierarchyHelper');
 
 // Get Account Ledger Endpoint
 router.get('/account-ledger', auth, async (req, res) => {
@@ -229,31 +230,19 @@ router.get('/account-ledger', auth, async (req, res) => {
       typeFilter = { type: { $nin: FINANCIAL_TYPES } };
     }
 
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+
     let isAll = (!targetUsername || targetUsername === 'ALL');
     let userFilter = {};
 
     if (isAll) {
-      if (['superadmin', 'admin', 'master'].includes(currentUser.role)) {
-        if (currentUser.role === 'superadmin') {
-          userFilter = {};
-        } else {
-          const downlines = await User.find({ parentId: currentUser._id }, 'username');
-          const downlineNames = downlines.map(u => u.username);
-          downlineNames.push(currentUser.username);
-          userFilter = { userId: { $in: downlineNames } };
-        }
-      } else {
-        userFilter = { userId: currentUser.username };
-      }
+      userFilter = { userId: { $in: allowedUsernames } };
     } else {
       const target = await User.findOne({ username: targetUsername });
       if (!target) return res.status(404).json({ error: 'Target account not found' });
 
-      if (currentUser.role !== 'superadmin') {
-        const isChild = await User.findOne({ _id: target._id, parentId: currentUser._id });
-        if (!isChild && target.username !== currentUser.username) {
-          return res.status(403).json({ error: 'Unauthorized to view this account ledger' });
-        }
+      if (!allowedUsernames.includes(target.username)) {
+        return res.status(403).json({ error: 'Unauthorized to view this account ledger' });
       }
       userFilter = { userId: target.username };
     }
@@ -342,13 +331,12 @@ router.get('/downline-list', auth, async (req, res) => {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    let downlines = [];
-    if (currentUser.role === 'superadmin') {
-      downlines = await User.find({}, 'username role walletBalance credit').sort({ username: 1 });
-    } else {
-      downlines = await User.find({ parentId: currentUser._id }, 'username role walletBalance credit').sort({ username: 1 });
-      downlines.unshift({ _id: currentUser._id, username: currentUser.username, role: currentUser.role });
-    }
+    const descendants = await getAllDescendants(currentUser._id, '_id username role walletBalance credit');
+    const downlines = [
+      { _id: currentUser._id, username: currentUser.username, role: currentUser.role, walletBalance: currentUser.walletBalance, credit: currentUser.credit },
+      ...descendants
+    ];
+    downlines.sort((a, b) => a.username.localeCompare(b.username));
 
     res.json({ success: true, users: downlines });
   } catch (err) {

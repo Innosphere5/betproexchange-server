@@ -69,11 +69,7 @@ async function getAllDescendants(parentId, selectFields = '_id username role') {
  * @returns {Promise<string[]>} Array of all usernames in the user's tree (including self)
  */
 async function getAllDescendantUsernames(user) {
-  if (user.role === 'superadmin') {
-    const allUsers = await User.find({}).select('username').lean();
-    return allUsers.map(u => u.username);
-  }
-
+  if (!user || !user._id) return [];
   const descendants = await getAllDescendants(user._id, '_id username');
   return [user.username, ...descendants.map(d => d.username)];
 }

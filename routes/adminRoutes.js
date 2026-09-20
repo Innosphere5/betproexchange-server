@@ -263,20 +263,18 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         return res.status(404).json({ error: 'Requested parent user not found' });
       }
 
-      // Authorization check: Is requestedUser in loggedInUser's downline tree or is loggedInUser superadmin?
-      if (loggedInUser.role !== 'superadmin') {
-        let curr = requestedUser;
-        let isDescendant = false;
-        while (curr && curr.parentId) {
-          if (curr.parentId.toString() === loggedInUser._id.toString()) {
-            isDescendant = true;
-            break;
-          }
-          curr = await User.findById(curr.parentId).select('_id parentId').lean();
+      // Authorization check: Is requestedUser in loggedInUser's downline tree?
+      let curr = requestedUser;
+      let isDescendant = false;
+      while (curr && curr.parentId) {
+        if (curr.parentId.toString() === loggedInUser._id.toString()) {
+          isDescendant = true;
+          break;
         }
-        if (!isDescendant) {
-          return res.status(403).json({ error: 'Access denied: Target user is not in your downline' });
-        }
+        curr = await User.findById(curr.parentId).select('_id parentId').lean();
+      }
+      if (!isDescendant) {
+        return res.status(403).json({ error: 'Access denied: Target user is not in your downline' });
       }
       targetParent = requestedUser;
     }
@@ -641,6 +639,10 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 
     let target;
     if (req.user.role === 'superadmin') {
+      const allowedUsernames = await getAllDescendantUsernames(parent);
+      if (!allowedUsernames.includes(targetUsername)) {
+        return res.status(403).json({ error: 'Access denied: Target user not in your downline' });
+      }
       target = await User.findOne({ username: targetUsername });
     } else {
       target = await User.findOne({ username: targetUsername, parentId: parent._id });
@@ -865,22 +867,12 @@ router.get('/user-statement/:username', auth, isAuthorized, async (req, res) => 
     const target = await User.findOne({ username });
     if (!target) return res.status(404).json({ error: 'User not found' });
 
-    // SuperAdmin can view any user statement; Admin/Master can view downline users or self
-    if (req.user.role !== 'superadmin') {
-      const currentUser = await User.findOne({ username: req.user.userId });
-      if (!currentUser) return res.status(403).json({ error: 'Access denied' });
-      
-      // Check if target is equal to currentUser or child/downline
-      const isDirectChild = target.parentId && target.parentId.toString() === currentUser._id.toString();
-      const isSelf = target.username === currentUser.username;
-      if (!isDirectChild && !isSelf) {
-        // If not direct child, check if target's parent is created by currentUser
-        const targetParent = await User.findById(target.parentId);
-        const isIndirectChild = targetParent && targetParent.parentId && targetParent.parentId.toString() === currentUser._id.toString();
-        if (!isIndirectChild) {
-          return res.status(403).json({ error: 'Access denied: User not in downline' });
-        }
-      }
+    const currentUser = await User.findOne({ username: req.user.userId });
+    if (!currentUser) return res.status(403).json({ error: 'Access denied' });
+    
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+    if (!allowedUsernames.includes(target.username)) {
+      return res.status(403).json({ error: 'Access denied: User not in downline' });
     }
 
     const transactions = await Transaction.find({ userId: username }).sort({ createdAt: -1 });
@@ -908,23 +900,14 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
     
     const matchIds = activeMatches.map(m => m.matchId);
 
+    const allowedUsernames = await getAllDescendantUsernames(parent);
+
     // 2. Prepare Match Stake Query (Include WON/LOST for resulted matches)
     let matchStatsQuery = { 
       matchId: { $in: matchIds }, 
-      status: { $in: ['MATCHED', 'pending', 'WIN', 'LOSE', 'won', 'lost'] } 
+      status: { $in: ['MATCHED', 'pending', 'WIN', 'LOSE', 'won', 'lost'] },
+      userId: { $in: allowedUsernames }
     };
-    
-    if (req.user.role === 'master') {
-      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      matchStatsQuery.userId = { $in: usernames };
-    } else if (req.user.role === 'admin') {
-      const masters = await User.find({ parentId: parent._id }).select('_id');
-      const masterIds = masters.map(m => m._id);
-      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      matchStatsQuery.userId = { $in: usernames };
-    }
 
     const bets = await Bet.find(matchStatsQuery).lean();
 
@@ -1264,6 +1247,13 @@ router.get('/daily-report-details', auth, isAuthorized, async (req, res) => {
     
     if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
 
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+    if (!allowedUsernames.includes(bettor)) {
+      return res.status(403).json({ error: 'Access denied: Bettor is not in your downline' });
+    }
+
     const { start, end } = parseReportDates(req);
 
     const query = {
@@ -1425,6 +1415,13 @@ router.get('/daily-report-sportwise', auth, isAuthorized, async (req, res) => {
     const { bettor } = req.query;
     if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
 
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+    if (!allowedUsernames.includes(bettor)) {
+      return res.status(403).json({ error: 'Access denied: Bettor is not in your downline' });
+    }
+
     const { start, end } = parseReportDates(req);
 
     const query = {
@@ -1496,6 +1493,13 @@ router.get('/daily-report-market-details', auth, isAuthorized, async (req, res) 
   try {
     const { bettor, category } = req.query;
     if (!bettor) return res.status(400).json({ error: 'Bettor name required' });
+
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+    if (!allowedUsernames.includes(bettor)) {
+      return res.status(403).json({ error: 'Access denied: Bettor is not in your downline' });
+    }
 
     const { start, end } = parseReportDates(req);
 
@@ -1580,6 +1584,13 @@ router.get('/daily-report-bet-statement', auth, isAuthorized, async (req, res) =
     const { bettor, matchId } = req.query;
     if (!bettor || !matchId) {
       return res.status(400).json({ error: 'Bettor and matchId/roundId are required' });
+    }
+
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser) return res.status(404).json({ error: 'User not found' });
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+    if (!allowedUsernames.includes(bettor)) {
+      return res.status(403).json({ error: 'Access denied: Bettor is not in your downline' });
     }
 
     const CasinoRound = require('../models/CasinoRound');
@@ -1730,7 +1741,8 @@ router.get('/daily-report-bet-statement', auth, isAuthorized, async (req, res) =
 // Clear Daily Report Data (SuperAdmin only)
 router.post('/clear-daily-report', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin') {
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser || currentUser.role !== 'superadmin') {
       return res.status(403).json({ error: 'Only SuperAdmin can clear report data' });
     }
 
@@ -1747,7 +1759,13 @@ router.post('/clear-daily-report', auth, async (req, res) => {
       endOfDay.setHours(23, 59, 59, 999);
     }
 
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+
     const result = await Transaction.deleteMany({
+      $or: [
+        { userId: { $in: allowedUsernames } },
+        { downline: { $in: allowedUsernames } }
+      ],
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE'] },
       createdAt: { $gte: startOfDay, $lte: endOfDay }
     });
@@ -1762,11 +1780,18 @@ router.post('/clear-daily-report', auth, async (req, res) => {
 // Clear Final Sheet Data (SuperAdmin only)
 router.post('/clear-final-sheet', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'superadmin') {
+    const currentUser = await findUserFromReq(req.user);
+    if (!currentUser || currentUser.role !== 'superadmin') {
       return res.status(403).json({ error: 'Only SuperAdmin can clear final sheet data' });
     }
 
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+
     const result = await Transaction.deleteMany({
+      $or: [
+        { userId: { $in: allowedUsernames } },
+        { downline: { $in: allowedUsernames } }
+      ],
       type: { $in: ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT'] }
     });
 
@@ -1845,22 +1870,11 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     }
 
     // 2. Prepare Bet Query based on role
-    let betQuery = { matchId, status: 'MATCHED' };
-    
     const parent = await User.findOne({ username: req.user.userId });
-    
-    if (req.user.role === 'master') {
-      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    } else if (req.user.role === 'admin') {
-      const masters = await User.find({ parentId: parent._id }).select('_id');
-      const masterIds = masters.map(m => m._id);
-      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    }
-    // Superadmin sees all bets
+    if (!parent) return res.status(404).json({ error: 'User not found' });
+
+    const allowedUsernames = await getAllDescendantUsernames(parent);
+    let betQuery = { matchId, status: 'MATCHED', userId: { $in: allowedUsernames } };
 
     // 3. Get all MATCHED bets for this match
     const bets = await Bet.find(betQuery).lean();
@@ -1999,19 +2013,11 @@ router.get('/global-matched-bets', auth, isAuthorized, async (req, res) => {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
-    let betQuery = { status: { $in: ['MATCHED', 'pending'] } };
-    
-    if (req.user.role === 'master') {
-      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    } else if (req.user.role === 'admin') {
-      const masters = await User.find({ parentId: parent._id }).select('_id');
-      const masterIds = masters.map(m => m._id);
-      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    }
+    const allowedUsernames = await getAllDescendantUsernames(parent);
+    let betQuery = { 
+      status: { $in: ['MATCHED', 'pending'] },
+      userId: { $in: allowedUsernames }
+    };
 
     // Get 50 most recent matched bets
     const bets = await Bet.find(betQuery).sort({ createdAt: -1 }).limit(50).lean();
@@ -2059,19 +2065,11 @@ router.get('/global-open-bets', auth, isAuthorized, async (req, res) => {
     const parent = await User.findOne({ username: req.user.userId });
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
-    let betQuery = { status: 'pending' };
-    
-    if (req.user.role === 'master') {
-      const downlineUsers = await User.find({ parentId: parent._id }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    } else if (req.user.role === 'admin') {
-      const masters = await User.find({ parentId: parent._id }).select('_id');
-      const masterIds = masters.map(m => m._id);
-      const downlineUsers = await User.find({ $or: [{ parentId: parent._id }, { parentId: { $in: masterIds } }] }).select('username');
-      const usernames = downlineUsers.map(u => u.username);
-      betQuery.userId = { $in: usernames };
-    }
+    const allowedUsernames = await getAllDescendantUsernames(parent);
+    let betQuery = { 
+      status: 'pending',
+      userId: { $in: allowedUsernames }
+    };
 
     const bets = await Bet.find(betQuery).sort({ createdAt: -1 }).limit(50).lean();
 
@@ -2193,27 +2191,19 @@ router.get('/account-ledger', auth, isAuthorized, async (req, res) => {
       typeFilter = { type: { $nin: FINANCIAL_TYPES } };
     }
 
+    const allowedUsernames = await getAllDescendantUsernames(currentUser);
+
     let isAll = (!targetUsername || targetUsername === 'ALL');
     let userFilter = {};
 
     if (isAll) {
-      if (currentUser.role === 'superadmin') {
-        userFilter = {};
-      } else {
-        const downlines = await User.find({ parentId: currentUser._id }, 'username');
-        const downlineNames = downlines.map(u => u.username);
-        downlineNames.push(currentUser.username);
-        userFilter = { userId: { $in: downlineNames } };
-      }
+      userFilter = { userId: { $in: allowedUsernames } };
     } else {
       const target = await User.findOne({ username: targetUsername });
       if (!target) return res.status(404).json({ error: 'Target account not found' });
 
-      if (currentUser.role !== 'superadmin') {
-        const isChild = await User.findOne({ _id: target._id, parentId: currentUser._id });
-        if (!isChild && target.username !== currentUser.username) {
-          return res.status(403).json({ error: 'Unauthorized to view this account ledger' });
-        }
+      if (!allowedUsernames.includes(target.username)) {
+        return res.status(403).json({ error: 'Unauthorized to view this account ledger' });
       }
       userFilter = { userId: target.username };
     }
@@ -2302,13 +2292,12 @@ router.get('/downline-list', auth, isAuthorized, async (req, res) => {
     const currentUser = await User.findOne({ username: req.user.userId });
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    let downlines = [];
-    if (currentUser.role === 'superadmin') {
-      downlines = await User.find({}, 'username role walletBalance credit').sort({ username: 1 });
-    } else {
-      downlines = await User.find({ parentId: currentUser._id }, 'username role walletBalance credit').sort({ username: 1 });
-      downlines.unshift({ _id: currentUser._id, username: currentUser.username, role: currentUser.role });
-    }
+    const descendants = await getAllDescendants(currentUser._id, '_id username role walletBalance credit');
+    const downlines = [
+      { _id: currentUser._id, username: currentUser.username, role: currentUser.role, walletBalance: currentUser.walletBalance, credit: currentUser.credit },
+      ...descendants
+    ];
+    downlines.sort((a, b) => a.username.localeCompare(b.username));
 
     res.json({ success: true, users: downlines });
   } catch (err) {

@@ -17,16 +17,12 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
   const uniqueUsersInDb = await User.find({ username: { $in: allUsernamesToLoad } }).lean();
 
   let allUsersInDb = [];
-  if (currentUser.role === 'superadmin') {
-    allUsersInDb = await User.find({ role: { $ne: 'superadmin' } }).lean();
-  } else {
-    let parentsToFetch = [currentUser._id];
-    while (parentsToFetch.length > 0) {
-      const children = await User.find({ parentId: { $in: parentsToFetch } }).lean();
-      if (!children || children.length === 0) break;
-      allUsersInDb.push(...children);
-      parentsToFetch = children.map(c => c._id);
-    }
+  let parentsToFetch = [currentUser._id];
+  while (parentsToFetch.length > 0) {
+    const children = await User.find({ parentId: { $in: parentsToFetch } }).lean();
+    if (!children || children.length === 0) break;
+    allUsersInDb.push(...children);
+    parentsToFetch = children.map(c => c._id);
   }
 
   const userMap = {};
@@ -136,26 +132,19 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     if (u.username === currentUser.username) return targetUsername;
 
     if (currentUser.role === 'superadmin') {
-      let temp = u;
-      let adminAccount = null;
-      let childOfSuperAdmin = null;
-
-      while (temp) {
-        if (temp.role === 'admin') {
-          adminAccount = temp;
-        }
-        if (temp.parentId && userMap[temp.parentId.toString()]) {
-          const parent = userMap[temp.parentId.toString()];
-          if (parent.role === 'superadmin' || parent.username === currentUser.username) {
-            childOfSuperAdmin = temp;
-          }
-          temp = parent;
-        } else {
+      let curr = u;
+      let directChildOfSuperAdmin = null;
+      while (curr) {
+        if (!curr.parentId) break;
+        const parent = userMap[curr.parentId.toString()];
+        if (!parent) break;
+        if (parent.username === currentUser.username || parent._id.toString() === currentUser._id.toString()) {
+          directChildOfSuperAdmin = curr;
           break;
         }
+        curr = parent;
       }
-      if (adminAccount) return adminAccount.username;
-      if (childOfSuperAdmin) return childOfSuperAdmin.username;
+      if (directChildOfSuperAdmin) return directChildOfSuperAdmin.username;
       return targetUsername;
     }
 
@@ -308,6 +297,13 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
       else if (p.role === 'admin') aUser = p;
       else if (p.role === 'superadmin') bettorSuperAdmin = p;
       temp = p;
+    }
+
+    // If viewing as SuperAdmin, ensure this bettor belongs to this SuperAdmin's downline tree
+    if (currentUser.role === 'superadmin') {
+      if (bettorSuperAdmin && bettorSuperAdmin.username !== currentUser.username) {
+        continue;
+      }
     }
 
     // Dynamic share percentages based on bettor's top-level superadmin
