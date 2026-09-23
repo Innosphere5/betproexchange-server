@@ -5,7 +5,7 @@ const BASE_URL = 'https://v5.oddspapi.io/en';
 
 class OddsApiRest {
     constructor() {
-        this.apiKey = process.env.ODDS_API_KEY || '6de1aca2c07d3f5abeb411b7157069e6';
+        this.apiKey = process.env.ODDS_API_KEY || '47867a6c1b58b5b0c53fdf6fe4fed924';
         this.rateLimitRemaining = null;
         this.rateLimitReset = null;
     }

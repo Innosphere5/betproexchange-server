@@ -5,7 +5,7 @@ const oddsApiRest = require('./oddsApiRest');
 require('dotenv').config();
 
 // CONFIGURATION
-const API_KEY = process.env.ODDS_API_KEY || '6de1aca2c07d3f5abeb411b7157069e6';
+const API_KEY = process.env.ODDS_API_KEY || '47867a6c1b58b5b0c53fdf6fe4fed924';
 const WS_URL = 'wss://v5.oddspapi.io/ws';
 const ALLOWED_BOOKMAKERS = ['pinnacle', 'betfair_ex'];
 
