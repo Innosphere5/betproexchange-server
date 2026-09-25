@@ -16,8 +16,8 @@ const CHANNELS = "odds,scores,status";
 // Bookmaker targets are filtered here if needed, but the WS url might fetch all.
 // The user noted: "Your current code targets betfair-ex (exchange) and pinnacle. On odds-api.io, the equivalent would be Betfair Exchange and Pinnacle. I'll use odds-api.io's naming convention."
 // However, the internal API keys for these are typically betfair_ex and bet365.
-const BOOKMAKERS = ["pinnacle", "betfair-ex", "betfair_ex"];
-const STALE_TIMEOUT_MS = 600000; // 10 minutes — cricket has natural pauses (innings breaks, drinks, rain delays)
+const BOOKMAKERS = ["betfair-ex", "betfair_ex", "pinnacle"];
+const STALE_TIMEOUT_MS = 60 * 60 * 1000; // 60 minutes — cricket natural pauses (innings breaks ~30-45 min, rain delays)
 
 class OddsApiLiveService {
   constructor() {
@@ -37,6 +37,10 @@ class OddsApiLiveService {
     this.eventToMatchId = new Map();
     // eventId → fixture metadata (home, away, etc.)
     this.eventMetadata = new Map();
+
+    // Persistent raw odds storage per event: eventId -> { [bookmaker]: { [quoteKey]: quote } }
+    // Enables continuous delta accumulation so single-runner WebSocket updates never get dropped
+    this.eventQuotes = new Map();
 
     // Cached needsSwap per matchId to prevent DB queries on every tick
     this.swapCache = new Map();
@@ -63,7 +67,7 @@ class OddsApiLiveService {
 
     this.io = io;
     this.writeInterval = setInterval(() => this.flushWriteQueue(), 1000);
-    this.staleCheckInterval = setInterval(() => this.checkStaleOdds(), 20000);
+    this.staleCheckInterval = setInterval(() => this.checkStaleOdds(), 60000); // Check every 60s (not 20s) — cricket odds don't change as fast as football
     this.restPollInterval = setInterval(() => this.pollLinkedFixtures(), 30000); // 30s — REST poll interval for live matches
     this.upcomingPollInterval = setInterval(
       () => this.pollUpcomingFixtures(),
@@ -96,7 +100,7 @@ class OddsApiLiveService {
         apiKey: API_KEY,
         channels: ["fixtures", "odds", "scores", "status"],
         sportIds: [27],
-        bookmakers: ["pinnacle", "betfair-ex"],
+        bookmakers: ["betfair-ex", "pinnacle"],
         receiveType: "json",
       };
       if (this.lastSeq) loginPayload.serverEpoch = this.lastSeq;
@@ -151,23 +155,35 @@ class OddsApiLiveService {
 
   handleMessage(msg) {
     if (msg.serverEpoch) this.lastSeq = msg.serverEpoch;
-    const type = msg.type || msg.channel;
-    switch (type) {
-      case "login_ok":
-        this.reconnectAttempts = 0;
-        console.log(
-          "[OddsApiLive] ✅ Received login_ok. Triggering bootstrap...",
-        );
-        this.bootstrapUpcomingFixtures();
-        break;
+
+    // 1. Handle system message types
+    if (msg.type === "login_ok") {
+      this.reconnectAttempts = 0;
+      console.log(
+        "[OddsApiLive] ✅ Received login_ok. Triggering bootstrap...",
+      );
+      this.bootstrapUpcomingFixtures();
+      return;
+    }
+    if (msg.type === "snapshot_required") {
+      console.warn("[OddsApiLive] 🔄 Resync required.");
+      this.lastSeq = null;
+      if (this.ws) this.ws.close();
+      return;
+    }
+    if (msg.type === "deleted" || msg.channel === "deleted") {
+      this.handleDeleted(msg.payload || msg);
+      return;
+    }
+
+    // 2. Route by channel (oddspapi WS sends { channel: "odds", type: "UPDATE", payload: {...} })
+    const channel = msg.channel || msg.type;
+    switch (channel) {
       case "odds":
         this.handleOddsData(msg);
         break;
       case "fixtures":
         this.storeFixtureMetadata(msg.payload || msg);
-        break;
-      case "deleted":
-        this.handleDeleted(msg.payload || msg);
         break;
       case "scores":
         this.handleScoreUpdate(msg.payload || msg);
@@ -175,10 +191,11 @@ class OddsApiLiveService {
       case "status":
         this.handleStatusUpdate(msg.payload || msg);
         break;
-      case "snapshot_required":
-        console.warn("[OddsApiLive] 🔄 Resync required.");
-        this.lastSeq = null;
-        if (this.ws) this.ws.close();
+      default:
+        // Fallback: if type is UPDATE with odds payload
+        if (msg.payload && msg.payload.odds) {
+          this.handleOddsData(msg);
+        }
         break;
     }
   }
@@ -353,20 +370,31 @@ class OddsApiLiveService {
     const eventId = fixture.id || fixture.fixtureId;
     if (!eventId) return;
 
+    const existing = this.eventMetadata.get(eventId) || {};
+
     const home =
       fixture.participants?.participant1Name ||
       fixture.home_team ||
-      fixture.home;
+      fixture.home ||
+      existing.home;
     const away =
       fixture.participants?.participant2Name ||
       fixture.away_team ||
-      fixture.away;
+      fixture.away ||
+      existing.away;
     const sport =
-      fixture.sport?.sportName || fixture.sport_key || fixture.sport;
+      fixture.sport?.sportName ||
+      fixture.sport_key ||
+      fixture.sport ||
+      fixture.sportKey ||
+      existing.sport;
     const commenceTime = fixture.startTime
       ? new Date(fixture.startTime * 1000).toISOString()
-      : fixture.commence_time;
-    const isLive = fixture.status?.live || fixture.status === "live";
+      : fixture.commence_time || existing.commenceTime;
+    const isLive =
+      fixture.status?.live ||
+      fixture.status === "live" ||
+      (existing.isLive ?? false);
 
     this.eventMetadata.set(eventId, {
       eventId: eventId,
@@ -577,23 +605,30 @@ class OddsApiLiveService {
       bookiesMap = { [eventObj.bookie]: eventObj.markets };
     }
 
-    // Normalize flat (REST) vs nested (WebSocket) odds structure
-    let normalizedOdds = {};
+    // Accumulate/merge incoming quotes into persistent event quotes cache
+    if (!this.eventQuotes.has(eventId)) {
+      this.eventQuotes.set(eventId, {});
+    }
+    const storedBookies = this.eventQuotes.get(eventId);
+
     for (const [key, val] of Object.entries(bookiesMap)) {
       if (val && typeof val === "object") {
         if (val.bookmaker) {
           // Flat REST style: key is OddsId, val is outcome quote object
           const bk = val.bookmaker;
-          if (!normalizedOdds[bk]) {
-            normalizedOdds[bk] = {};
-          }
-          normalizedOdds[bk][key] = val;
+          if (!storedBookies[bk]) storedBookies[bk] = {};
+          storedBookies[bk][key] = { ...(storedBookies[bk][key] || {}), ...val };
         } else {
           // Nested WS style: key is bookmaker, val is outcome map
-          normalizedOdds[key] = val;
+          if (!storedBookies[key]) storedBookies[key] = {};
+          for (const [qKey, qVal] of Object.entries(val)) {
+            storedBookies[key][qKey] = { ...(storedBookies[key][qKey] || {}), ...qVal };
+          }
         }
       }
     }
+
+    const normalizedOdds = storedBookies;
 
     let bestHomePrice = 0;
     let bestAwayPrice = 0;
@@ -612,12 +647,14 @@ class OddsApiLiveService {
       return BOOKMAKERS.includes(bkKey) || BOOKMAKERS.includes(norm);
     });
 
-    // Sort keys to prioritize Pinnacle
+    // Prioritize Betfair Exchange for real back/lay liquidity, fallback to Pinnacle
     allowedKeys.sort((a, b) => {
-      const isPinnacleA = a.toLowerCase().includes("pinnacle");
-      const isPinnacleB = b.toLowerCase().includes("pinnacle");
-      if (isPinnacleA && !isPinnacleB) return -1;
-      if (!isPinnacleA && isPinnacleB) return 1;
+      const isExA =
+        a.toLowerCase().includes("exchange") || a.toLowerCase().includes("ex");
+      const isExB =
+        b.toLowerCase().includes("exchange") || b.toLowerCase().includes("ex");
+      if (isExA && !isExB) return -1;
+      if (!isExA && isExB) return 1;
       return 0;
     });
 
@@ -639,7 +676,7 @@ class OddsApiLiveService {
         }
       } else {
         const quoteList = Object.values(outcomes).filter(
-          (q) => q && q.active !== false,
+          (q) => q && q.active !== false && q.price > 0,
         );
 
         // Group by marketId to find h2h market (2 outcomes)
@@ -650,12 +687,23 @@ class OddsApiLiveService {
           byMarket[mid].push(q);
         }
 
-        // Find a market that has exactly 2 outcomes
+        // Prioritize market with mainLine === true or marketId 271 (standard h2h), or any 2-outcome market
         let winnerMarket = null;
         for (const [mId, grp] of Object.entries(byMarket)) {
-          if (grp.length === 2) {
+          if (
+            grp.length === 2 &&
+            (grp.some((q) => q.mainLine === true) || mId === "271")
+          ) {
             winnerMarket = grp;
             break;
+          }
+        }
+        if (!winnerMarket) {
+          for (const [mId, grp] of Object.entries(byMarket)) {
+            if (grp.length === 2) {
+              winnerMarket = grp;
+              break;
+            }
           }
         }
 
@@ -672,31 +720,6 @@ class OddsApiLiveService {
         homeOutcome.price &&
         awayOutcome.price
       ) {
-        // Staleness check: Skip if quote is stale
-        let changedAt =
-          homeOutcome.changedAt ||
-          homeOutcome.changed_at ||
-          homeOutcome.updatedAt ||
-          homeOutcome.updated_at;
-        if (changedAt) {
-          const parsedTime =
-            typeof changedAt === "string"
-              ? new Date(changedAt).getTime()
-              : Number(changedAt);
-          if (!isNaN(parsedTime) && parsedTime > 0) {
-            const quoteAgeMs = Date.now() - parsedTime;
-            const isLive = metadata.isLive;
-            const maxAgeMs = isLive ? 60 * 1000 : 30 * 60 * 1000; // 60 seconds if live, 30 minutes if pre-match
-
-            if (quoteAgeMs > maxAgeMs) {
-              console.log(
-                `[OddsApiLive] ⚠️ Skipping bookmaker '${bookieKey}' for event ${eventId} due to stale quotes (age: ${Math.round(quoteAgeMs / 1000 / 60)} minutes)`,
-              );
-              continue;
-            }
-          }
-        }
-
         usedBookie = bookieKey;
 
         // Extract back/lay/size for home
@@ -756,8 +779,7 @@ class OddsApiLiveService {
         bestHomePrice = homeOutcome.price;
         bestAwayPrice = awayOutcome.price;
 
-        // Since allowedKeys is sorted with Pinnacle first, if we successfully set odds from Pinnacle,
-        // we break out of the loop and stop checking other bookmakers.
+        // If we found a valid 2-way match odds market, we break out and use it
         break;
       }
     }
@@ -888,7 +910,7 @@ class OddsApiLiveService {
     }
 
     console.log(
-      `[OddsApiLive] ⏳ Event ${eventId} (match ${matchId}) received 'deleted' — starting 2-min grace period`,
+      `[OddsApiLive] ⏳ Event ${eventId} (match ${matchId}) received 'deleted' — starting 5-min grace period`,
     );
 
     const timer = setTimeout(
@@ -906,8 +928,8 @@ class OddsApiLiveService {
         await this.updateMarketStatus(matchId, "SUSPENDED");
         // Don't remove the event mapping — allow re-linking if the event comes back
       },
-      2 * 60 * 1000,
-    ); // 2 minutes
+      5 * 60 * 1000,
+    ); // 5 minutes — cricket markets may pause during innings breaks / rain delays
 
     this.deletedGraceTimers.set(eventId, timer);
   }
@@ -1027,6 +1049,37 @@ class OddsApiLiveService {
       for (const market of staleMarkets) {
         const match = await Match.findOne({ matchId: market.matchId });
         if (match && match.status === "live") {
+          // Before suspending, attempt one REST recovery poll
+          const eventId = this.findEventIdForMatchId(market.matchId);
+          if (eventId) {
+            try {
+              console.log(
+                `[OddsApiLive] 🔄 Stale odds detected for match ${market.matchId} — attempting REST recovery before suspending...`,
+              );
+              const oddsData = await oddsApiRest.getFixtureOdds(eventId, BOOKMAKERS);
+              if (oddsData) {
+                const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
+                for (const odd of dataArray) {
+                  await this.processOddsForEvent(odd);
+                }
+                // If processOddsForEvent succeeded, the market will be marked OPEN again
+                // Check if it was actually updated
+                const refreshedMarket = await MarketOdds.findOne({ matchId: market.matchId });
+                if (refreshedMarket && refreshedMarket.updatedAt > staleTime) {
+                  console.log(
+                    `[OddsApiLive] ✅ REST recovery succeeded for match ${market.matchId} — market stays OPEN`,
+                  );
+                  continue; // Skip suspension
+                }
+              }
+            } catch (err) {
+              console.warn(`[OddsApiLive] ⚠️ REST recovery failed for match ${market.matchId}:`, err.message);
+            }
+          }
+
+          console.log(
+            `[OddsApiLive] ⛔ Suspending stale market for match ${market.matchId} (${match.teamA} v ${match.teamB}) — no update for ${Math.round(STALE_TIMEOUT_MS / 60000)} minutes`,
+          );
           await this.updateMarketStatus(market.matchId, "SUSPENDED");
           if (this.io) {
             this.io.emit("market_odds_update", {
@@ -1036,7 +1089,19 @@ class OddsApiLiveService {
           }
         }
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error("[OddsApiLive] ❌ checkStaleOdds error:", err.message);
+    }
+  }
+
+  /**
+   * Reverse-lookup: find the odds API event ID for a given DB matchId
+   */
+  findEventIdForMatchId(matchId) {
+    for (const [eventId, mId] of this.eventToMatchId.entries()) {
+      if (String(mId) === String(matchId)) return eventId;
+    }
+    return null;
   }
 
   async pollLinkedFixtures() {

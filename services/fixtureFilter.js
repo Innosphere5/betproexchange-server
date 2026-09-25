@@ -9,6 +9,7 @@ function normalizeText(value) {
 function getFixtureStartTimeMs(fixture) {
   const rawStart = fixture?.startTime;
   if (rawStart === undefined || rawStart === null || rawStart === "") return null;
+  if (rawStart instanceof Date) return rawStart.getTime();
 
   const parsed = Number(rawStart);
   if (!Number.isFinite(parsed)) return null;
@@ -17,20 +18,75 @@ function getFixtureStartTimeMs(fixture) {
 }
 
 const TIER1_TEAMS = new Set([
-  "india", "australia", "england", "south africa", "pakistan",
-  "new zealand", "sri lanka", "west indies", "bangladesh",
-  "afghanistan", "zimbabwe", "ireland"
+  "india",
+  "australia",
+  "england",
+  "south africa",
+  "pakistan",
+  "new zealand",
+  "sri lanka",
+  "west indies",
+  "bangladesh",
+  "afghanistan",
+  "zimbabwe",
+  "ireland",
 ]);
 
 const TIER2_TEAMS = new Set([
-  "netherlands", "scotland", "namibia", "nepal", "oman",
-  "united arab emirates", "uae", "canada", "usa", "united states",
-  "uganda", "papua new guinea", "png", "hong kong", "hong kong china",
-  "kenya", "italy", "jersey", "kuwait", "qatar", "saudi arabia",
-  "singapore", "malaysia", "nigeria", "bermuda", "bahamas", "cayman",
-  "tanzania", "rwanda", "ghana", "sierra leone", "bhutan", "maldives",
-  "japan", "fiji", "vanuatu", "samoa", "indonesia", "philippines"
+  "netherlands",
+  "scotland",
+  "namibia",
+  "nepal",
+  "oman",
+  "united arab emirates",
+  "uae",
+  "canada",
+  "usa",
+  "united states",
 ]);
+
+const TIER1_FRANCHISE_LEAGUES = [
+  "indian premier league",
+  "ipl",
+  "pakistan super league",
+  "psl",
+  "big bash league",
+  "bbl",
+  "caribbean premier league",
+  "cpl",
+  "the hundred",
+  "sa20",
+  "ilt20",
+  "major league cricket",
+  "mlc",
+  "womens premier league",
+  "wpl",
+];
+
+const DOMESTIC_BLACKLIST_PATTERNS = [
+  // Virtual / SRL / Cyber / Esports
+  /\b(srl|simulated|virtual|cyber|esports|electronic)\b/i,
+  // Youth / Under-19 / U23
+  /\b(u19|u 19|under 19|under 19s|u23|under 23|youth)\b/i,
+  // Legends / Veterans / Masters / Exhibition
+  /\b(legends|championship of legends|road safety|veterans|masters)\b/i,
+  // "A" teams / second-tier development / emerging
+  /\b(india a|australia a|england lions|pakistan shaheens|south africa emerging|nigeria a|team a|new zealand a|west indies a)\b/i,
+  // South African domestic leagues
+  /\b(csa t20 challenge|csa 4 day|csa pro50|csa pro20|csa provincial)\b/i,
+  // Australian domestic state cricket
+  /\b(marsh one day|sheffield shield)\b/i,
+  // USA / Regional minor leagues
+  /\b(minor league|minor league cricket)\b/i,
+  // Local African / Regional cups
+  /\b(eswatini|t10 eswatini|eswatini cup|nigeria quadrangular|quadrangular|north american cup)\b/i,
+  // Minor local Indian State T20 leagues
+  /\b(odisha pro t20|uttarakhand premier league|andhra premier league|pondicherry|bengal pro|tamil nadu premier|tnpl|maharaja trophy|kpl|delhi premier league|dpl|up t20|baroda premier|saurashtra premier|mumbai t20)\b/i,
+  // European T10 / amateur
+  /\b(european cricket|ecs|ecl|t10 european)\b/i,
+  // Club / invitational cricket
+  /\b(cricket club|club xi|county championship|second xi|2nd xi)\b/i,
+];
 
 function isVirtualOrSimulated(fixture) {
   const combined = normalizeText([
@@ -48,15 +104,39 @@ function isVirtualOrSimulated(fixture) {
   return /\b(srl|simulated|virtual|electronic|esports|cyber)\b/.test(combined);
 }
 
+function cleanTeamName(name) {
+  const normalized = normalizeText(name);
+  return normalized
+    .replace(/\b(women|men|xi|national|team)\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isNationalTeam(teamStr) {
+  const cleaned = cleanTeamName(teamStr);
+  return TIER1_TEAMS.has(cleaned) || TIER2_TEAMS.has(cleaned);
+}
+
+function isTier1NationalTeam(teamStr) {
+  const cleaned = cleanTeamName(teamStr);
+  return TIER1_TEAMS.has(cleaned);
+}
+
 function isCricketFixture(fixture) {
   if (isVirtualOrSimulated(fixture)) return false;
 
   const sportName = normalizeText(
-    fixture?.sport?.sportName || fixture?.sport_key || fixture?.sport || "",
+    fixture?.sport?.sportName || fixture?.sport_key || fixture?.sport || fixture?.sportKey || "",
   );
   if (sportName.includes("cricket")) return true;
-  if (sportName.includes("football") || sportName.includes("soccer") || sportName.includes("tennis") || sportName.includes("basketball"))
+  if (
+    sportName.includes("football") ||
+    sportName.includes("soccer") ||
+    sportName.includes("tennis") ||
+    sportName.includes("basketball")
+  ) {
     return false;
+  }
 
   const tournamentName = normalizeText(
     fixture?.tournament?.tournamentName ||
@@ -87,61 +167,136 @@ function isCricketFixture(fixture) {
   );
 }
 
-function getCricketPriority(fixture) {
-  if (isVirtualOrSimulated(fixture)) return -1;
+/**
+ * Validates whether a fixture matches the standards of BPExch (bpexch.live):
+ * - International ODI, T20I, Test matches between recognised national teams (AUS, IND, PAK, SL, ENG, SA, NZ, etc.)
+ * - Major international tournaments (ICC World Cup, Champions Trophy, Asia Cup, CWC League 2)
+ * - Top-tier franchise leagues (IPL, PSL, BBL, CPL, etc.)
+ * - Rejects all minor/domestic/tournament-level state cricket
+ */
+function isTargetBPExchFixture(fixture) {
+  if (!fixture) return false;
+  if (isVirtualOrSimulated(fixture)) return false;
 
-  const tName = normalizeText(fixture?.tournament?.tournamentName || fixture?.league || "");
-  const p1 = normalizeText(fixture?.participants?.participant1Name || fixture?.home_team || fixture?.teamA || "");
-  const p2 = normalizeText(fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "");
-  const combined = `${tName} ${p1} ${p2}`;
-
-  const isT1Team1 = Array.from(TIER1_TEAMS).some((t) => p1.includes(t));
-  const isT1Team2 = Array.from(TIER1_TEAMS).some((t) => p2.includes(t));
-  const isT2Team1 = Array.from(TIER2_TEAMS).some((t) => p1.includes(t));
-  const isT2Team2 = Array.from(TIER2_TEAMS).some((t) => p2.includes(t));
-
-  const isBilateralOrICC = /\b(odi series|test series|t20i series|t20 series|world cup|asia cup|champions trophy|icc|tri series|bilateral)\b/.test(tName);
-  const isLive = Boolean(
-    fixture?.status?.live ||
-    fixture?.status === "live" ||
-    /live|in play|in-play/i.test(normalizeText(fixture?.status?.statusName || fixture?.status?.shortName || ""))
+  const tName = normalizeText(
+    fixture?.tournament?.tournamentName || fixture?.league || fixture?.tournament || "",
   );
-  const liveBonus = isLive ? 200 : 0;
+  const p1 = normalizeText(
+    fixture?.participants?.participant1Name || fixture?.home_team || fixture?.teamA || "",
+  );
+  const p2 = normalizeText(
+    fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "",
+  );
+  const sport = normalizeText(
+    fixture?.sport?.sportName || fixture?.sport || fixture?.sportKey || "",
+  );
 
-  // Tier 1: Both teams are Tier 1 (e.g., England vs Sri Lanka, South Africa vs Australia)
-  if (isT1Team1 && isT1Team2) {
-    return liveBonus + 100;
+  const combined = `${tName} ${p1} ${p2} ${sport}`;
+
+  // 1. Strict blacklist check
+  for (const pattern of DOMESTIC_BLACKLIST_PATTERNS) {
+    if (pattern.test(combined)) {
+      return false;
+    }
   }
 
-  // Tier 1b: One Tier 1 team in an international series / ICC tournament
-  if ((isT1Team1 || isT1Team2) && (isBilateralOrICC || /\b(international|series|icc|trophy)\b/.test(tName))) {
-    return liveBonus + 90;
+  // 2. Tier 1 Franchise Leagues check (IPL, PSL, BBL, etc.)
+  for (const league of TIER1_FRANCHISE_LEAGUES) {
+    if (tName.includes(league)) {
+      return true;
+    }
   }
 
-  // Tier 2: Associate international matches (Asian Games, T20 World Cup Qualifier, etc.)
-  if ((isT2Team1 || isT2Team2) && (isBilateralOrICC || /\b(asian games|qualifier|cup|quadrangular|challenge league|league two)\b/.test(tName))) {
-    return liveBonus + 70;
+  // 3. International Series / Tournaments
+  const isInternationalSeries =
+    /\b(odi series|t20i series|t20 series|test series|world cup|asia cup|champions trophy|icc|international|bilateral|tri series|tour of)\b/i.test(
+      tName,
+    );
+
+  const p1IsT1 = isTier1NationalTeam(p1);
+  const p2IsT1 = isTier1NationalTeam(p2);
+  const p1IsNat = isNationalTeam(p1);
+  const p2IsNat = isNationalTeam(p2);
+
+  // Both teams are Tier 1 Full Members (e.g. England vs Sri Lanka, South Africa vs Australia)
+  if (p1IsT1 && p2IsT1) {
+    return true;
   }
 
-  // Tier 2b: Any tournament marked as international
-  if (/\b(international|world cup|world championship|asia cup|champions trophy|icc)\b/.test(tName)) {
-    return liveBonus + 60;
+  // One team is Tier 1 and other is a national team (e.g. India vs Netherlands, Australia vs Scotland)
+  if ((p1IsT1 || p2IsT1) && (p1IsNat && p2IsNat)) {
+    return true;
   }
 
-  // Tier 3: Major domestic leagues with Betfair exchange liquidity
-  if (/\b(county championship|ipl|indian premier league|big bash|bbl|psl|cpl|the hundred|marsh one day|super smash|csa t20 challenge)\b/.test(tName)) {
-    return liveBonus + 40;
+  // Both are national teams in an official ICC / international series (e.g. CWC League Two)
+  if (isInternationalSeries && p1IsNat && p2IsNat) {
+    return true;
   }
 
-  // Tier 4: Other domestic cricket
-  return liveBonus + 10;
+  // If tournament is an official ICC tournament involving national teams
+  if (
+    /\b(icc cricket world cup|icc men s t20 world cup|champions trophy|asia cup)\b/i.test(
+      tName,
+    ) &&
+    p1IsNat &&
+    p2IsNat
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function isInternationalFixture(fixture) {
-  const prio = getCricketPriority(fixture);
-  // Tier 1 and Tier 2 fixtures have priority >= 60 (excluding live bonus)
-  const basePrio = prio >= 200 ? prio - 200 : prio;
-  return basePrio >= 60;
+  return isTargetBPExchFixture(fixture);
+}
+
+function getCricketPriority(fixture) {
+  if (!isTargetBPExchFixture(fixture)) return -1;
+
+  const tName = normalizeText(
+    fixture?.tournament?.tournamentName || fixture?.league || "",
+  );
+  const p1 = normalizeText(
+    fixture?.participants?.participant1Name || fixture?.home_team || fixture?.teamA || "",
+  );
+  const p2 = normalizeText(
+    fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "",
+  );
+
+  const isLive = Boolean(
+    fixture?.status?.live ||
+      fixture?.status === "live" ||
+      /live|in play|in-play/i.test(
+        normalizeText(
+          fixture?.status?.statusName || fixture?.status?.shortName || "",
+        ),
+      ),
+  );
+  const liveBonus = isLive ? 300 : 0;
+
+  const p1IsT1 = isTier1NationalTeam(p1);
+  const p2IsT1 = isTier1NationalTeam(p2);
+
+  // Tier 1: Top International bilateral/ICC between Tier 1 nations (ENG vs SL, AUS vs SA, IND vs PAK)
+  if (p1IsT1 && p2IsT1) {
+    return liveBonus + 800;
+  }
+
+  // Tier 1b: One Tier 1 nation playing against an associate in international series
+  if (p1IsT1 || p2IsT1) {
+    return liveBonus + 700;
+  }
+
+  // Tier 2: Premier franchise league (IPL, PSL, BBL)
+  for (const league of TIER1_FRANCHISE_LEAGUES) {
+    if (tName.includes(league)) {
+      return liveBonus + 600;
+    }
+  }
+
+  // Tier 3: Other official ICC tournaments (CWC League 2)
+  return liveBonus + 400;
 }
 
 function hasOddsMarket(fixture) {
@@ -173,21 +328,27 @@ function hasOddsMarket(fixture) {
 
 function shouldIncludeFixture(fixture, now = new Date()) {
   if (!fixture) return false;
-  if (isVirtualOrSimulated(fixture)) return false;
   if (!isCricketFixture(fixture)) return false;
+  if (!isTargetBPExchFixture(fixture)) return false;
 
   const startTimeMs = getFixtureStartTimeMs(fixture);
   const isLive = Boolean(
     fixture?.status?.live ||
-    fixture?.status === "live" ||
-    /live|in play|in-play/i.test(normalizeText(fixture?.status?.statusName || fixture?.status?.shortName || ""))
+      fixture?.status === "live" ||
+      /live|in play|in-play/i.test(
+        normalizeText(
+          fixture?.status?.statusName || fixture?.status?.shortName || "",
+        ),
+      ),
   );
 
   if (startTimeMs !== null) {
     const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
-    // Allow up to 7 days in advance for international and upcoming cricket matches
+    // Allow up to 7 days in advance for international cricket matches
     const maxWindowMs = 7 * 24 * 60 * 60 * 1000;
-    const isWithinWindow = startTimeMs >= (nowMs - 24 * 60 * 60 * 1000) && startTimeMs <= (nowMs + maxWindowMs);
+    const isWithinWindow =
+      startTimeMs >= nowMs - 24 * 60 * 60 * 1000 &&
+      startTimeMs <= nowMs + maxWindowMs;
     if (!isWithinWindow && !isLive) return false;
   }
 
@@ -227,6 +388,6 @@ module.exports = {
   selectDisplayableFixtures,
   getCricketPriority,
   isInternationalFixture,
+  isTargetBPExchFixture,
   isVirtualOrSimulated,
 };
-
