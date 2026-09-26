@@ -8,6 +8,7 @@ const betSchema = new mongoose.Schema({
   stake: { type: Number, required: true },
   odds: { type: Number, required: true },
   type: { type: String, enum: ['back', 'lay'], default: 'back' },
+  marketType: { type: String, enum: ['match_odds', 'toss'], default: 'match_odds' },
   isLive: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'won', 'lost', 'cancelled', 'MATCHED', 'WIN', 'LOSE', 'CANCELLED'], default: 'pending' },

@@ -96,6 +96,10 @@ mongoose.connect(process.env.MONGO_URI, {
     const oddsApiLiveService = require('./services/oddsApiLiveService');
     oddsApiLiveService.init(io);
 
+    // Initialize Toss Odds Engine (synthetic toss market)
+    const { initTossOddsEngine } = require('./services/tossOddsEngine');
+    initTossOddsEngine(io);
+
     // START SERVER ONLY AFTER DB IS READY
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
@@ -127,9 +131,14 @@ app.get('/api/user/wallet', auth, async (req, res) => {
 // Bet Placement Endpoint
 app.post('/api/user/bet', auth, async (req, res) => {
   try {
-    const { matchId, matchName, runner, stake, odds, isLive, type } = req.body;
+    const { matchId, matchName, runner, stake, odds, isLive, type, marketType } = req.body;
     if (!matchId) return res.status(400).json({ error: 'Missing matchId' });
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
+
+    // Enforce toss market max bet of 2M
+    if (marketType === 'toss' && stake > 2000000) {
+      return res.status(400).json({ error: 'Toss market max bet is 2M' });
+    }
 
     const user = await User.findOneAndUpdate(
       { username: req.user.userId, walletBalance: { $gte: stake } },
@@ -148,6 +157,7 @@ app.post('/api/user/bet', auth, async (req, res) => {
       odds,
       isLive,
       type: type || 'back',
+      marketType: marketType || 'match_odds',
       status: 'pending'
     });
     await newBet.save();

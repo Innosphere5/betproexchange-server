@@ -33,7 +33,19 @@ const matchSchema = new mongoose.Schema({
   depthLayB: { type: String, default: null },
   marketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
   isPriority: { type: Boolean, default: false },
-  lastUpdated: { type: Date, default: Date.now }
+  lastUpdated: { type: Date, default: Date.now },
+
+  // ─── Toss Market Fields ──────────────────────────────────────────────────────
+  tossBackA: { type: Number, default: null },
+  tossLayA: { type: Number, default: null },
+  tossBackB: { type: Number, default: null },
+  tossLayB: { type: Number, default: null },
+  tossDepthBackA: { type: String, default: null },
+  tossDepthLayA: { type: String, default: null },
+  tossDepthBackB: { type: String, default: null },
+  tossDepthLayB: { type: String, default: null },
+  tossMarketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
+  tossWinner: { type: String, default: null } // Team name that won the toss
 
 });
 

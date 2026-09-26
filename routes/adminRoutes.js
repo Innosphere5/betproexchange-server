@@ -2306,6 +2306,97 @@ router.get('/downline-list', auth, isAuthorized, async (req, res) => {
   }
 });
 
-module.exports = router;
+// ─── Toss Winner Declaration ──────────────────────────────────────────────────
+router.post('/declare-toss-winner', auth, isAuthorized, async (req, res) => {
+  try {
+    const { matchId, tossWinner } = req.body;
+    if (!matchId || !tossWinner) {
+      return res.status(400).json({ error: 'Missing matchId or tossWinner' });
+    }
 
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    if (match.tossWinner) {
+      return res.status(400).json({ error: `Toss already settled. Winner: ${match.tossWinner}` });
+    }
+
+    // Validate tossWinner is one of the teams
+    const validTeams = [match.teamA, match.teamB, 'VOID', 'REFUND'];
+    if (!validTeams.includes(tossWinner)) {
+      return res.status(400).json({ error: `Invalid toss winner. Must be one of: ${validTeams.join(', ')}` });
+    }
+
+    // Settle toss bets
+    const { settleToss } = require('../services/tossOddsEngine');
+    const io = req.app.get('io');
+    await settleToss(matchId, tossWinner, io);
+
+    console.log(`[Admin] 🏆 Toss winner declared for ${match.teamA} v ${match.teamB}: ${tossWinner}`);
+
+    res.json({ 
+      success: true, 
+      message: `Toss winner declared: ${tossWinner}`,
+      matchId,
+      tossWinner
+    });
+  } catch (err) {
+    console.error('[Admin] Toss declaration error:', err);
+    res.status(500).json({ error: 'Failed to declare toss winner' });
+  }
+});
+
+// ─── Get Toss Exposure (for admin) ────────────────────────────────────────────
+router.get('/toss-exposure/:matchId', auth, isAuthorized, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const tossBets = await Bet.find({ matchId, marketType: 'toss', status: 'pending' });
+
+    // Calculate exposure per runner
+    const exposure = {};
+    const runnerA = `${match.teamA} To Win The Toss`;
+    const runnerB = `${match.teamB} To Win The Toss`;
+    exposure[runnerA] = 0;
+    exposure[runnerB] = 0;
+
+    for (const bet of tossBets) {
+      const profit = bet.stake * (bet.odds - 1);
+      if (bet.type === 'back') {
+        exposure[bet.runner] = (exposure[bet.runner] || 0) + profit;
+        // For the other runner, platform loses the stake
+        const otherRunner = bet.runner === runnerA ? runnerB : runnerA;
+        exposure[otherRunner] = (exposure[otherRunner] || 0) - bet.stake;
+      } else {
+        // Lay: platform profits stake if runner loses, loses profit if runner wins
+        exposure[bet.runner] = (exposure[bet.runner] || 0) - profit;
+        const otherRunner = bet.runner === runnerA ? runnerB : runnerA;
+        exposure[otherRunner] = (exposure[otherRunner] || 0) + bet.stake;
+      }
+    }
+
+    res.json({
+      matchId,
+      tossWinner: match.tossWinner,
+      tossMarketStatus: match.tossMarketStatus,
+      exposure,
+      totalTossBets: tossBets.length,
+      matchedBets: tossBets.map(b => ({
+        runner: b.runner,
+        type: b.type,
+        price: b.odds,
+        size: b.stake,
+        better: b.userId,
+        master: ''
+      }))
+    });
+  } catch (err) {
+    console.error('[Admin] Toss exposure error:', err);
+    res.status(500).json({ error: 'Failed to fetch toss exposure' });
+  }
+});
+
+module.exports = router;
 

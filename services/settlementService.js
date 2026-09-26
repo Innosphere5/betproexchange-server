@@ -14,8 +14,8 @@ const settleMatch = async (matchId, winningTeam, io) => {
         console.log(`[SETTLEMENT] Beginning settlement for matchId: ${matchId}`);
         console.log(`[SETTLEMENT] Declared Result/Winner: ${winningTeam}`);
 
-        // Find all pending bets for this match
-        const activeBets = await Bet.find({ matchId, status: 'pending' });
+        // Find all pending match_odds bets for this match (exclude toss bets which are settled separately)
+        const activeBets = await Bet.find({ matchId, status: 'pending', marketType: { $ne: 'toss' } });
 
         if (activeBets.length === 0) {
             console.log(`[SETTLEMENT] No pending bets found for matchId: ${matchId}`);
