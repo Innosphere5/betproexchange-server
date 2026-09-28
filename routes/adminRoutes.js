@@ -1874,7 +1874,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
     const allowedUsernames = await getAllDescendantUsernames(parent);
-    let betQuery = { matchId, status: 'MATCHED', userId: { $in: allowedUsernames } };
+    let betQuery = { matchId, status: { $in: ['MATCHED', 'pending'] }, userId: { $in: allowedUsernames } };
 
     // 3. Get all MATCHED bets for this match
     const bets = await Bet.find(betQuery).lean();
@@ -2353,7 +2353,7 @@ router.get('/toss-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     const match = await Match.findOne({ matchId });
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
-    const tossBets = await Bet.find({ matchId, marketType: 'toss', status: 'pending' });
+    const tossBets = await Bet.find({ matchId, marketType: 'toss', status: { $in: ['pending', 'MATCHED'] } });
 
     // Calculate exposure per runner
     const exposure = {};

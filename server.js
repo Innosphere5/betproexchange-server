@@ -155,14 +155,19 @@ app.post('/api/user/bet', auth, async (req, res) => {
       runner,
       stake,
       odds,
-      isLive,
+      isLive: Boolean(isLive),
       type: type || 'back',
       marketType: marketType || 'match_odds',
-      status: 'pending'
+      status: 'MATCHED'
     });
     await newBet.save();
 
-    res.json({ success: true, balance: user.walletBalance });
+    if (io) {
+      io.emit('bet_placed', { matchId, bet: newBet });
+      io.emit('wallet_updated', { userId: req.user.userId, balance: user.walletBalance });
+    }
+
+    res.json({ success: true, balance: user.walletBalance, bet: newBet });
   } catch (err) {
     res.status(500).json({ error: 'Bet placement failed' });
   }

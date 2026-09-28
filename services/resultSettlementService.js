@@ -20,8 +20,8 @@ const processMatchResults = async (io) => {
         const pendingMatches = await Match.find({ status: { $ne: 'completed' } });
         const pendingMatchIds = pendingMatches.map(m => m.matchId);
 
-        // 2. Get IDs from "pending" bets (this catches old matches that were pruned from DB)
-        const activeBets = await Bet.find({ status: 'pending', marketType: { $ne: 'toss' } });
+        // 2. Get IDs from active bets (this catches old matches that were pruned from DB)
+        const activeBets = await Bet.find({ status: { $in: ['pending', 'MATCHED'] }, marketType: { $ne: 'toss' } });
         const betMatchIds = [...new Set(activeBets.map(b => b.matchId))];
 
         // Combine unique IDs to check
