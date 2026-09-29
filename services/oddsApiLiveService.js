@@ -816,6 +816,12 @@ class OddsApiLiveService {
     const depthBackB = needsSwap ? homeBackVol : awayBackVol;
     const depthLayB = needsSwap ? homeLayVol : awayLayVol;
 
+    // ─── Calculate Bookmaker Odds (BPExch-compatible tighter spread & fixed depth) ──
+    const bmBackA = teamABack ? Number(teamABack.toFixed(2)) : null;
+    const bmLayA = teamALay ? Number(Math.max(teamALay, (teamABack || 0) + 0.01).toFixed(2)) : (bmBackA ? Number((bmBackA + 0.02).toFixed(2)) : null);
+    const bmBackB = teamBBack ? Number((teamBBack >= 2 ? teamBBack - 0.02 : teamBBack).toFixed(2)) : null;
+    const bmLayB = teamBLay ? Number((teamBLay >= 2 ? teamBLay + 0.02 : teamBLay + 0.01).toFixed(2)) : (bmBackB ? Number((bmBackB + 0.02).toFixed(2)) : null);
+
     const now = new Date();
     const oddsPayload = {
       matchId,
@@ -827,6 +833,15 @@ class OddsApiLiveService {
       depthLayA,
       depthBackB,
       depthLayB,
+      bookmakerBackA: bmBackA,
+      bookmakerLayA: bmLayA,
+      bookmakerBackB: bmBackB,
+      bookmakerLayB: bmLayB,
+      bookmakerDepthBackA: "100",
+      bookmakerDepthLayA: "100",
+      bookmakerDepthBackB: "100",
+      bookmakerDepthLayB: "100",
+      bookmakerMarketStatus: "OPEN",
       bookmaker: usedBookie,
       isLive: metadata.isLive,
       updatedAt: now,
@@ -860,7 +875,7 @@ class OddsApiLiveService {
       // Emit matchId as BOTH number and string so the frontend
       // comparison works regardless of the type stored in cricketMatches.
       console.log(
-        `[OddsApiLive] 📡 Emitting odds update to UI for match ${matchId} (${dbTeamAName} v ${dbTeamBName}) | Bookmaker: ${usedBookie} | Odds: A(${teamABack}/${teamALay}) B(${teamBBack}/${teamBLay})`,
+        `[OddsApiLive] 📡 Emitting odds update to UI for match ${matchId} (${dbTeamAName} v ${dbTeamBName}) | Bookmaker: ${usedBookie} | Odds: A(${teamABack}/${teamALay}) B(${teamBBack}/${teamBLay}) | BM: A(${bmBackA}/${bmLayA}) B(${bmBackB}/${bmLayB})`,
       );
       this.io.emit("market_odds_update", {
         matchId: String(matchId), // string for frontend Map lookup
@@ -881,6 +896,23 @@ class OddsApiLiveService {
             lay: teamBLay,
             depthBack: depthBackB,
             depthLay: depthLayB,
+          },
+        ],
+        bookmakerMarketStatus: "OPEN",
+        bookmakerRunners: [
+          {
+            name: dbTeamAName,
+            back: bmBackA,
+            lay: bmLayA,
+            depthBack: "100",
+            depthLay: "100",
+          },
+          {
+            name: dbTeamBName,
+            back: bmBackB,
+            lay: bmLayB,
+            depthBack: "100",
+            depthLay: "100",
           },
         ],
       });
@@ -958,7 +990,7 @@ class OddsApiLiveService {
       );
       await Match.findOneAndUpdate(
         { matchId },
-        { marketStatus: status, lastUpdated: new Date() },
+        { marketStatus: status, bookmakerMarketStatus: status, lastUpdated: new Date() },
       );
     } catch (err) {}
   }
@@ -1022,6 +1054,15 @@ class OddsApiLiveService {
             depthLayA: update.depthLayA,
             depthBackB: update.depthBackB,
             depthLayB: update.depthLayB,
+            bookmakerBackA: update.bookmakerBackA,
+            bookmakerLayA: update.bookmakerLayA,
+            bookmakerBackB: update.bookmakerBackB,
+            bookmakerLayB: update.bookmakerLayB,
+            bookmakerDepthBackA: update.bookmakerDepthBackA,
+            bookmakerDepthLayA: update.bookmakerDepthLayA,
+            bookmakerDepthBackB: update.bookmakerDepthBackB,
+            bookmakerDepthLayB: update.bookmakerDepthLayB,
+            bookmakerMarketStatus: update.bookmakerMarketStatus || "OPEN",
             marketStatus: "OPEN",
             lastUpdated: update.updatedAt,
           },

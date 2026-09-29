@@ -250,7 +250,8 @@ router.get('/:id/bets', async (req, res) => {
                         });
                     } else if (b.marketType === 'bookmaker') {
                         [teamA, teamB].filter(Boolean).forEach(r => {
-                            const isThis = b.runner?.trim().toLowerCase() === r?.trim().toLowerCase();
+                            const isThis = b.runner?.trim().toLowerCase() === r?.trim().toLowerCase() ||
+                                           b.runner?.trim().toLowerCase() === `${r}_bm`.trim().toLowerCase();
                             const key = `${r}_bm`;
                             if (isBack) {
                                 if (isThis) userExposure[key] = (userExposure[key] || 0) + profit;
@@ -260,6 +261,16 @@ router.get('/:id/bets', async (req, res) => {
                                 else userExposure[key] = (userExposure[key] || 0) + stake;
                             }
                         });
+                    } else if (b.marketType === 'fancy') {
+                        const key = b.runner;
+                        if (isBack) {
+                            userExposure[`${key}_yes`] = (userExposure[`${key}_yes`] || 0) + profit;
+                            userExposure[`${key}_no`] = (userExposure[`${key}_no`] || 0) - stake;
+                        } else {
+                            userExposure[`${key}_yes`] = (userExposure[`${key}_yes`] || 0) - profit;
+                            userExposure[`${key}_no`] = (userExposure[`${key}_no`] || 0) + stake;
+                        }
+                        userExposure[key] = (userExposure[key] || 0) + (isBack ? profit : -profit);
                     }
                 });
             } else {
@@ -284,12 +295,18 @@ router.get('/:id/bets', async (req, res) => {
                         });
                     } else if (b.marketType === 'bookmaker') {
                         [teamA, teamB].filter(Boolean).forEach(r => {
-                            const isThis = b.runner?.trim().toLowerCase() === r?.trim().toLowerCase();
+                            const isThis = b.runner?.trim().toLowerCase() === r?.trim().toLowerCase() ||
+                                           b.runner?.trim().toLowerCase() === `${r}_bm`.trim().toLowerCase();
                             const key = `${r}_bm`;
                             if (isThis) {
                                 userExposure[key] = (userExposure[key] || 0) - stake;
                             }
                         });
+                    } else if (b.marketType === 'fancy') {
+                        const key = b.runner;
+                        userExposure[key] = (userExposure[key] || 0) - stake;
+                        userExposure[`${key}_yes`] = (userExposure[`${key}_yes`] || 0) - stake;
+                        userExposure[`${key}_no`] = (userExposure[`${key}_no`] || 0) - stake;
                     }
                 });
             }
@@ -338,6 +355,40 @@ router.get('/:id/bets', async (req, res) => {
                         }
                     }
                 });
+            } else if (b.marketType === 'bookmaker') {
+                [teamA, teamB].filter(Boolean).forEach(r => {
+                    const isThis = b.runner?.trim().toLowerCase() === r?.trim().toLowerCase() ||
+                                   b.runner?.trim().toLowerCase() === `${r}_bm`.trim().toLowerCase();
+                    const key = `${r}_bm`;
+                    if (isLive) {
+                        if (isBack) {
+                            if (isThis) adminExposure[key] = (adminExposure[key] || 0) - profit;
+                            else adminExposure[key] = (adminExposure[key] || 0) + stake;
+                        } else {
+                            if (isThis) adminExposure[key] = (adminExposure[key] || 0) + profit;
+                            else adminExposure[key] = (adminExposure[key] || 0) - stake;
+                        }
+                    } else {
+                        if (isThis) {
+                            adminExposure[key] = (adminExposure[key] || 0) - stake;
+                        }
+                    }
+                });
+            } else if (b.marketType === 'fancy') {
+                const key = b.runner;
+                if (isLive) {
+                    if (isBack) {
+                        adminExposure[`${key}_yes`] = (adminExposure[`${key}_yes`] || 0) - profit;
+                        adminExposure[`${key}_no`] = (adminExposure[`${key}_no`] || 0) + stake;
+                    } else {
+                        adminExposure[`${key}_yes`] = (adminExposure[`${key}_yes`] || 0) + profit;
+                        adminExposure[`${key}_no`] = (adminExposure[`${key}_no`] || 0) - stake;
+                    }
+                } else {
+                    adminExposure[key] = (adminExposure[key] || 0) - stake;
+                    adminExposure[`${key}_yes`] = (adminExposure[`${key}_yes`] || 0) - stake;
+                    adminExposure[`${key}_no`] = (adminExposure[`${key}_no`] || 0) - stake;
+                }
             }
         });
 

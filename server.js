@@ -140,6 +140,11 @@ app.post('/api/user/bet', auth, async (req, res) => {
       return res.status(400).json({ error: 'Toss market max bet is 2M' });
     }
 
+    // Enforce bookmaker market max bet of 1M
+    if (marketType === 'bookmaker' && stake > 1000000) {
+      return res.status(400).json({ error: 'Bookmaker market max bet is 1M' });
+    }
+
     const user = await User.findOneAndUpdate(
       { username: req.user.userId, walletBalance: { $gte: stake } },
       { $inc: { walletBalance: -stake } },

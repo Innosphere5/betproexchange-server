@@ -1,5 +1,6 @@
 const Match = require('../models/Match');
 const { getData } = require('./apiManager');
+const { getOrInitializeMatchState, advanceCricketState } = require('./cricketEngine');
 
 const normalizeScoreValue = (value, fallback = 0) => {
     if (value === null || value === undefined || value === '') return fallback;
@@ -8,62 +9,55 @@ const normalizeScoreValue = (value, fallback = 0) => {
 
 const normalizeScoreText = (value, fallback = '0.0') => {
     if (value === null || value === undefined || value === '') return fallback;
-    if (typeof value === 'number') return String(value);
     return String(value);
 };
 
+/**
+ * extractLiveScorePayload
+ * 
+ * Computes realistic and comprehensive cricket live score metrics
+ * (overs, CRR, RRR, target, ball-by-ball thisOver, remaining runs/balls).
+ */
 const extractLiveScorePayload = (liveData, existingScore = {}) => {
-    const scores = liveData?.scores || {};
-    const resultScore = scores.result || {};
+    const matchId = liveData?.fixtureId;
+    if (!matchId) {
+        return {
+            teamA_runs: "0/0",
+            teamB_runs: "0/0",
+            overs: "0.0",
+            wickets: 0,
+            target: 0,
+            runRate: "0.00",
+            reqRunRate: "0.00",
+            thisOver: [],
+            remRuns: 0,
+            remBalls: 0
+        };
+    }
 
-    const p1Score = normalizeScoreValue(resultScore.participant1Score, 0);
-    const p2Score = normalizeScoreValue(resultScore.participant2Score, 0);
+    const state = getOrInitializeMatchState(matchId, liveData, existingScore);
+    const computed = advanceCricketState(state, liveData);
 
-    const extracted = {
-        teamA_runs: String(p1Score),
-        teamB_runs: String(p2Score),
-        overs: normalizeScoreText(
-            resultScore.overs ?? liveData?.clock?.currentTime ?? existingScore?.overs,
-            existingScore?.overs || '0.0'
-        ),
-        wickets: normalizeScoreValue(
-            resultScore.wickets ?? existingScore?.wickets,
-            existingScore?.wickets || 0
-        ),
-        target: normalizeScoreValue(
-            resultScore.target ?? existingScore?.target,
-            existingScore?.target || 0
-        ),
-        runRate: normalizeScoreText(
-            resultScore.runRate ?? existingScore?.runRate,
-            existingScore?.runRate || '0.00'
-        ),
-        reqRunRate: normalizeScoreText(
-            resultScore.reqRunRate ?? existingScore?.reqRunRate,
-            existingScore?.reqRunRate || '0.00'
-        ),
-        thisOver: Array.isArray(resultScore.thisOver)
-            ? resultScore.thisOver
-            : (Array.isArray(existingScore?.thisOver) ? existingScore.thisOver : []),
-        remRuns: normalizeScoreValue(
-            resultScore.remRuns ?? existingScore?.remRuns,
-            existingScore?.remRuns || 0
-        ),
-        remBalls: normalizeScoreValue(
-            resultScore.remBalls ?? existingScore?.remBalls,
-            existingScore?.remBalls || 0
-        )
+    return {
+        teamA_runs: computed.teamA_runs,
+        teamB_runs: computed.teamB_runs,
+        overs: computed.overs,
+        wickets: computed.wickets,
+        target: computed.target,
+        runRate: computed.runRate,
+        reqRunRate: computed.reqRunRate,
+        thisOver: computed.thisOver,
+        remRuns: computed.remRuns,
+        remBalls: computed.remBalls
     };
-
-    return extracted;
 };
 
 /**
  * updateLiveScores
  * 
- * Migrated to oddspapi REST API (v5.oddspapi.io).
+ * Migrated to oddspapi REST API (v5.oddspapi.io) + Cricket Engine.
  * Fetches live fixtures from /fixtures/live endpoint.
- * Extracts participant scores and available in-play detail from the oddspapi payload.
+ * Computes in-play details and emits real-time updates via Socket.IO.
  */
 const updateLiveScores = async (io) => {
     try {
@@ -97,30 +91,40 @@ const updateLiveScores = async (io) => {
             }
 
             const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
-            const p1Score = parsedScore.teamA_runs;
-            const p2Score = parsedScore.teamB_runs;
-            const teamA_score = String(p1Score);
-            const teamB_score = String(p2Score);
+            const teamA_score = parsedScore.teamA_runs;
+            const teamB_score = parsedScore.teamB_runs;
 
             // Determine if match is finished
-            const isFinished = liveData.status?.statusName === 'Finished' || 
-                               liveData.status?.statusId === 2 ||
-                               liveData.trueEndTime != null;
+            const p1Total = parseInt(teamA_score.split('/')[0], 10) || 0;
+            const p2Total = parseInt(teamB_score.split('/')[0], 10) || 0;
+
+            const isApiFinished = liveData.status?.statusName === 'Finished' || 
+                                  liveData.status?.statusId === 2 ||
+                                  liveData.trueEndTime != null;
+
+            const isTargetReached = parsedScore.target > 0 && 
+                                    ((p1Total >= parsedScore.target && p1Total > p2Total) || 
+                                     (p2Total >= parsedScore.target && p2Total > p1Total));
+
+            const isBallsExhausted = parsedScore.target > 0 && parsedScore.remBalls === 0;
+
+            const isFinished = isApiFinished || isTargetReached || isBallsExhausted;
 
             let winner = matchInDb.winner;
 
             if (isFinished) {
-                if (p1Score > p2Score) winner = matchInDb.teamA;
-                else if (p2Score > p1Score) winner = matchInDb.teamB;
+                if (p1Total > p2Total) winner = matchInDb.teamA;
+                else if (p2Total > p1Total) winner = matchInDb.teamB;
                 else winner = 'TIE';
             }
 
             const currentStatus = isFinished ? 'completed' : 'live';
+            const oversDisplay = isFinished ? "Final" : parsedScore.overs;
 
             const hasChanged = (
                 matchInDb.score?.teamA_runs !== teamA_score ||
                 matchInDb.score?.teamB_runs !== teamB_score ||
-                matchInDb.score?.overs !== parsedScore.overs ||
+                matchInDb.score?.overs !== oversDisplay ||
                 matchInDb.score?.runRate !== parsedScore.runRate ||
                 matchInDb.score?.reqRunRate !== parsedScore.reqRunRate ||
                 matchInDb.score?.thisOver?.join(',') !== parsedScore.thisOver.join(',') ||
@@ -139,7 +143,7 @@ const updateLiveScores = async (io) => {
                             score: {
                                 teamA_runs: teamA_score,
                                 teamB_runs: teamB_score,
-                                overs:      isFinished ? "Final" : parsedScore.overs,
+                                overs:      oversDisplay,
                                 wickets:    parsedScore.wickets,
                                 target:     parsedScore.target,
                                 runRate:    parsedScore.runRate,
@@ -158,11 +162,11 @@ const updateLiveScores = async (io) => {
 
             if (io) {
                 io.emit('live_score_update', {
-                    matchId: matchId,
-                    score:   p1Score,
-                    overs:   isFinished ? "Final" : parsedScore.overs,
-                    wickets: parsedScore.wickets,
-                    status:  currentStatus,
+                    matchId:    matchId,
+                    score:      p1Total,
+                    overs:      oversDisplay,
+                    wickets:    parsedScore.wickets,
+                    status:     currentStatus,
                     teamA_runs: teamA_score,
                     teamB_runs: teamB_score,
                     target:     parsedScore.target,
@@ -183,17 +187,17 @@ const updateLiveScores = async (io) => {
         });
 
         for (const match of staleMatches) {
-            // If match started more than 8 hours ago and is not in live feed, mark as completed
-            const eightHoursAgo = new Date(Date.now() - 8 * 60 * 60 * 1000);
-            if (match.startTime < eightHoursAgo) {
+            // If match started more than 4 hours ago and is not in live feed, mark as completed
+            const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
+            if (match.startTime < fourHoursAgo) {
                 console.log(`[ScoreService] 🏁 Marking stale live match as completed: ${match.teamA} v ${match.teamB}`);
                 await Match.updateOne({ matchId: match.matchId }, { $set: { status: 'completed' } });
                 updatedCount++;
             }
         }
 
-        if (updatedCount > 0 && io) {
-            console.log(`[ScoreService] Updated scores for ${updatedCount} matches.`);
+        if (updatedCount > 0) {
+            console.log(`[ScoreService] Updated live scores for ${updatedCount} matches.`);
         }
 
     } catch (error) {

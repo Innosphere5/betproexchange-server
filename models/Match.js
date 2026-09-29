@@ -45,7 +45,32 @@ const matchSchema = new mongoose.Schema({
   tossDepthBackB: { type: String, default: null },
   tossDepthLayB: { type: String, default: null },
   tossMarketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
-  tossWinner: { type: String, default: null } // Team name that won the toss
+  tossWinner: { type: String, default: null }, // Team name that won the toss
+
+  // ─── Bookmaker Market Fields ──────────────────────────────────────────────
+  bookmakerBackA: { type: Number, default: null },
+  bookmakerLayA: { type: Number, default: null },
+  bookmakerBackB: { type: Number, default: null },
+  bookmakerLayB: { type: Number, default: null },
+  bookmakerDepthBackA: { type: String, default: '100' },
+  bookmakerDepthLayA: { type: String, default: '100' },
+  bookmakerDepthBackB: { type: String, default: '100' },
+  bookmakerDepthLayB: { type: String, default: '100' },
+  bookmakerMarketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: 'OPEN' },
+
+  // ─── Fancy Markets Fields ─────────────────────────────────────────────────
+  fancyMarkets: {
+    type: [{
+      name: { type: String, required: true },
+      backPrice: { type: Number, default: null },
+      backVol: { type: String, default: "100" },
+      layPrice: { type: Number, default: null },
+      layVol: { type: String, default: "100" },
+      status: { type: String, default: 'OPEN' },
+      maxBet: { type: Number, default: 100000 }
+    }],
+    default: []
+  }
 
 });
 
