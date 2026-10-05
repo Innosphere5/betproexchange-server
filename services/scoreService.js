@@ -176,6 +176,9 @@ const updateLiveScores = async (io) => {
                     remRuns:    parsedScore.remRuns,
                     remBalls:   parsedScore.remBalls
                 });
+
+                const fancyMarketsService = require('./fancyMarketsService');
+                fancyMarketsService.handleLiveMatchOdds(matchId, io);
             }
         }
         

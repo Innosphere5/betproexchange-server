@@ -27,6 +27,7 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 5000;
+app.set('io', io);
 
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -96,6 +97,10 @@ mongoose.connect(process.env.MONGO_URI, {
     const oddsApiLiveService = require('./services/oddsApiLiveService');
     oddsApiLiveService.init(io);
 
+    // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
+    const fancyMarketsService = require('./services/fancyMarketsService');
+    fancyMarketsService.init(io);
+
     // Initialize Toss Odds Engine (synthetic toss market)
     const { initTossOddsEngine } = require('./services/tossOddsEngine');
     initTossOddsEngine(io);
@@ -145,13 +150,36 @@ app.post('/api/user/bet', auth, async (req, res) => {
       return res.status(400).json({ error: 'Bookmaker market max bet is 1M' });
     }
 
+    // Enforce fancy market max bet of 2M
+    if (marketType === 'fancy' && stake > 2000000) {
+      return res.status(400).json({ error: 'Fancy market max bet is 2M' });
+    }
+
+    // Enforce figure market max bet of 100K
+    if (marketType === 'figure' && stake > 100000) {
+      return res.status(400).json({ error: 'Figure market max bet is 100K' });
+    }
+
+    // Enforce even/odd market max bet of 2M
+    if (marketType === 'even_odd' && stake > 2000000) {
+      return res.status(400).json({ error: 'Even/Odd market max bet is 2M' });
+    }
+
+    // Enforce tied match market max bet of 500K
+    if (marketType === 'tied_match' && stake > 500000) {
+      return res.status(400).json({ error: 'Tied Match market max bet is 500K' });
+    }
+
+    const betType = (type || 'back').toLowerCase();
+    const liability = (betType === 'lay' && odds > 1) ? Math.round(stake * (odds - 1)) : stake;
+
     const user = await User.findOneAndUpdate(
-      { username: req.user.userId, walletBalance: { $gte: stake } },
-      { $inc: { walletBalance: -stake } },
+      { username: req.user.userId, walletBalance: { $gte: liability } },
+      { $inc: { walletBalance: -liability } },
       { new: true }
     );
 
-    if (!user) return res.status(400).json({ error: 'Insufficient balance' });
+    if (!user) return res.status(400).json({ error: 'Insufficient balance for bet liability' });
 
     const newBet = new Bet({
       userId: req.user.userId,

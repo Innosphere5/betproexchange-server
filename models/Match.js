@@ -70,6 +70,56 @@ const matchSchema = new mongoose.Schema({
       maxBet: { type: Number, default: 100000 }
     }],
     default: []
+  },
+
+  // ─── Figure Markets Fields (Last Digit 0-9 grid) ─────────────────────────
+  figureMarkets: {
+    type: [{
+      name: { type: String, required: true },  // e.g. "SOUTH AFRICA LEGENDS 15 OVER TOTAL LAST FIGURE"
+      maxBet: { type: Number, default: 100000 },
+      status: { type: String, default: 'OPEN' },
+      digits: {
+        type: [{
+          digit: { type: Number, required: true },  // 0-9
+          odds: { type: Number, default: 8.85 },
+          status: { type: String, default: 'OPEN' }
+        }],
+        default: () => Array.from({ length: 10 }, (_, i) => ({ digit: i, odds: 8.85, status: 'OPEN' }))
+      }
+    }],
+    default: []
+  },
+
+  // ─── Even/Odd Markets Fields ──────────────────────────────────────────────
+  evenOddMarkets: {
+    type: [{
+      name: { type: String, required: true },  // e.g. "1st inn 15 Over Run Odd (Kalli)"
+      backPrice: { type: Number, default: null },
+      backVol: { type: String, default: "100" },
+      layPrice: { type: Number, default: null },
+      layVol: { type: String, default: "100" },
+      status: { type: String, default: 'OPEN' },
+      maxBet: { type: Number, default: 2000000 }
+    }],
+    default: []
+  },
+
+  // ─── Tied Match (Others) Market Fields ────────────────────────────────────
+  tiedMatchMarket: {
+    type: {
+      name: { type: String, default: 'TIED MATCH' },
+      maxBet: { type: Number, default: 500000 },
+      status: { type: String, default: 'OPEN' },
+      runners: {
+        type: [{
+          name: { type: String, required: true },  // "Yes" or "No"
+          backOdds: [{ price: Number, volume: String }],
+          layOdds: [{ price: Number, volume: String }]
+        }],
+        default: []
+      }
+    },
+    default: null
   }
 
 });

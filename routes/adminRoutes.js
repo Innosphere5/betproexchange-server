@@ -2398,5 +2398,367 @@ router.get('/toss-exposure/:matchId', auth, isAuthorized, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// FIGURE MARKET MANAGEMENT (Admin)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Add/Update a figure market for a match
+router.post('/figure-market/:matchId', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, maxBet, digits } = req.body;
+    if (!name) return res.status(400).json({ error: 'Market name is required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const defaultDigits = Array.from({ length: 10 }, (_, i) => ({
+      digit: i,
+      odds: 8.85,
+      status: 'OPEN'
+    }));
+
+    const existingIdx = match.figureMarkets.findIndex(m => m.name === name);
+    if (existingIdx >= 0) {
+      match.figureMarkets[existingIdx].maxBet = maxBet || match.figureMarkets[existingIdx].maxBet;
+      if (digits) match.figureMarkets[existingIdx].digits = digits;
+    } else {
+      match.figureMarkets.push({
+        name,
+        maxBet: maxBet || 100000,
+        status: 'OPEN',
+        digits: digits || defaultDigits
+      });
+    }
+
+    await match.save();
+
+    // Emit socket update
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('figure_market_update', {
+        matchId,
+        figureMarkets: match.figureMarkets
+      });
+    }
+
+    res.json({ success: true, figureMarkets: match.figureMarkets });
+  } catch (err) {
+    console.error('[Admin] Figure market error:', err);
+    res.status(500).json({ error: 'Failed to update figure market' });
+  }
+});
+
+// Update figure market status (OPEN/SUSPENDED)
+router.post('/figure-market/:matchId/status', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, status } = req.body;
+    if (!name || !status) return res.status(400).json({ error: 'Name and status required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const market = match.figureMarkets.find(m => m.name === name);
+    if (!market) return res.status(404).json({ error: 'Figure market not found' });
+
+    market.status = status;
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('figure_market_update', { matchId, figureMarkets: match.figureMarkets });
+    }
+
+    res.json({ success: true, figureMarkets: match.figureMarkets });
+  } catch (err) {
+    console.error('[Admin] Figure market status error:', err);
+    res.status(500).json({ error: 'Failed to update figure market status' });
+  }
+});
+
+// Update individual digit odds in a figure market
+router.post('/figure-market/:matchId/odds', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, digit, odds } = req.body;
+    if (!name || digit === undefined || !odds) return res.status(400).json({ error: 'Name, digit, and odds required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const market = match.figureMarkets.find(m => m.name === name);
+    if (!market) return res.status(404).json({ error: 'Figure market not found' });
+
+    const digitEntry = market.digits.find(d => d.digit === digit);
+    if (!digitEntry) return res.status(404).json({ error: 'Digit not found' });
+
+    digitEntry.odds = odds;
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('figure_market_update', { matchId, figureMarkets: match.figureMarkets });
+    }
+
+    res.json({ success: true, figureMarkets: match.figureMarkets });
+  } catch (err) {
+    console.error('[Admin] Figure digit odds error:', err);
+    res.status(500).json({ error: 'Failed to update digit odds' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EVEN/ODD MARKET MANAGEMENT (Admin)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Add/Update an even-odd market for a match
+router.post('/even-odd-market/:matchId', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, backPrice, backVol, layPrice, layVol, maxBet, status } = req.body;
+    if (!name) return res.status(400).json({ error: 'Market name is required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const existingIdx = match.evenOddMarkets.findIndex(m => m.name === name);
+    if (existingIdx >= 0) {
+      const m = match.evenOddMarkets[existingIdx];
+      if (backPrice !== undefined) m.backPrice = backPrice;
+      if (backVol !== undefined) m.backVol = backVol;
+      if (layPrice !== undefined) m.layPrice = layPrice;
+      if (layVol !== undefined) m.layVol = layVol;
+      if (maxBet !== undefined) m.maxBet = maxBet;
+      if (status !== undefined) m.status = status;
+    } else {
+      match.evenOddMarkets.push({
+        name,
+        backPrice: backPrice || 1.98,
+        backVol: backVol || "98",
+        layPrice: layPrice || 2.02,
+        layVol: layVol || "102",
+        status: status || 'OPEN',
+        maxBet: maxBet || 2000000
+      });
+    }
+
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('even_odd_market_update', {
+        matchId,
+        evenOddMarkets: match.evenOddMarkets
+      });
+    }
+
+    res.json({ success: true, evenOddMarkets: match.evenOddMarkets });
+  } catch (err) {
+    console.error('[Admin] Even-Odd market error:', err);
+    res.status(500).json({ error: 'Failed to update even-odd market' });
+  }
+});
+
+// Update even-odd market status
+router.post('/even-odd-market/:matchId/status', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, status } = req.body;
+    if (!name || !status) return res.status(400).json({ error: 'Name and status required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const market = match.evenOddMarkets.find(m => m.name === name);
+    if (!market) return res.status(404).json({ error: 'Even-Odd market not found' });
+
+    market.status = status;
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('even_odd_market_update', { matchId, evenOddMarkets: match.evenOddMarkets });
+    }
+
+    res.json({ success: true, evenOddMarkets: match.evenOddMarkets });
+  } catch (err) {
+    console.error('[Admin] Even-Odd status error:', err);
+    res.status(500).json({ error: 'Failed to update even-odd status' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TIED MATCH (OTHERS) MARKET MANAGEMENT (Admin)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Add/Update tied match market for a match
+router.post('/tied-match-market/:matchId', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { maxBet, status, runners } = req.body;
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    if (!match.tiedMatchMarket) {
+      match.tiedMatchMarket = {
+        name: 'TIED MATCH',
+        maxBet: maxBet || 500000,
+        status: status || 'OPEN',
+        runners: runners || [
+          {
+            name: 'Yes',
+            backOdds: [
+              { price: 100, volume: '42.8K' },
+              { price: 120, volume: '397' },
+              { price: 140, volume: '3.9K' }
+            ],
+            layOdds: [
+              { price: 780, volume: '550' },
+              { price: 1000, volume: '1.4K' }
+            ]
+          },
+          {
+            name: 'No',
+            backOdds: [],
+            layOdds: [
+              { price: 1.01, volume: '4.2M' },
+              { price: 1.02, volume: '5.6M' },
+              { price: 1.03, volume: '4.2M' }
+            ]
+          }
+        ]
+      };
+    } else {
+      if (maxBet !== undefined) match.tiedMatchMarket.maxBet = maxBet;
+      if (status !== undefined) match.tiedMatchMarket.status = status;
+      if (runners) match.tiedMatchMarket.runners = runners;
+    }
+
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('tied_match_market_update', {
+        matchId,
+        tiedMatchMarket: match.tiedMatchMarket
+      });
+    }
+
+    res.json({ success: true, tiedMatchMarket: match.tiedMatchMarket });
+  } catch (err) {
+    console.error('[Admin] Tied match market error:', err);
+    res.status(500).json({ error: 'Failed to update tied match market' });
+  }
+});
+
+// Update tied match market status
+router.post('/tied-match-market/:matchId/status', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { status } = req.body;
+    if (!status) return res.status(400).json({ error: 'Status required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    if (!match.tiedMatchMarket) return res.status(404).json({ error: 'Tied match market not found' });
+
+    match.tiedMatchMarket.status = status;
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('tied_match_market_update', { matchId, tiedMatchMarket: match.tiedMatchMarket });
+    }
+
+    res.json({ success: true, tiedMatchMarket: match.tiedMatchMarket });
+  } catch (err) {
+    console.error('[Admin] Tied match status error:', err);
+    res.status(500).json({ error: 'Failed to update tied match status' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// FANCY MARKET MANAGEMENT (Admin)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Add/Update a fancy market for a match
+router.post('/fancy-market/:matchId', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, backPrice, backVol, layPrice, layVol, status, maxBet } = req.body;
+    if (!name) return res.status(400).json({ error: 'Market name is required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const existingIdx = match.fancyMarkets.findIndex(m => m.name === name);
+    if (existingIdx >= 0) {
+      const f = match.fancyMarkets[existingIdx];
+      if (backPrice !== undefined) f.backPrice = backPrice;
+      if (backVol !== undefined) f.backVol = backVol;
+      if (layPrice !== undefined) f.layPrice = layPrice;
+      if (layVol !== undefined) f.layVol = layVol;
+      if (status !== undefined) f.status = status;
+      if (maxBet !== undefined) f.maxBet = maxBet;
+    } else {
+      match.fancyMarkets.push({
+        name,
+        backPrice: backPrice ?? 118,
+        backVol: backVol || '100',
+        layPrice: layPrice ?? 117,
+        layVol: layVol || '100',
+        status: status || 'OPEN',
+        maxBet: maxBet || 2000000
+      });
+    }
+
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('fancy_market_update', {
+        matchId,
+        fancyMarkets: match.fancyMarkets
+      });
+    }
+
+    res.json({ success: true, fancyMarkets: match.fancyMarkets });
+  } catch (err) {
+    console.error('[Admin] Fancy market error:', err);
+    res.status(500).json({ error: 'Failed to update fancy market' });
+  }
+});
+
+// Update fancy market status (OPEN/SUSPENDED)
+router.post('/fancy-market/:matchId/status', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, status } = req.body;
+    if (!name || !status) return res.status(400).json({ error: 'Name and status required' });
+
+    const match = await Match.findOne({ matchId });
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const market = match.fancyMarkets.find(m => m.name === name);
+    if (!market) return res.status(404).json({ error: 'Fancy market not found' });
+
+    market.status = status;
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.emit('fancy_market_update', { matchId, fancyMarkets: match.fancyMarkets });
+    }
+
+    res.json({ success: true, fancyMarkets: match.fancyMarkets });
+  } catch (err) {
+    console.error('[Admin] Fancy market status error:', err);
+    res.status(500).json({ error: 'Failed to update fancy market status' });
+  }
+});
+
 module.exports = router;
 

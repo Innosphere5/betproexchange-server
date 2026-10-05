@@ -28,11 +28,16 @@ const settleMatch = async (matchId, winningTeam, io) => {
             // Idempotency check (extra safety)
             if (!['pending', 'MATCHED'].includes(bet.status)) continue;
 
+            const isBack = bet.type === 'back';
+            const runnerWon = bet.runner === winningTeam;
+            const isWin = isBack ? runnerWon : !runnerWon;
+            const liability = (!isBack && bet.odds > 1) ? Math.round(bet.stake * (bet.odds - 1)) : bet.stake;
+
             if (isRefund) {
-                // REFUND Condition: Return the stake to the user
+                // REFUND Condition: Return the liability to the user
                 const user = await User.findOneAndUpdate(
                     { username: bet.userId },
-                    { $inc: { walletBalance: bet.stake } },
+                    { $inc: { walletBalance: liability } },
                     { new: true }
                 );
 
@@ -41,56 +46,52 @@ const settleMatch = async (matchId, winningTeam, io) => {
                 bet.settledAt = new Date();
                 await bet.save();
 
-                console.log(`[BET REFUND] User: ${bet.userId} refunded ${bet.stake} for ${bet.matchName}.`);
+                console.log(`[BET REFUND] User: ${bet.userId} refunded ${liability} for ${bet.matchName}.`);
 
                 if (io && user) {
                     io.emit('wallet_updated', { userId: user.username, balance: user.walletBalance });
                     io.emit('bet_settled', {
                         betId: bet._id,
                         status: 'cancelled',
-                        message: `Match Void: ${bet.stake} refunded`,
+                        message: `Match Void: ${liability} refunded`,
                         matchName: bet.matchName
                     });
                 }
                 continue;
             }
 
-            const isBack = bet.type === 'back';
-            const runnerWon = bet.runner === winningTeam;
-            const isWin = isBack ? runnerWon : !runnerWon;
-
             if (isWin) {
-                // User Won: 
-                // grossWin = stake * odds
-                // platformFee = 5% of grossWin (deducted before distribution)
-                // netWin = grossWin - platformFee
-                const grossWin = bet.stake * bet.odds;
-                const commission = grossWin * 0.05;
-                const netWin = grossWin - commission;
+                // User Won:
+                // For BACK: profit = stake * (odds - 1). Return stake + netProfit (after 5% commission on net profit)
+                // For LAY: profit = stake. Return liability + netProfit (after 5% commission on net profit)
+                const profit = isBack ? Math.round(bet.stake * (bet.odds - 1)) : bet.stake;
+                const commission = Math.round(profit * 0.05);
+                const netProfit = profit - commission;
+                const netPayout = liability + netProfit;
                 
                 const user = await User.findOneAndUpdate(
                     { username: bet.userId },
-                    { $inc: { walletBalance: netWin } },
+                    { $inc: { walletBalance: netPayout } },
                     { new: true }
                 );
 
                 bet.status = 'won';
-                bet.payout = netWin;
+                bet.payout = netPayout;
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
 
-                // House Loss = (Net Win for user) - (Initial Stake already deducted)
-                const houseLoss = -(netWin - bet.stake);
+                // House Loss = (Net Payout for user) - (Initial Liability already deducted)
+                const houseLoss = -(netPayout - liability);
                 await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner });
 
-                console.log(`[BET WIN] User: ${bet.userId} won ${netWin.toFixed(2)} (Gross: ${grossWin}, Comm: ${commission.toFixed(2)})`);
+                console.log(`[BET WIN] User: ${bet.userId} won net profit ${netProfit} (Total Payout: ${netPayout}, Comm: ${commission})`);
 
                 if (io) {
                     io.emit('bet_settled', {
                         betId: bet._id,
                         status: 'won',
-                        payout: netWin,
+                        payout: netPayout,
                         matchName: bet.matchName
                     });
                     
@@ -99,17 +100,17 @@ const settleMatch = async (matchId, winningTeam, io) => {
                     }
                 }
             } else {
-                // User Lost: Stake is already deducted
+                // User Lost: Liability is already deducted
                 bet.status = 'lost';
                 bet.payout = 0;
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
 
-                // House Profit = Initial Stake
-                await distributeProfitLoss(bet.userId, bet.stake, { matchName: bet.matchName, selection: bet.runner });
+                // House Profit = Initial Liability
+                await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner });
 
-                console.log(`[BET LOSE] User: ${bet.userId} lost stake of ${bet.stake}`);
+                console.log(`[BET LOSE] User: ${bet.userId} lost liability of ${liability}`);
 
                 if (io) {
                     io.emit('bet_settled', {

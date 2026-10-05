@@ -4,6 +4,7 @@ const MarketOdds = require("../models/MarketOdds");
 const OddsMarket = require("../models/OddsMarket");
 const oddsApiRest = require("./oddsApiRest");
 const { shouldIncludeFixture } = require("./fixtureFilter");
+const fancyMarketsService = require("./fancyMarketsService");
 require("dotenv").config();
 
 // ─── Configuration ─────────────────────────────────────────────────────────────
@@ -630,6 +631,14 @@ class OddsApiLiveService {
 
     const normalizedOdds = storedBookies;
 
+    // Real-time pipeline: process Tied Match, Fancy 2, Figure, and Even-Odd markets
+    fancyMarketsService.processLiveMarkets({
+      matchId,
+      normalizedOdds,
+      io: this.io,
+      isLive: metadata?.isLive
+    });
+
     let bestHomePrice = 0;
     let bestAwayPrice = 0;
     let homeBack = 0,
@@ -915,6 +924,14 @@ class OddsApiLiveService {
             depthLay: "100",
           },
         ],
+      });
+
+      // Seamlessly trigger real-time Tied Match, Fancy 2, Figure, and Even-Odd markets update
+      fancyMarketsService.processLiveMarkets({
+        matchId,
+        normalizedOdds,
+        io: this.io,
+        isLive: metadata.isLive
       });
     }
 
