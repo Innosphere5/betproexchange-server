@@ -22,14 +22,27 @@ const settleMatch = async (matchId, winningTeam, io) => {
             return;
         }
 
-        const isRefund = winningTeam === 'REFUND' || winningTeam === 'VOID' || winningTeam === 'TIE';
+        const normWinning = String(winningTeam || '').trim().toLowerCase();
+        const isRefund = ['refund', 'void'].includes(normWinning) || (normWinning === 'tie' && !activeBets.some(b => b.marketType === 'tied_match'));
 
         for (const bet of activeBets) {
             // Idempotency check (extra safety)
             if (!['pending', 'MATCHED'].includes(bet.status)) continue;
 
             const isBack = bet.type === 'back';
-            const runnerWon = bet.runner === winningTeam;
+            const normRunner = String(bet.runner || '').trim().toLowerCase();
+
+            let runnerWon = false;
+            if (bet.marketType === 'tied_match') {
+                if (normWinning === 'tie') {
+                    runnerWon = normRunner.includes('yes');
+                } else {
+                    runnerWon = normRunner.includes('no');
+                }
+            } else {
+                runnerWon = (normRunner === normWinning);
+            }
+
             const isWin = isBack ? runnerWon : !runnerWon;
             const liability = (!isBack && bet.odds > 1) ? Math.round(bet.stake * (bet.odds - 1)) : bet.stake;
 

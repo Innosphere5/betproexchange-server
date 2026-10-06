@@ -101,10 +101,69 @@ async function getAncestorChain(user, userMap = null) {
   return chain;
 }
 
+/**
+ * Calculate the net share percentage for a viewer (master, supermaster, admin, superadmin)
+ * on a bettor's bets.
+ * 
+ * Hierarchy rules:
+ * - Master gets master.share%
+ * - SuperMaster gets max(0, supermaster.share - master.share)%
+ * - Admin gets max(0, admin.share - max(supermaster.share, master.share))%
+ * - SuperAdmin gets max(0, superadmin.share - highest downline share)%
+ * 
+ * @param {Object} viewer - The viewer user document (master, supermaster, admin, superadmin)
+ * @param {Object} bettor - The bettor user document
+ * @param {Object} [userMap] - Map of _id / username to user document
+ * @returns {number} Net share percentage (0-100)
+ */
+function getViewerNetShare(viewer, bettor, userMap = {}) {
+  if (!viewer || !bettor) return 0;
+  if (viewer.username === bettor.username) return 0;
+
+  // Build ancestor chain from bettor up to top superadmin
+  const chain = [];
+  let current = bettor;
+  while (current && current.parentId) {
+    const pid = current.parentId.toString();
+    const parent = userMap[pid] || userMap[current.parentId];
+    if (!parent) break;
+    chain.push(parent);
+    current = parent;
+  }
+
+  // Find where viewer is located in bettor's ancestor chain
+  const viewerIdx = chain.findIndex(u => 
+    (u.username && u.username === viewer.username) || 
+    (u._id && viewer._id && u._id.toString() === viewer._id.toString())
+  );
+
+  // If viewer is not an ancestor of this bettor, viewer has 0% share
+  if (viewerIdx === -1) return 0;
+
+  const isTopLevel = (viewerIdx === chain.length - 1);
+  const topSuperAdmin = chain[chain.length - 1];
+  const saShareTotal = (topSuperAdmin && topSuperAdmin.share !== undefined && topSuperAdmin.share !== null) 
+    ? topSuperAdmin.share 
+    : 85;
+
+  // Highest downline share among entities below viewer in the ancestor chain
+  const maxDownlineShare = viewerIdx > 0
+    ? chain.slice(0, viewerIdx).reduce((max, u) => Math.max(max, u.share || 0), 0)
+    : 0;
+
+  if (isTopLevel) {
+    return Math.max(0, saShareTotal - maxDownlineShare);
+  } else {
+    const viewerShare = viewer.share || 0;
+    return Math.max(0, viewerShare - maxDownlineShare);
+  }
+}
+
 module.exports = {
   findUserByKey,
   getAllDescendants,
   getAllDescendantUsernames,
   getAncestorChain,
+  getViewerNetShare,
   escapeRegex
 };

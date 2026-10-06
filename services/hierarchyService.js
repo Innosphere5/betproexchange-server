@@ -103,20 +103,17 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             // Direct Downline Name for the Final Sheet labeling
             const downlineName = isDirectParent ? username : chain[i - 1].username;
 
-            // Net share calculation for hierarchical chain:
-            // Master gets master.share
-            // SuperMaster gets max(0, supermaster.share - master.share)
-            // Admin gets max(0, admin.share - max(supermaster.share, master.share))
-            // SuperAdmin gets max(0, SUPERADMIN_TOTAL_PERCENT - highest downline share)
+            // Cumulative max downline share so far ensures intermediate 0% shares or gaps do not distort split
+            const maxDownlineShareSoFar = (i > 0) 
+                ? chain.slice(0, i).reduce((max, u) => Math.max(max, u.share || 0), 0) 
+                : 0;
+
             let sharePercent;
             if (isTopLevel) {
-                const maxDownlineShare = (i > 0) ? (chain[i - 1].share || 0) : 0;
-                sharePercent = SUPERADMIN_TOTAL_PERCENT - maxDownlineShare;
-                if (sharePercent < 0) sharePercent = 0;
+                sharePercent = Math.max(0, SUPERADMIN_TOTAL_PERCENT - maxDownlineShareSoFar);
             } else {
                 const userShare = user.share || 0;
-                const prevShare = (i > 0) ? (chain[i - 1].share || 0) : 0;
-                sharePercent = Math.max(0, userShare - prevShare);
+                sharePercent = Math.max(0, userShare - maxDownlineShareSoFar);
             }
 
             let earnings = (sharePercent / 100) * amount;
