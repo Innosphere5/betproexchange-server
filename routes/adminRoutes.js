@@ -1051,10 +1051,10 @@ router.get('/current-position', auth, isAuthorized, async (req, res) => {
             const isBetLost = (stUpper === 'LOSE' || stUpper === 'LOST');
 
             if (isResulted) {
-              // Settled outcome
+              // Settled outcome: Commission is deducted AFTER the result comes
               if (isThisRunner) {
                 if (isBetWon) {
-                  const userWin = (numericOdds - 1) * numericStake;
+                  const userWin = (betType === 'lay') ? numericStake : (numericOdds - 1) * numericStake;
                   const netWin = userWin * (1 - COMMISSION_RATE);
                   stats.exposure -= netWin * (netShare / 100);
                 } else if (isBetLost) {
@@ -1063,7 +1063,7 @@ router.get('/current-position', auth, isAuthorized, async (req, res) => {
                 }
               } else {
                 if (isBetWon) {
-                  const userWin = (numericOdds - 1) * numericStake;
+                  const userWin = (betType === 'lay') ? numericStake : (numericOdds - 1) * numericStake;
                   const netWin = userWin * (1 - COMMISSION_RATE);
                   stats.exposure -= netWin * (netShare / 100);
                 } else if (isBetLost) {
@@ -1072,26 +1072,26 @@ router.get('/current-position', auth, isAuthorized, async (req, res) => {
                 }
               }
             } else {
-              // Live / Projected outcome: IF runner 'r' WINS
+              // Live / Projected outcome: Bet is OPEN / not resulted yet
+              // Show FULL GROSS amount according to share amount, WITHOUT deducted commission:
               if (betType === 'back') {
                 if (isThisRunner) {
-                  // Bettor backed this runner -> Bettor WINS -> House/Parent LOSES
+                  // Bettor backed this runner -> Bettor WINS -> House/Parent LOSES full gross amount per share
                   const userWin = (numericOdds - 1) * numericStake;
-                  const netWin = userWin * (1 - COMMISSION_RATE);
-                  stats.exposure -= netWin * (netShare / 100);
+                  stats.exposure -= userWin * (netShare / 100);
                 } else {
-                  // Bettor backed other runner -> Bettor LOSES -> House/Parent WINS stake
+                  // Bettor backed other runner -> Bettor LOSES -> House/Parent WINS stake per share
                   stats.exposure += adminStake;
                 }
               } else {
                 // Lay bet
                 if (isThisRunner) {
-                  // Bettor laid this runner -> Bettor LOSES liability -> House/Parent WINS liability
+                  // Bettor laid this runner -> Bettor LOSES liability -> House/Parent WINS liability per share
                   const liability = numericOdds > 1 ? (numericOdds - 1) * numericStake : numericStake;
                   stats.exposure += liability * (netShare / 100);
                 } else {
-                  // Bettor laid other runner -> Bettor WINS stake -> House/Parent LOSES
-                  const userWin = numericStake * (1 - COMMISSION_RATE);
+                  // Bettor laid other runner -> Bettor WINS stake -> House/Parent LOSES full stake per share
+                  const userWin = numericStake;
                   stats.exposure -= userWin * (netShare / 100);
                 }
               }
@@ -1385,11 +1385,11 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
           const isBetLost = (stUpper === 'LOSE' || stUpper === 'LOST');
 
           if (isResulted) {
-            // Settled outcome
+            // Settled outcome: Commission is deducted AFTER the result comes
             if (isThisRunner) {
               if (isBetWon) {
                 // Bettor won: House loses net profit (odds-1)*stake * (1 - commission)
-                const userWin = (numericOdds - 1) * numericStake;
+                const userWin = (betType === 'lay') ? numericStake : (numericOdds - 1) * numericStake;
                 const netWin = userWin * (1 - COMMISSION_RATE);
                 viewerExposure -= netWin * (netShare / 100);
               } else if (isBetLost) {
@@ -1401,7 +1401,7 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
               // Bettor bet on other runner
               if (isBetWon) {
                 // Other runner bettor won: House loses
-                const userWin = (numericOdds - 1) * numericStake;
+                const userWin = (betType === 'lay') ? numericStake : (numericOdds - 1) * numericStake;
                 const netWin = userWin * (1 - COMMISSION_RATE);
                 viewerExposure -= netWin * (netShare / 100);
               } else if (isBetLost) {
@@ -1411,25 +1411,25 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
               }
             }
           } else {
-            // Live / Projected outcome: IF this runner 'r' WINS
+            // Live / Projected outcome: Bet is OPEN / not resulted yet
+            // Show FULL GROSS amount according to share amount, WITHOUT deducted commission:
             if (betType === 'back') {
               if (isThisRunner) {
-                // If this runner wins, bettor who backed it WINS -> House/Parent LOSES
+                // If this runner wins, bettor who backed it WINS -> House/Parent LOSES full gross amount per share
                 const userWin = (numericOdds - 1) * numericStake;
-                const netWin = userWin * (1 - COMMISSION_RATE);
-                viewerExposure -= netWin * (netShare / 100);
+                viewerExposure -= userWin * (netShare / 100);
               } else {
-                // If this runner wins, bettor who backed OTHER runner LOSES -> House/Parent WINS stake
+                // If this runner wins, bettor who backed OTHER runner LOSES -> House/Parent WINS stake per share
                 viewerExposure += adminStake;
               }
             } else { // Lay bet
               if (isThisRunner) {
-                // If this runner wins, bettor who LAID it LOSES liability -> House/Parent WINS liability
+                // If this runner wins, bettor who LAID it LOSES liability -> House/Parent WINS liability per share
                 const liability = numericOdds > 1 ? (numericOdds - 1) * numericStake : numericStake;
                 viewerExposure += liability * (netShare / 100);
               } else {
-                // If this runner wins, bettor who LAID other runner WINS -> House/Parent LOSES
-                const userWin = numericStake * (1 - COMMISSION_RATE);
+                // If this runner wins, bettor who LAID other runner WINS -> House/Parent LOSES full stake per share
+                const userWin = numericStake;
                 viewerExposure -= userWin * (netShare / 100);
               }
             }
@@ -2339,6 +2339,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
       });
     }
 
+    const isMatchResulted = ['completed', 'resulted'].includes(match.status?.toLowerCase()) || Boolean(match.winner);
     const COMMISSION_RATE = 0.05;
 
     // 4. Calculate Exposure for Requester
@@ -2359,10 +2360,11 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
 
             if (type === 'back') {
                 if (normalizedRunner === normalizedWinRunner) {
-                    // Bettor wins (Odds-1)*Stake. House loses it but gains 5% commission
+                    // Bettor wins (Odds-1)*Stake. House loses it.
+                    // Commission is deducted AFTER the bet result is declared
                     const userWin = (numOdds - 1) * (Number(stake) || 0);
-                    const commission = userWin * COMMISSION_RATE;
-                    adminProfit = -(userWin - commission) * (netShare / 100);
+                    const netWin = isMatchResulted ? userWin * (1 - COMMISSION_RATE) : userWin;
+                    adminProfit = -netWin * (netShare / 100);
                 } else {
                     // Bettor loses Stake, Admin wins it proportional to share
                     adminProfit = adminStake;
@@ -2372,10 +2374,11 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
                     // Bettor loses (Odds-1)*Stake (Liability). Admin wins it
                     adminProfit = (numOdds - 1) * adminStake;
                 } else {
-                    // Bettor wins Stake. Admin loses it but gains 5% commission
+                    // Bettor wins Stake. House loses it.
+                    // Commission is deducted AFTER the bet result is declared
                     const userWin = Number(stake) || 0;
-                    const commission = userWin * COMMISSION_RATE;
-                    adminProfit = -(userWin - commission) * (netShare / 100);
+                    const netWin = isMatchResulted ? userWin * (1 - COMMISSION_RATE) : userWin;
+                    adminProfit = -netWin * (netShare / 100);
                 }
             }
             exposure[winRunner] += adminProfit;

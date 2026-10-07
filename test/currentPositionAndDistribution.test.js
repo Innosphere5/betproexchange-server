@@ -83,41 +83,66 @@ test('Universal Hierarchy Share Split: Direct child of SuperAdmin with 100% shar
   assert.equal(saShare + bookShare, 100);
 });
 
-test('Current Position Loss / Profit Calculation on Cricket Odds with 5% Commission', () => {
+test('Current Position Live Bet Exposure (Full Gross Share Without Deducted Commission)', () => {
   // Scenario: Bettor bets Back 10,000 on Team A @ 2.0
   const stake = 10000;
   const odds = 2.0;
-  const COMMISSION_RATE = 0.05;
   const netShare = 20; // 20% parent share (e.g. SuperMaster)
 
-  // If Team A wins: Bettor wins gross 10,000. Commission is 500. Net bettor win is 9,500.
-  // House/Parent loses 9,500 * 20% = -1,900.
+  // During LIVE / OPEN bet (before result):
+  // Show full gross amount according to share, WITHOUT deducted commission:
+  // If Team A wins: Bettor gross win is (2.0 - 1) * 10,000 = 10,000.
+  // House/Parent loss is -10,000 * 20% = -2,000 (Full gross amount, NO commission deducted).
   const userGrossWin = (odds - 1) * stake;
-  const netUserWin = userGrossWin * (1 - COMMISSION_RATE);
-  const parentExposureTeamAWins = - (netUserWin * (netShare / 100));
-  assert.equal(parentExposureTeamAWins, -1900, 'Parent should show -1,900 loss if Team A wins');
+  const liveParentExposureTeamAWins = -(userGrossWin * (netShare / 100));
+  assert.equal(liveParentExposureTeamAWins, -2000, 'Live current position must show full gross amount of -2,000 without deducted commission');
 
   // If Team B wins (Team A loses): Bettor loses stake 10,000.
   // House/Parent wins 10,000 * 20% = +2,000.
-  const parentExposureTeamBWins = stake * (netShare / 100);
-  assert.equal(parentExposureTeamBWins, 2000, 'Parent should show +2,000 profit if Team B wins');
+  const liveParentExposureTeamBWins = stake * (netShare / 100);
+  assert.equal(liveParentExposureTeamBWins, 2000, 'Live current position must show +2,000 profit if Team B wins');
 });
 
-test('Current Position Lay Bet Exposure on Cricket Odds', () => {
+test('Current Position Settled Bet Outcome (Commission Deducted After Bet Result)', () => {
+  // Scenario: Bettor bet Back 10,000 on Team A @ 2.0. Result is declared (Team A won).
+  const stake = 10000;
+  const odds = 2.0;
+  const COMMISSION_RATE = 0.05; // 5% exchange commission
+  const netShare = 20; // 20% parent share
+
+  // AFTER RESULT IS DECLARED: Commission is deducted from winning amount:
+  // Gross win = 10,000. Commission = 500. Net bettor win = 9,500.
+  // House/Parent loss = -9,500 * 20% = -1,900.
+  const userGrossWin = (odds - 1) * stake;
+  const netUserWin = userGrossWin * (1 - COMMISSION_RATE);
+  const settledParentExposureTeamAWins = -(netUserWin * (netShare / 100));
+  assert.equal(settledParentExposureTeamAWins, -1900, 'Settled position must deduct 5% commission after result, showing -1,900 loss');
+});
+
+test('Current Position Lay Bet Exposure: Live Full Share vs Settled Outcome', () => {
   // Scenario: Bettor bets Lay 10,000 on Team A @ 2.5 (Liability = 15,000)
   const stake = 10000;
   const odds = 2.5;
   const liability = (odds - 1) * stake; // 15,000
+  const COMMISSION_RATE = 0.05;
   const netShare = 30; // 30% parent share
 
-  // If Team A wins: Bettor lost their lay bet! Bettor loses liability of 15,000.
+  // LIVE / BEFORE RESULT:
+  // If Team A wins: Bettor lost lay liability of 15,000.
   // House/Parent wins liability * share% = 15,000 * 0.30 = +4,500.
-  const parentExposureTeamAWins = liability * (netShare / 100);
-  assert.equal(parentExposureTeamAWins, 4500, 'Parent should show +4,500 profit if Team A wins (Lay bettor lost liability)');
+  const liveParentExposureTeamAWins = liability * (netShare / 100);
+  assert.equal(liveParentExposureTeamAWins, 4500, 'Parent shows +4,500 profit if Team A wins (Lay bettor lost liability)');
 
-  // If Team B wins: Bettor won lay bet! Bettor wins stake 10,000. Commission 500. Net 9,500.
-  // House/Parent loses 9,500 * 0.30 = -2,850.
-  const netWin = stake * (1 - 0.05);
-  const parentExposureTeamBWins = -(netWin * (netShare / 100));
-  assert.equal(parentExposureTeamBWins, -2850, 'Parent should show -2,850 loss if Team B wins (Lay bettor won)');
+  // If Team B wins (Lay bettor wins): Gross win is stake 10,000.
+  // LIVE position shows full gross share without commission: -10,000 * 30% = -3,000.
+  const liveParentExposureTeamBWins = -(stake * (netShare / 100));
+  assert.equal(liveParentExposureTeamBWins, -3000, 'Live position shows full gross amount of -3,000 without deducted commission');
+
+  // SETTLED / AFTER RESULT:
+  // Commission 500 is deducted from winning stake: Net win = 9,500.
+  // House/Parent loss is -9,500 * 30% = -2,850.
+  const netLayWin = stake * (1 - COMMISSION_RATE);
+  const settledParentExposureTeamBWins = -(netLayWin * (netShare / 100));
+  assert.equal(settledParentExposureTeamBWins, -2850, 'Settled position deducts 5% commission after result, showing -2,850 loss');
 });
+
