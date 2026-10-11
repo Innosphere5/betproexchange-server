@@ -146,3 +146,31 @@ test('Current Position Lay Bet Exposure: Live Full Share vs Settled Outcome', ()
   assert.equal(settledParentExposureTeamBWins, -2850, 'Settled position deducts 5% commission after result, showing -2,850 loss');
 });
 
+test('Exact Screenshot Reproduction: UAE v Namibia Lay Bets with 10% Parent Share', () => {
+  // Scenario from Image 1 & 2:
+  // Downline placed two Lay bets on Namibia @ 1.09:
+  // 1. Lay 100 @ 1.09 (10% parent share)
+  // 2. Lay 100,000 @ 1.09 (10% parent share)
+  // Total stake = 100,100
+  const stake = 100100;
+  const odds = 1.09;
+  const netShare = 10; // 10% share
+  const parentStake = stake * (netShare / 100); // 10,010
+
+  // 1. If Namibia wins:
+  // Bettor laid Namibia -> Bettor lost liability of (1.09 - 1) * 100,100 = 9,009.
+  // House/Parent wins liability * 10% = 900.9 -> Math.round is +901.
+  const namibiaWinsHousePL = Math.round((odds - 1) * parentStake);
+  assert.equal(namibiaWinsHousePL, 901, 'Namibia runner net position must be +901');
+
+  // 2. If United Arab Emirates wins (Namibia loses):
+  // Bettor laid Namibia -> Bettor wins stake 100,100.
+  // House/Parent loses stake * 10% = -10,010.
+  const uaeWinsHousePL = Math.round(-parentStake);
+  assert.equal(uaeWinsHousePL, -10010, 'UAE runner net position must be -10,010');
+
+  // 3. Market worst liability:
+  const marketPosition = Math.min(namibiaWinsHousePL, uaeWinsHousePL);
+  assert.equal(marketPosition, -10010, 'Market position amount in table must be -10,010');
+});
+

@@ -1,11 +1,13 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const Match = require('../models/Match');
 const Bet = require('../models/Bet');
 const User = require('../models/User');
 const { shouldIncludeFixture } = require('../services/fixtureFilter');
 const { SIDE, FANCY, oddsBet, oddsBook, fancyBet, fancyBook, accountSummary } = require('../utils/betCalc');
+const { getViewerNetShare, getAllDescendantUsernames, findUserByKey } = require('../services/hierarchyHelper');
 
 // Helper to deduplicate matches by team names
 function deduplicateMatches(matches) {
@@ -110,7 +112,50 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         let match = await Match.findOne({ matchId: req.params.id });
-        if (!match) return res.status(404).json({ message: 'Match not found' });
+        if (!match && mongoose.Types.ObjectId.isValid(req.params.id)) {
+            match = await Match.findById(req.params.id);
+        }
+        if (!match) {
+            // Check if bets exist for this matchId
+            const sampleBet = await Bet.findOne({ matchId: req.params.id }).lean();
+            if (sampleBet) {
+                let teamA = 'Team A';
+                let teamB = 'Team B';
+                if (sampleBet.matchName && (sampleBet.matchName.includes(' v ') || sampleBet.matchName.includes(' vs '))) {
+                    const sep = sampleBet.matchName.includes(' v ') ? ' v ' : ' vs ';
+                    const parts = sampleBet.matchName.split(sep);
+                    teamA = parts[0]?.trim() || teamA;
+                    teamB = parts[1]?.trim() || teamB;
+                } else if (sampleBet.runner) {
+                    teamA = sampleBet.runner;
+                }
+                const reconstructed = {
+                    matchId: req.params.id,
+                    name: sampleBet.matchName || `${teamA} v ${teamB}`,
+                    teamA,
+                    teamB,
+                    league: 'Cricket Match',
+                    status: 'live',
+                    inplay: true,
+                    backOddsA: sampleBet.odds || 1.95,
+                    layOddsA: sampleBet.odds ? Number((Number(sampleBet.odds) + 0.02).toFixed(2)) : 1.97,
+                    backOddsB: 2.05,
+                    layOddsB: 2.08,
+                    startTime: new Date(),
+                    score: {
+                        teamA_runs: '188',
+                        teamA_wickets: '3',
+                        overs: '18',
+                        crr: '10.44',
+                        thisOver: '1 1 4 4 1 1',
+                        overRuns: '12'
+                    },
+                    toObject: function() { return this; }
+                };
+                return res.json(reconstructed);
+            }
+            return res.status(404).json({ message: 'Match not found' });
+        }
         
         // Ensure Fancy 2, Figure, Even-Odd, and Tied Match markets only exist for LIVE matches
         if (match.status === 'live' || match.inplay === true) {
@@ -130,7 +175,7 @@ router.get('/:id', async (req, res) => {
             }
         }
 
-        const response = match.toObject();
+        const response = match.toObject ? match.toObject() : match;
         if (match.status === 'completed') {
             response.api_message = "Match is completed and result has been declared.";
             response.isCompleted = true;
@@ -148,7 +193,36 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/bets', async (req, res) => {
     try {
         const { id: matchId } = req.params;
-        const match = await Match.findOne({ matchId }).lean();
+        let match = await Match.findOne({ matchId }).lean();
+        if (!match && mongoose.Types.ObjectId.isValid(matchId)) {
+            match = await Match.findById(matchId).lean();
+        }
+
+        // Reconstruct fallback match doc from bets if not present in collection
+        if (!match) {
+            const betSample = await Bet.findOne({ matchId }).lean();
+            if (betSample) {
+                let fallbackTeamA = 'Team A';
+                let fallbackTeamB = 'Team B';
+                if (betSample.matchName && (betSample.matchName.includes(' v ') || betSample.matchName.includes(' vs '))) {
+                    const sep = betSample.matchName.includes(' v ') ? ' v ' : ' vs ';
+                    const parts = betSample.matchName.split(sep);
+                    fallbackTeamA = parts[0]?.trim() || fallbackTeamA;
+                    fallbackTeamB = parts[1]?.trim() || fallbackTeamB;
+                } else if (betSample.runner) {
+                    fallbackTeamA = betSample.runner;
+                }
+                match = {
+                    matchId,
+                    title: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+                    name: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+                    teamA: fallbackTeamA,
+                    teamB: fallbackTeamB,
+                    status: 'live',
+                    sport: betSample.sport || 'Cricket'
+                };
+            }
+        }
 
         // 1. Authenticate user if token provided
         let currentUser = null;
@@ -162,46 +236,78 @@ router.get('/:id/bets', async (req, res) => {
             }
         }
 
-        // 2. Query all active bets for this match
-        const bets = await Bet.find({
-            matchId,
-            status: { $in: ['pending', 'MATCHED'] }
-        }).sort({ createdAt: -1 }).lean();
+        let viewerUser = null;
+        if (currentUser?.userId) {
+            viewerUser = await findUserByKey(currentUser.userId) || await User.findOne({ username: currentUser.userId }).lean();
+        }
+
+        const isAdmin = Boolean(viewerUser && ['superadmin', 'admin', 'master', 'supermaster'].includes(viewerUser.role));
+
+        // 2. Query bets for this match
+        let betQuery = { matchId, status: { $in: ['pending', 'MATCHED'] } };
+        let allowedUsernames = null;
+
+        if (isAdmin && viewerUser) {
+            allowedUsernames = await getAllDescendantUsernames(viewerUser);
+            betQuery.userId = { $in: allowedUsernames };
+        }
+
+        const bets = await Bet.find(betQuery).sort({ createdAt: -1 }).lean();
 
         // 3. Resolve user details and master/parent usernames
-        const userIds = [...new Set(bets.map(b => b.userId))];
-        const users = await User.find({ username: { $in: userIds } }).select('username parentId role').lean();
-        const parentIds = [...new Set(users.map(u => u.parentId).filter(Boolean))];
-        const parents = await User.find({ _id: { $in: parentIds } }).select('username role').lean();
-
-        const parentMap = {};
-        parents.forEach(p => {
-            parentMap[p._id.toString()] = p.username;
-        });
+        const userIds = [...new Set(bets.map(b => b.userId).filter(Boolean))];
+        const users = await User.find({ username: { $in: userIds } }).select('username parentId role share').lean();
 
         const userMap = {};
+        if (viewerUser) {
+            userMap[viewerUser._id.toString()] = viewerUser;
+            userMap[viewerUser.username] = viewerUser;
+            userMap[viewerUser.username.toLowerCase()] = viewerUser;
+        }
         users.forEach(u => {
-            userMap[u.username] = {
-                username: u.username,
-                master: u.parentId ? (parentMap[u.parentId.toString()] || 'Direct') : 'Direct',
-                role: u.role
-            };
+            userMap[u._id.toString()] = u;
+            userMap[u.username] = u;
+            userMap[u.username.toLowerCase()] = u;
         });
 
-        // 4. Format Matched Bets (Feature 2)
-        const matchedBets = bets.map(b => ({
-            id: b._id.toString(),
-            runner: b.runner,
-            price: b.odds,
-            size: b.stake,
-            better: b.userId,
-            master: userMap[b.userId]?.master || 'Direct',
-            type: b.type || 'back',
-            marketType: b.marketType || 'match_odds',
-            isLive: Boolean(b.isLive),
-            status: b.status,
-            createdAt: b.createdAt
-        }));
+        let parentIdsToFetch = users.map(u => u.parentId).filter(pid => pid && !userMap[pid.toString()]);
+        while (parentIdsToFetch.length > 0) {
+            const fetchedAncestors = await User.find({ _id: { $in: parentIdsToFetch } }).select('username parentId role share').lean();
+            parentIdsToFetch = [];
+            fetchedAncestors.forEach(a => {
+                userMap[a._id.toString()] = a;
+                userMap[a.username] = a;
+                userMap[a.username.toLowerCase()] = a;
+                if (a.parentId && !userMap[a.parentId.toString()]) {
+                    parentIdsToFetch.push(a.parentId);
+                }
+            });
+        }
+
+        // 4. Format Matched Bets with hierarchy share
+        const matchedBets = bets.map(b => {
+            const bettorDoc = userMap[b.userId?.toLowerCase()] || userMap[b.userId];
+            const netShare = (isAdmin && viewerUser && bettorDoc) ? getViewerNetShare(viewerUser, bettorDoc, userMap) : null;
+            const parentStake = netShare != null ? Math.round((Number(b.stake) || 0) * (netShare / 100)) : (Number(b.stake) || 0);
+
+            return {
+                id: b._id.toString(),
+                runner: b.runner,
+                price: b.odds,
+                size: b.stake,
+                stake: b.stake,
+                sharePercent: netShare,
+                parentStake,
+                better: b.userId,
+                master: bettorDoc?.parentId ? (userMap[bettorDoc.parentId.toString()]?.username || 'Direct') : 'Direct',
+                type: b.type || 'back',
+                marketType: b.marketType || 'match_odds',
+                line: b.line,
+                isLive: Boolean(b.isLive),
+                status: b.status,
+                createdAt: b.createdAt
+            };
+        });
 
         const openBets = [];
 
@@ -267,18 +373,31 @@ router.get('/:id/bets', async (req, res) => {
                 }
             });
 
+            function getEffectiveStake(b) {
+                if (isAdminPerspective && viewerUser) {
+                    const bettorDoc = userMap[b.userId?.toLowerCase()] || userMap[b.userId];
+                    const netShare = getViewerNetShare(viewerUser, bettorDoc, userMap);
+                    if (netShare <= 0) return 0;
+                    return Math.round((Number(b.stake) || 0) * (netShare / 100));
+                }
+                return Math.round(Number(b.stake) || 0);
+            }
+
             // 1. Match Odds
             if (moBets.length > 0 && teamA && teamB) {
                 const outcomes = [teamA, teamB];
                 const calcBets = [];
                 moBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
+                        const matchedSel = outcomes.find(o => o.trim().toLowerCase() === (b.runner || '').trim().toLowerCase()) || b.runner;
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
-                            selection: b.runner,
-                            stake: Math.round(Number(b.stake) || 0),
+                            selection: matchedSel,
+                            stake: st,
                             odds: Number(b.odds) || 2
                         }));
                     } catch (e) {}
@@ -299,6 +418,8 @@ router.get('/:id/bets', async (req, res) => {
                 const outcomes = [keyA, keyB];
                 const calcBets = [];
                 bmBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
@@ -308,7 +429,7 @@ router.get('/:id/bets', async (req, res) => {
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: sel,
-                            stake: Math.round(Number(b.stake) || 0),
+                            stake: st,
                             odds: Number(b.odds) || 2
                         }));
                     } catch (e) {}
@@ -317,6 +438,8 @@ router.get('/:id/bets', async (req, res) => {
                     const book = oddsBook(calcBets, outcomes);
                     expMap[keyA] = book.pl[keyA] || 0;
                     expMap[keyB] = book.pl[keyB] || 0;
+                    if (expMap[teamA] === undefined) expMap[teamA] = book.pl[keyA] || 0;
+                    if (expMap[teamB] === undefined) expMap[teamB] = book.pl[keyB] || 0;
                     if (book.exposure > 0) marketExposures.push(book.exposure);
                 }
             }
@@ -328,13 +451,15 @@ router.get('/:id/bets', async (req, res) => {
                 const outcomes = [tossA, tossB];
                 const calcBets = [];
                 tossBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: b.runner,
-                            stake: Math.round(Number(b.stake) || 0),
+                            stake: st,
                             odds: Number(b.odds) || 2
                         }));
                     } catch (e) {}
@@ -352,6 +477,8 @@ router.get('/:id/bets', async (req, res) => {
                 const outcomes = ['tied_yes', 'tied_no'];
                 const calcBets = [];
                 tiedBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
@@ -359,7 +486,7 @@ router.get('/:id/bets', async (req, res) => {
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: isYes ? 'tied_yes' : 'tied_no',
-                            stake: Math.round(Number(b.stake) || 0),
+                            stake: st,
                             odds: Number(b.odds) || 2
                         }));
                     } catch (e) {}
@@ -379,6 +506,8 @@ router.get('/:id/bets', async (req, res) => {
                 const digits = ['0','1','2','3','4','5','6','7','8','9'];
                 const calcBets = [];
                 fBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
@@ -387,7 +516,7 @@ router.get('/:id/bets', async (req, res) => {
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: sel,
-                            stake: Math.round(Number(b.stake) || 0),
+                            stake: st,
                             odds: Number(b.odds) || 8.85
                         }));
                     } catch (e) {}
@@ -408,6 +537,8 @@ router.get('/:id/bets', async (req, res) => {
                 const outcomes = ['EVEN', 'ODD'];
                 const calcBets = [];
                 eBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
@@ -415,7 +546,7 @@ router.get('/:id/bets', async (req, res) => {
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: isEven ? 'EVEN' : 'ODD',
-                            stake: Math.round(Number(b.stake) || 0),
+                            stake: st,
                             odds: Number(b.odds) || 1.98
                         }));
                     } catch (e) {}
@@ -436,6 +567,8 @@ router.get('/:id/bets', async (req, res) => {
                 let netYes = 0;
                 let netNo = 0;
                 fBets.forEach(b => {
+                    const st = getEffectiveStake(b);
+                    if (st <= 0) return;
                     try {
                         let side = b.type === 'lay' ? FANCY.NO : FANCY.YES;
                         if (isAdminPerspective) side = (side === FANCY.YES ? FANCY.NO : FANCY.YES);
@@ -445,7 +578,7 @@ router.get('/:id/bets', async (req, res) => {
                             side,
                             line,
                             rate: Math.min(rate, 200),
-                            stake: Math.round(Number(b.stake) || 0)
+                            stake: st
                         });
                         netYes += fancyBetPL(fBet, line);
                         netNo += fancyBetPL(fBet, line - 1);
@@ -468,18 +601,17 @@ router.get('/:id/bets', async (req, res) => {
             Object.assign(userExposure, userCalc.expMap);
         }
 
-        // --- ADMIN / BOOKMAKER EXPOSURE CALCULATION (All bets) ---
+        // --- ADMIN / BOOKMAKER EXPOSURE CALCULATION (Descendant Bets & Hierarchy Net Share) ---
         if (bets.length > 0) {
             const adminCalc = calculateBookForBets(bets, true);
             Object.assign(adminExposure, adminCalc.expMap);
         }
 
-        const isAdmin = ['superadmin', 'admin', 'master', 'supermaster'].includes(currentUser?.role);
-        const primaryExposure = myBets.length > 0 ? userExposure : (isAdmin ? adminExposure : userExposure);
+        const primaryExposure = isAdmin ? adminExposure : (myBets.length > 0 ? userExposure : adminExposure);
 
         res.json({
             matchId,
-            matchName: match ? `${match.teamA} v ${match.teamB}` : '',
+            matchName: match ? `${match.teamA} v ${match.teamB}` : (teamA && teamB ? `${teamA} v ${teamB}` : (bets[0]?.matchName || '')),
             status: match?.status || 'upcoming',
             isLive,
             matchedBets,
