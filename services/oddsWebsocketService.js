@@ -158,13 +158,23 @@ class OddsWebsocketService {
 
         const home = fixture.participants?.participant1Name || fixture.home_team || fixture.home;
         const away = fixture.participants?.participant2Name || fixture.away_team || fixture.away;
+        const reissuedId = fixture.reissuedFixtureId || null;
         
         this.eventMetadata.set(eventId, {
             eventId: eventId,
             home: home,
             away: away,
-            isLive: fixture.status?.live || fixture.status === 'live'
+            isLive: fixture.status?.live || fixture.status === 'live',
+            reissuedFixtureId: reissuedId
         });
+
+        if (reissuedId) {
+            const dbMatchId = this.eventMapping.get(eventId);
+            if (dbMatchId) {
+                this.eventMapping.set(reissuedId, dbMatchId);
+                console.log(`[OddsWS] 🔁 Fixture ${eventId} reissued -> ${reissuedId}. Linked to match ${dbMatchId}`);
+            }
+        }
     }
 
     async processOddsEvent(event) {

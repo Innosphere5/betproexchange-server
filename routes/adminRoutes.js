@@ -1526,7 +1526,7 @@ router.get('/final-sheet', auth, isAuthorized, async (req, res) => {
     const currentUser = await findUserByKey(req.user.userId);
     if (!currentUser) return res.status(404).json({ error: 'User not found' });
 
-    const PLATFORM_FEE_RATE = 0.02; // 2% platform commission
+    const PLATFORM_FEE_RATE = 0.015; // 1.5% platform fee
 
     // 1. Fetch all betting-related share & cash transactions for the current user (Credit limit ops excluded)
     const types = ['COMMISSION_SHARE', 'PLATFORM_COMMISSION', 'BOOK_SHARE', 'SETTLEMENT', 'CASH_DEPOSIT', 'CASH_WITHDRAWAL', 'LOAD_BALANCE', 'WITHDRAW'];
@@ -2279,14 +2279,42 @@ router.post('/reset-system', auth, async (req, res) => {
 // Get Match Exposure (Runners P/L and Matched Bets)
 router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
   try {
-    const { matchId } = req.params;
+    const { matchId: rawMatchId } = req.params;
+    const altMatchId = String(rawMatchId).startsWith('id') ? String(rawMatchId).replace(/^id/, '') : ('id' + String(rawMatchId));
+    const matchIdList = [rawMatchId, altMatchId];
     
     // 1. Get Match Details
-    const match = await Match.findOne({ matchId });
+    let match = await Match.findOne({ matchId: { $in: matchIdList } }).lean();
+    if (!match && mongoose.Types.ObjectId.isValid(rawMatchId)) {
+      match = await Match.findById(rawMatchId).lean();
+    }
+    if (!match) {
+      const betSample = await Bet.findOne({ matchId: { $in: matchIdList } }).lean();
+      if (betSample) {
+        let fallbackTeamA = 'Team A';
+        let fallbackTeamB = 'Team B';
+        if (betSample.matchName && (betSample.matchName.includes(' v ') || betSample.matchName.includes(' vs '))) {
+          const sep = betSample.matchName.includes(' v ') ? ' v ' : ' vs ';
+          const parts = betSample.matchName.split(sep);
+          fallbackTeamA = parts[0]?.trim() || fallbackTeamA;
+          fallbackTeamB = parts[1]?.trim() || fallbackTeamB;
+        } else if (betSample.runner) {
+          fallbackTeamA = betSample.runner;
+        }
+        match = {
+          matchId: rawMatchId,
+          title: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          name: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          teamA: fallbackTeamA,
+          teamB: fallbackTeamB,
+          league: 'Cricket'
+        };
+      }
+    }
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
     const runners = [match.teamA, match.teamB];
-    if (match.league.toLowerCase().includes('test') || match.league.toLowerCase().includes('first class')) {
+    if (match.league && (match.league.toLowerCase().includes('test') || match.league.toLowerCase().includes('first class'))) {
         // runners.push('Draw'); // Optional: Add Draw if applicable
     }
 
@@ -2295,7 +2323,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
     const allowedUsernames = await getAllDescendantUsernames(parent);
-    let betQuery = { matchId, status: { $in: ['MATCHED', 'pending'] }, userId: { $in: allowedUsernames } };
+    let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['MATCHED', 'pending', 'unmatched'] }, userId: { $in: allowedUsernames } };
 
     // 3. Get all MATCHED bets for this match
     const bets = await Bet.find(betQuery).lean();
@@ -2344,15 +2372,24 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
 
     // 4. Calculate Exposure for Requester
     const exposure = {};
-    runners.forEach(r => exposure[r] = 0);
+    runners.forEach(r => {
+        exposure[r] = 0;
+        exposure[`${r}_bm`] = 0;
+    });
 
     bets.forEach(b => {
-        const { runner, odds, stake, type, userId } = b;
+        const { runner, odds, stake, type, userId, marketType } = b;
         const bettorDoc = userMap[userId];
         const netShare = getViewerNetShare(requester, bettorDoc, userMap);
         const adminStake = (Number(stake) || 0) * (netShare / 100);
         const numOdds = Number(odds) || 1.95;
-        
+        const isBm = (marketType === 'bookmaker');
+
+        // Only calculate exposure for match_odds or bookmaker here
+        if (marketType && marketType !== 'match_odds' && marketType !== 'bookmaker') {
+            return;
+        }
+
         runners.forEach(winRunner => {
             let adminProfit = 0;
             const normalizedRunner = runner?.trim().toLowerCase();
@@ -2381,17 +2418,24 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
                     adminProfit = -netWin * (netShare / 100);
                 }
             }
-            exposure[winRunner] += adminProfit;
+            if (isBm) {
+                exposure[`${winRunner}_bm`] += adminProfit;
+            } else {
+                exposure[winRunner] += adminProfit;
+            }
         });
     });
 
-    // 5. Format Matched Bets for UI
-    const matchedBets = bets.map(b => {
+    // 5. Format Matched & Open Bets for UI
+    const matchedBets = [];
+    const openBets = [];
+
+    bets.forEach(b => {
         const bettorDoc = userMap[b.userId];
         const netShare = getViewerNetShare(requester, bettorDoc, userMap);
         const parentStake = (Number(b.stake) || 0) * (netShare / 100);
 
-        return {
+        const item = {
             id: b._id,
             runner: b.runner,
             price: b.odds,
@@ -2402,14 +2446,23 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
             master: userMap[b.userId]?.parentName || 'Direct',
             type: b.type,
             matchId: b.matchId,
-            matchName: b.matchName
+            matchName: b.matchName,
+            marketType: b.marketType || 'match_odds',
+            createdAt: b.createdAt
         };
+
+        if (['pending', 'unmatched'].includes(String(b.status).toLowerCase())) {
+            openBets.push(item);
+        } else {
+            matchedBets.push(item);
+        }
     });
 
     res.json({
         matchName: `${match.teamA} v ${match.teamB}`,
         exposure,
-        matchedBets
+        matchedBets,
+        openBets
     });
 
   } catch (err) {
@@ -2785,7 +2838,37 @@ router.post('/declare-match-winner', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Missing matchId or winningTeam' });
     }
 
-    const match = await Match.findOne({ matchId });
+    const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+    const matchIdList = [matchId, altMatchId];
+
+    let match = await Match.findOne({ matchId: { $in: matchIdList } });
+    if (!match && mongoose.Types.ObjectId.isValid(matchId)) {
+      match = await Match.findById(matchId);
+    }
+    if (!match) {
+      const betSample = await Bet.findOne({ matchId: { $in: matchIdList } });
+      if (betSample) {
+        let fallbackTeamA = 'Team A';
+        let fallbackTeamB = 'Team B';
+        if (betSample.matchName && (betSample.matchName.includes(' v ') || betSample.matchName.includes(' vs '))) {
+          const sep = betSample.matchName.includes(' v ') ? ' v ' : ' vs ';
+          const parts = betSample.matchName.split(sep);
+          fallbackTeamA = parts[0]?.trim() || fallbackTeamA;
+          fallbackTeamB = parts[1]?.trim() || fallbackTeamB;
+        } else if (betSample.runner) {
+          fallbackTeamA = betSample.runner;
+        }
+        match = new Match({
+          matchId,
+          title: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          name: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          teamA: fallbackTeamA,
+          teamB: fallbackTeamB,
+          status: 'live',
+          sport: 'Cricket'
+        });
+      }
+    }
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
     const normDeclared = winningTeam.trim();
@@ -2825,7 +2908,37 @@ router.post('/settle-match', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Missing matchId or winner' });
     }
 
-    const match = await Match.findOne({ matchId });
+    const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+    const matchIdList = [matchId, altMatchId];
+
+    let match = await Match.findOne({ matchId: { $in: matchIdList } });
+    if (!match && mongoose.Types.ObjectId.isValid(matchId)) {
+      match = await Match.findById(matchId);
+    }
+    if (!match) {
+      const betSample = await Bet.findOne({ matchId: { $in: matchIdList } });
+      if (betSample) {
+        let fallbackTeamA = 'Team A';
+        let fallbackTeamB = 'Team B';
+        if (betSample.matchName && (betSample.matchName.includes(' v ') || betSample.matchName.includes(' vs '))) {
+          const sep = betSample.matchName.includes(' v ') ? ' v ' : ' vs ';
+          const parts = betSample.matchName.split(sep);
+          fallbackTeamA = parts[0]?.trim() || fallbackTeamA;
+          fallbackTeamB = parts[1]?.trim() || fallbackTeamB;
+        } else if (betSample.runner) {
+          fallbackTeamA = betSample.runner;
+        }
+        match = new Match({
+          matchId,
+          title: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          name: betSample.matchName || `${fallbackTeamA} v ${fallbackTeamB}`,
+          teamA: fallbackTeamA,
+          teamB: fallbackTeamB,
+          status: 'live',
+          sport: 'Cricket'
+        });
+      }
+    }
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
     match.status = 'completed';

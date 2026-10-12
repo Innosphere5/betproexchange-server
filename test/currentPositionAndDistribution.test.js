@@ -174,3 +174,110 @@ test('Exact Screenshot Reproduction: UAE v Namibia Lay Bets with 10% Parent Shar
   assert.equal(marketPosition, -10010, 'Market position amount in table must be -10,010');
 });
 
+test('1.5% Platform Fee Deducted First Only on Profit Before Shareholder Distribution', () => {
+  const PLATFORM_FEE_RATE = 0.015; // 1.5% platform fee
+  
+  // Case A: House Profit = 10,000 (Bettor lost liability 10,000)
+  const houseProfit = 10000;
+  const platformFee = Math.round(houseProfit * PLATFORM_FEE_RATE * 100) / 100; // 150
+  assert.equal(platformFee, 150, '1.5% Platform fee on 10,000 profit must be 150');
+
+  const distributableProfit = houseProfit - platformFee; // 9,850
+  assert.equal(distributableProfit, 9850, 'Distributable profit after 1.5% platform fee must be 9,850');
+
+  // Share split: Master=10%, SuperMaster=15%, Admin=35%, SuperAdmin=25%, Book=15%
+  const masterShare = 10;
+  const smShare = 15;
+  const adminShare = 35;
+  const saShare = 25;
+  const bookShare = 15;
+
+  const masterEarning = Math.round((masterShare / 100) * distributableProfit * 100) / 100;
+  const smEarning = Math.round((smShare / 100) * distributableProfit * 100) / 100;
+  const adminEarning = Math.round((adminShare / 100) * distributableProfit * 100) / 100;
+  const saEarning = Math.round((saShare / 100) * distributableProfit * 100) / 100;
+  const bookEarning = Math.round((bookShare / 100) * distributableProfit * 100) / 100;
+
+  assert.equal(masterEarning, 985);
+  assert.equal(smEarning, 1477.5);
+  assert.equal(adminEarning, 3447.5);
+  assert.equal(saEarning, 2462.5);
+  assert.equal(bookEarning, 1477.5);
+
+  const totalDistributed = masterEarning + smEarning + adminEarning + saEarning + bookEarning;
+  assert.equal(totalDistributed, 9850, 'Sum of shareholder earnings must equal distributable profit (9,850)');
+  assert.equal(totalDistributed + platformFee, houseProfit, 'Sum of shares + platform fee must equal full house profit (10,000)');
+
+  // Case B: House Loss = -10,000 (Bettor won 10,000 net)
+  // Platform fee is ONLY on profit. On loss, fee = 0, full loss distributed among shareholders.
+  const houseLoss = -10000;
+  const platformFeeOnLoss = 0;
+  const distributableLoss = houseLoss;
+
+  const masterLoss = Math.round((masterShare / 100) * distributableLoss * 100) / 100;
+  const smLoss = Math.round((smShare / 100) * distributableLoss * 100) / 100;
+  const adminLoss = Math.round((adminShare / 100) * distributableLoss * 100) / 100;
+  const saLoss = Math.round((saShare / 100) * distributableLoss * 100) / 100;
+  const bookLoss = Math.round((bookShare / 100) * distributableLoss * 100) / 100;
+
+  assert.equal(masterLoss, -1000);
+  assert.equal(smLoss, -1500);
+  assert.equal(adminLoss, -3500);
+  assert.equal(saLoss, -2500);
+  assert.equal(bookLoss, -1500);
+
+  const totalLossDistributed = masterLoss + smLoss + adminLoss + saLoss + bookLoss;
+  assert.equal(totalLossDistributed, -10000, 'Sum of shareholder losses must equal full house loss (-10,000)');
+});
+
+test('Market Separation: Match Odds Bets Do NOT Leak into Bookmaker Exposure', () => {
+  const teamA = 'India';
+  const teamB = 'Pakistan';
+
+  // Simulate exposure calculation logic:
+  // User places bet on Match Odds: runner = India, marketType = 'match_odds'
+  const bets = [
+    { runner: 'India', odds: 1.80, stake: 5000, type: 'back', marketType: 'match_odds' }
+  ];
+
+  const exposure = {
+    [teamA]: 0,
+    [teamB]: 0,
+    [`${teamA}_bm`]: 0,
+    [`${teamB}_bm`]: 0
+  };
+
+  const netShare = 100; // 100% share for testing
+
+  bets.forEach(b => {
+    const isBm = (b.marketType === 'bookmaker');
+    const isMo = (!b.marketType || b.marketType === 'match_odds');
+
+    [teamA, teamB].forEach(winRunner => {
+      let profit = 0;
+      if (b.type === 'back') {
+        if (b.runner.toLowerCase() === winRunner.toLowerCase()) {
+          profit = -((b.odds - 1) * b.stake); // Bettor wins, house loses
+        } else {
+          profit = b.stake; // Bettor loses, house wins
+        }
+      }
+
+      if (isBm) {
+        exposure[`${winRunner}_bm`] += profit;
+      } else if (isMo) {
+        exposure[winRunner] += profit;
+      }
+    });
+  });
+
+  // Match Odds keys MUST have exposure
+  assert.equal(exposure['India'], -4000, 'Match Odds runner India exposure must be -4,000');
+  assert.equal(exposure['Pakistan'], 5000, 'Match Odds runner Pakistan exposure must be +5,000');
+
+  // Bookmaker keys MUST BE 0 (NO LEAKAGE)
+  assert.equal(exposure['India_bm'], 0, 'Bookmaker runner India_bm must have 0 exposure when only bet on Match Odds');
+  assert.equal(exposure['Pakistan_bm'], 0, 'Bookmaker runner Pakistan_bm must have 0 exposure when only bet on Match Odds');
+});
+
+

@@ -2,6 +2,8 @@ const mongoose = require('mongoose');
 
 const matchSchema = new mongoose.Schema({
   matchId: { type: String, required: true, unique: true, index: true },
+  oddsApiEventId: { type: String, default: null, index: true },
+  reissuedFixtureId: { type: String, default: null },
   tournamentId: { type: Number, index: true }, // oddspapi tournament ID
   teamA: { type: String, required: true },
   teamB: { type: String, required: true },

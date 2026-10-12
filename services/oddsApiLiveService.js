@@ -396,6 +396,7 @@ class OddsApiLiveService {
       fixture.status?.live ||
       fixture.status === "live" ||
       (existing.isLive ?? false);
+    const reissuedId = fixture.reissuedFixtureId || null;
 
     this.eventMetadata.set(eventId, {
       eventId: eventId,
@@ -404,7 +405,29 @@ class OddsApiLiveService {
       sport: sport,
       commenceTime: commenceTime,
       isLive: isLive,
+      statusId: fixture.status?.statusId ?? fixture.statusId ?? null,
+      reissuedFixtureId: reissuedId,
     });
+
+    if (reissuedId) {
+      const matchId = this.eventToMatchId.get(eventId);
+      if (matchId) {
+        console.log(`[OddsApiLive] 🔁 Fixture ${eventId} reissued to ${reissuedId}. Linking match ${matchId}...`);
+        this.eventToMatchId.set(reissuedId, matchId);
+        if (this.deletedGraceTimers && this.deletedGraceTimers.has(eventId)) {
+          clearTimeout(this.deletedGraceTimers.get(eventId));
+          this.deletedGraceTimers.delete(eventId);
+        }
+        Match.findOneAndUpdate(
+          { matchId },
+          { oddsApiEventId: reissuedId, reissuedFixtureId: reissuedId, lastUpdated: new Date() }
+        ).catch(() => {});
+        MarketOdds.findOneAndUpdate(
+          { matchId },
+          { oddsApiEventId: reissuedId, updatedAt: new Date() }
+        ).catch(() => {});
+      }
+    }
   }
 
   async linkEventToMatch(eventId) {
@@ -996,6 +1019,25 @@ class OddsApiLiveService {
     const metadata = this.eventMetadata.get(eventId);
     if (metadata) {
       metadata.isLive = msg.status === "live";
+      if (msg.statusId != null) metadata.statusId = msg.statusId;
+      if (msg.reissuedFixtureId) metadata.reissuedFixtureId = msg.reissuedFixtureId;
+    }
+
+    if (msg.reissuedFixtureId) {
+      console.log(`[OddsApiLive] 🔁 Status update: Event ${eventId} reissued to ${msg.reissuedFixtureId}. Mapping to match ${matchId}`);
+      this.eventToMatchId.set(msg.reissuedFixtureId, matchId);
+      if (this.deletedGraceTimers && this.deletedGraceTimers.has(eventId)) {
+        clearTimeout(this.deletedGraceTimers.get(eventId));
+        this.deletedGraceTimers.delete(eventId);
+      }
+      Match.findOneAndUpdate(
+        { matchId },
+        { oddsApiEventId: msg.reissuedFixtureId, reissuedFixtureId: msg.reissuedFixtureId, lastUpdated: new Date() }
+      ).catch(() => {});
+      MarketOdds.findOneAndUpdate(
+        { matchId },
+        { oddsApiEventId: msg.reissuedFixtureId, updatedAt: new Date() }
+      ).catch(() => {});
     }
   }
 

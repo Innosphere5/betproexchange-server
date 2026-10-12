@@ -12,6 +12,7 @@ const CACHE_TTL_MS = {
   fixtures:   120 * 1000,     // 2 minutes — fixture list
   livescores:  10 * 1000,     // 10 seconds — live scores
   tournaments: 3600 * 1000,   // 1 hour — tournament list
+  markets:     24 * 3600 * 1000, // 24 hours — markets metadata
 };
 
 // ─── Circuit Breaker ──────────────────────────────────────────────────────────
@@ -136,6 +137,7 @@ async function getData(endpoint, options = {}) {
   let type = 'fixtures';
   if (endpoint.includes('live')) type = 'livescores';
   if (endpoint.includes('tournaments')) type = 'tournaments';
+  if (endpoint.includes('markets')) type = 'markets';
 
   const cacheKey = `${endpoint}:${cacheKeySuffix}:${JSON.stringify(params)}`;
   const ttl = CACHE_TTL_MS[type] || 60000;
@@ -179,6 +181,16 @@ async function getFixtureOdds(fixtureId) {
   return fetchFromOddspapi('fixtures/odds', { fixtureId });
 }
 
+/**
+ * getMarkets
+ * Fetch available markets metadata from OddsPapi v5
+ * @param {object} params
+ * @returns {Promise<Array>}
+ */
+async function getMarkets(params = {}) {
+  return getData('markets', { params });
+}
+
 function getStatus() {
   return {
     rateLimitedUntil,
@@ -187,4 +199,4 @@ function getStatus() {
   };
 }
 
-module.exports = { getData, getFixtureOdds, getStatus };
+module.exports = { getData, getFixtureOdds, getMarkets, getStatus };

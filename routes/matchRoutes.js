@@ -192,15 +192,19 @@ router.get('/:id', async (req, res) => {
 // Get Match Bets & Exposure (Feature 1: P/L in green/red, Feature 2: Matched Bets for all users)
 router.get('/:id/bets', async (req, res) => {
     try {
-        const { id: matchId } = req.params;
-        let match = await Match.findOne({ matchId }).lean();
-        if (!match && mongoose.Types.ObjectId.isValid(matchId)) {
-            match = await Match.findById(matchId).lean();
+        const { id: rawMatchId } = req.params;
+        const matchId = rawMatchId;
+        const altMatchId = String(rawMatchId).startsWith('id') ? String(rawMatchId).replace(/^id/, '') : ('id' + String(rawMatchId));
+        const matchIdList = [rawMatchId, altMatchId];
+
+        let match = await Match.findOne({ matchId: { $in: matchIdList } }).lean();
+        if (!match && mongoose.Types.ObjectId.isValid(rawMatchId)) {
+            match = await Match.findById(rawMatchId).lean();
         }
 
         // Reconstruct fallback match doc from bets if not present in collection
         if (!match) {
-            const betSample = await Bet.findOne({ matchId }).lean();
+            const betSample = await Bet.findOne({ matchId: { $in: matchIdList } }).lean();
             if (betSample) {
                 let fallbackTeamA = 'Team A';
                 let fallbackTeamB = 'Team B';
@@ -244,7 +248,7 @@ router.get('/:id/bets', async (req, res) => {
         const isAdmin = Boolean(viewerUser && ['superadmin', 'admin', 'master', 'supermaster'].includes(viewerUser.role));
 
         // 2. Query bets for this match
-        let betQuery = { matchId, status: { $in: ['pending', 'MATCHED'] } };
+        let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED'] } };
         let allowedUsernames = null;
 
         if (isAdmin && viewerUser) {
@@ -284,13 +288,16 @@ router.get('/:id/bets', async (req, res) => {
             });
         }
 
-        // 4. Format Matched Bets with hierarchy share
-        const matchedBets = bets.map(b => {
+        // 4. Format Matched & Open Bets with hierarchy share
+        const matchedBets = [];
+        const openBets = [];
+
+        bets.forEach(b => {
             const bettorDoc = userMap[b.userId?.toLowerCase()] || userMap[b.userId];
             const netShare = (isAdmin && viewerUser && bettorDoc) ? getViewerNetShare(viewerUser, bettorDoc, userMap) : null;
             const parentStake = netShare != null ? Math.round((Number(b.stake) || 0) * (netShare / 100)) : (Number(b.stake) || 0);
 
-            return {
+            const formattedBet = {
                 id: b._id.toString(),
                 runner: b.runner,
                 price: b.odds,
@@ -307,9 +314,13 @@ router.get('/:id/bets', async (req, res) => {
                 status: b.status,
                 createdAt: b.createdAt
             };
-        });
 
-        const openBets = [];
+            if (['pending', 'unmatched'].includes(String(b.status).toLowerCase())) {
+                openBets.push(formattedBet);
+            } else {
+                matchedBets.push(formattedBet);
+            }
+        });
 
         // 5. Calculate Runner Exposures (Feature 1)
         const teamA = match ? match.teamA : null;
@@ -438,8 +449,6 @@ router.get('/:id/bets', async (req, res) => {
                     const book = oddsBook(calcBets, outcomes);
                     expMap[keyA] = book.pl[keyA] || 0;
                     expMap[keyB] = book.pl[keyB] || 0;
-                    if (expMap[teamA] === undefined) expMap[teamA] = book.pl[keyA] || 0;
-                    if (expMap[teamB] === undefined) expMap[teamB] = book.pl[keyB] || 0;
                     if (book.exposure > 0) marketExposures.push(book.exposure);
                 }
             }

@@ -256,10 +256,11 @@ class FancyMarketsService {
         const quotes = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
         for (const q of quotes) {
           if (!q || !q.marketType) continue;
-          if (q.marketType.includes('10-overs') && q.price > 0 && q.active !== false) {
+          const mt = String(q.marketType).toLowerCase();
+          if ((mt.includes('10-over') || mt.includes('10_over')) && q.price > 0 && q.active !== false) {
             overQuotes['10'] = q;
           }
-          if (q.marketType.includes('20-overs') && q.price > 0 && q.active !== false) {
+          if ((mt.includes('20-over') || mt.includes('20_over')) && q.price > 0 && q.active !== false) {
             overQuotes['20'] = q;
           }
         }

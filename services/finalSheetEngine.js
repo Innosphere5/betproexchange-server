@@ -8,7 +8,7 @@ const User = require('../models/User');
  * @returns {Object} { viewer, greenEntries, redEntries, totalGreen, totalRed, netAmount, platformFee, masterInfo }
  */
 async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
-  const PLATFORM_FEE_RATE = 0.02;
+  const PLATFORM_FEE_RATE = 0.015; // 1.5% platform fee
 
   const uniqueBettorNames = [...new Set(txs.map(tx => tx.bettor).filter(Boolean))];
   const uniqueUsernamesFromTxs = [...new Set(txs.map(tx => tx.downline || tx.bettor).filter(Boolean))];
@@ -284,6 +284,12 @@ async function generateFinalSheet(currentUser, txs, isDailyReport = false) {
     const bNet = bData.total;
     const bBreakdown = bData.breakdown;
     if (bNet === 0) continue;
+
+    // 1.5% Platform fee accumulated only on profit (when bettor loses, house makes profit)
+    if (bNet < 0) {
+      const houseProfit = Math.abs(bNet);
+      totalPlatformFee += Math.round(houseProfit * PLATFORM_FEE_RATE * 100) / 100;
+    }
     
     const bUser = userMap[bName];
     if (!bUser) continue;

@@ -14,8 +14,11 @@ const settleMatch = async (matchId, winningTeam, io) => {
         console.log(`[SETTLEMENT] Beginning settlement for matchId: ${matchId}`);
         console.log(`[SETTLEMENT] Declared Result/Winner: ${winningTeam}`);
 
-        // Find all active match_odds bets for this match (exclude toss bets which are settled separately)
-        const activeBets = await Bet.find({ matchId, status: { $in: ['pending', 'MATCHED'] }, marketType: { $ne: 'toss' } });
+        const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+        const matchIdList = [matchId, altMatchId];
+
+        // Find all active bets for this match (exclude toss bets which are settled separately)
+        const activeBets = await Bet.find({ matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED'] }, marketType: { $ne: 'toss' } });
 
         if (activeBets.length === 0) {
             console.log(`[SETTLEMENT] No pending bets found for matchId: ${matchId}`);
@@ -40,7 +43,8 @@ const settleMatch = async (matchId, winningTeam, io) => {
                     runnerWon = normRunner.includes('no');
                 }
             } else {
-                runnerWon = (normRunner === normWinning);
+                runnerWon = (normRunner === normWinning) || 
+                            (normWinning && normRunner && (normRunner.includes(normWinning) || normWinning.includes(normRunner)));
             }
 
             const isWin = isBack ? runnerWon : !runnerWon;
@@ -96,7 +100,7 @@ const settleMatch = async (matchId, winningTeam, io) => {
 
                 // House Loss = (Net Payout for user) - (Initial Liability already deducted)
                 const houseLoss = -(netPayout - liability);
-                await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner });
+                await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner }, io);
 
                 console.log(`[BET WIN] User: ${bet.userId} won net profit ${netProfit} (Total Payout: ${netPayout}, Comm: ${commission})`);
 
@@ -121,7 +125,7 @@ const settleMatch = async (matchId, winningTeam, io) => {
                 await bet.save();
 
                 // House Profit = Initial Liability
-                await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner });
+                await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner }, io);
 
                 console.log(`[BET LOSE] User: ${bet.userId} lost liability of ${liability}`);
 

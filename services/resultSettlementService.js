@@ -62,21 +62,64 @@ const processMatchResults = async (io) => {
                 continue;
             }
 
-            // oddspapi statuses: statusId=2 means "Finished"
+            // oddspapi statuses: statusId=2 means "Finished", statusId=3 means "Cancelled"
             const isCompleted = apiMatch.status?.statusName === 'Finished' || 
                                 apiMatch.status?.statusId === 2 ||
                                 apiMatch.trueEndTime != null;
+
+            const isCancelled = apiMatch.status?.statusName === 'Cancelled' ||
+                                apiMatch.status?.statusId === 3;
+
+            // OddsPapi v5 Update (9 Oct 2026): Handle reissuedFixtureId for postponed/re-listed matches
+            if (isCancelled) {
+                const reissuedId = apiMatch.reissuedFixtureId;
+                if (reissuedId) {
+                    console.log(`[ResultSettlement] 🔁 Match ${matchId} fixture ${apiMatch.fixtureId} reissued as ${reissuedId}. Carrying over bets & positions...`);
+                    const dbMatch = pendingMatches.find(m => m.matchId === matchId);
+                    if (dbMatch) {
+                        dbMatch.reissuedFixtureId = reissuedId;
+                        dbMatch.oddsApiEventId = reissuedId;
+                        dbMatch.lastUpdated = new Date();
+                        await dbMatch.save();
+                    }
+                    // Do NOT refund bets; positions are carried over to replacement fixture
+                    continue;
+                }
+
+                // If reissuedFixtureId is null, per OddsPapi v5 docs: "plenty of cancellations get one hours or days later"
+                // Only settle as REFUND if the match start time was > 12h ago (permanent cancellation confirmed)
+                const startTimeMs = apiMatch.startTime ? apiMatch.startTime * 1000 : 0;
+                const hoursSinceStart = startTimeMs > 0 ? (Date.now() - startTimeMs) / (1000 * 60 * 60) : 0;
+
+                if (hoursSinceStart > 12) {
+                    console.log(`[ResultSettlement] ⛔ Permanent cancellation confirmed for ${matchId} (no reissuedFixtureId after 12h). Refunding bets.`);
+                    const dbMatch = pendingMatches.find(m => m.matchId === matchId);
+                    if (dbMatch) {
+                        dbMatch.status = 'completed';
+                        dbMatch.winner = 'REFUND';
+                        dbMatch.lastUpdated = new Date();
+                        await dbMatch.save();
+                    }
+                    await settleMatch(matchId, 'REFUND', io);
+                } else {
+                    console.log(`[ResultSettlement] ⏳ Match ${matchId} cancelled with null reissuedFixtureId. Holding settlement for possible reissue.`);
+                }
+                continue;
+            }
 
             if (isCompleted) {
                 console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status?.statusName}.`);
 
                 let winningTeam = 'VOID'; 
 
+                // 1. Update Match record if it exists
+                const dbMatch = pendingMatches.find(m => m.matchId === matchId);
+
                 if (apiMatch.status?.statusName === 'Finished') {
                     const p1Score = apiMatch.scores?.result?.participant1Score || 0;
                     const p2Score = apiMatch.scores?.result?.participant2Score || 0;
-                    const p1Name = apiMatch.participants?.participant1Name || 'Team 1';
-                    const p2Name = apiMatch.participants?.participant2Name || 'Team 2';
+                    const p1Name = dbMatch?.teamA || apiMatch.participants?.participant1Name || 'Team 1';
+                    const p2Name = dbMatch?.teamB || apiMatch.participants?.participant2Name || 'Team 2';
 
                     if (p1Score > p2Score) winningTeam = p1Name;
                     else if (p2Score > p1Score) winningTeam = p2Name;
@@ -85,8 +128,6 @@ const processMatchResults = async (io) => {
 
                 console.log(`[ResultSettlement] Identified winner for ${matchId}: ${winningTeam}`);
 
-                // 1. Update Match record if it exists
-                const dbMatch = pendingMatches.find(m => m.matchId === matchId);
                 if (dbMatch) {
                     const p1Score = apiMatch.scores?.result?.participant1Score || 0;
                     const p2Score = apiMatch.scores?.result?.participant2Score || 0;
