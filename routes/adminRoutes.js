@@ -983,7 +983,7 @@ router.get('/current-position', auth, isAuthorized, async (req, res) => {
       const matchBets = bets.filter(b => b.matchId === matchId);
       if (matchBets.length === 0) continue;
 
-      const isResulted = ['completed', 'resulted'].includes(m.status?.toLowerCase()) || Boolean(m.winner);
+      const isResulted = (['completed', 'resulted'].includes(m.status?.toLowerCase()) || Boolean(m.winner)) && m.status !== 'live';
       const matchName = (m.teamA && m.teamB) ? `${m.teamA} v ${m.teamB}` : (matchBets[0]?.matchName || 'Cricket Match');
 
       // Partition by marketType (match_odds, toss, etc.)
@@ -1335,7 +1335,7 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
 
     for (const m of activeMatches) {
       const matchBets = bets.filter(b => b.matchId === m.matchId);
-      const isResulted = ['completed', 'resulted'].includes(m.status?.toLowerCase()) || Boolean(m.winner);
+      const isResulted = (['completed', 'resulted'].includes(m.status?.toLowerCase()) || Boolean(m.winner)) && m.status !== 'live';
 
       // Collect runners for this match
       const runnerNames = new Set();
@@ -2323,7 +2323,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
     if (!parent) return res.status(404).json({ error: 'User not found' });
 
     const allowedUsernames = await getAllDescendantUsernames(parent);
-    let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['MATCHED', 'pending', 'unmatched'] }, userId: { $in: allowedUsernames } };
+    let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['MATCHED', 'pending', 'unmatched', 'won', 'lost', 'WIN', 'LOSE'] }, userId: { $in: allowedUsernames } };
 
     // 3. Get all MATCHED bets for this match
     const bets = await Bet.find(betQuery).lean();
@@ -2367,7 +2367,7 @@ router.get('/match-exposure/:matchId', auth, isAuthorized, async (req, res) => {
       });
     }
 
-    const isMatchResulted = ['completed', 'resulted'].includes(match.status?.toLowerCase()) || Boolean(match.winner);
+    const isMatchResulted = (['completed', 'resulted'].includes(match.status?.toLowerCase()) || Boolean(match.winner)) && match.status !== 'live';
     const COMMISSION_RATE = 0.05;
 
     // 4. Calculate Exposure for Requester

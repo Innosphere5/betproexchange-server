@@ -17,8 +17,12 @@ const settleMatch = async (matchId, winningTeam, io) => {
         const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
         const matchIdList = [matchId, altMatchId];
 
-        // Find all active bets for this match (exclude toss bets which are settled separately)
-        const activeBets = await Bet.find({ matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED'] }, marketType: { $ne: 'toss' } });
+        // Find all active bets for this match (only match outcome markets: match_odds, bookmaker, tied_match)
+        const activeBets = await Bet.find({ 
+            matchId: { $in: matchIdList }, 
+            status: { $in: ['pending', 'MATCHED'] }, 
+            marketType: { $in: ['match_odds', 'bookmaker', 'tied_match', null, undefined, ''] } 
+        });
 
         if (activeBets.length === 0) {
             console.log(`[SETTLEMENT] No pending bets found for matchId: ${matchId}`);
@@ -34,6 +38,8 @@ const settleMatch = async (matchId, winningTeam, io) => {
 
             const isBack = bet.type === 'back';
             const normRunner = String(bet.runner || '').trim().toLowerCase();
+            const cleanRunner = normRunner.replace(/\s+bm$/i, '').trim();
+            const cleanWinning = normWinning.replace(/\s+bm$/i, '').trim();
 
             let runnerWon = false;
             if (bet.marketType === 'tied_match') {
@@ -43,8 +49,8 @@ const settleMatch = async (matchId, winningTeam, io) => {
                     runnerWon = normRunner.includes('no');
                 }
             } else {
-                runnerWon = (normRunner === normWinning) || 
-                            (normWinning && normRunner && (normRunner.includes(normWinning) || normWinning.includes(normRunner)));
+                runnerWon = (cleanRunner === cleanWinning) || 
+                            (cleanWinning && cleanRunner && (cleanRunner.includes(cleanWinning) || cleanWinning.includes(cleanRunner)));
             }
 
             const isWin = isBack ? runnerWon : !runnerWon;

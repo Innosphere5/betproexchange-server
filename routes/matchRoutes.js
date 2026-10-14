@@ -176,10 +176,11 @@ router.get('/:id', async (req, res) => {
         }
 
         const response = match.toObject ? match.toObject() : match;
-        if (match.status === 'completed') {
+        if (match.status === 'completed' || match.status === 'resulted') {
             response.api_message = "Match is completed and result has been declared.";
             response.isCompleted = true;
         } else {
+            response.winner = null;
             response.isCompleted = false;
         }
 
@@ -247,8 +248,8 @@ router.get('/:id/bets', async (req, res) => {
 
         const isAdmin = Boolean(viewerUser && ['superadmin', 'admin', 'master', 'supermaster'].includes(viewerUser.role));
 
-        // 2. Query bets for this match
-        let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED'] } };
+        // 2. Query bets for this match (both active and settled to reflect true positions)
+        let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED', 'unmatched', 'won', 'lost', 'WIN', 'LOSE'] } };
         let allowedUsernames = null;
 
         if (isAdmin && viewerUser) {
