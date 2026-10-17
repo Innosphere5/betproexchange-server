@@ -157,23 +157,9 @@ router.get('/:id', async (req, res) => {
             return res.status(404).json({ message: 'Match not found' });
         }
         
-        // Ensure Fancy 2, Figure, Even-Odd, and Tied Match markets only exist for LIVE matches
-        if (match.status === 'live' || match.inplay === true) {
-            const fancyMarketsService = require('../services/fancyMarketsService');
-            match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
-        } else {
-            // Upcoming or completed matches do NOT show in-play fancy/figure/even-odd/tied markets
-            if (match.fancyMarkets?.length > 0 || match.figureMarkets?.length > 0 || match.evenOddMarkets?.length > 0 || match.tiedMatchMarket) {
-                match.fancyMarkets = [];
-                match.figureMarkets = [];
-                match.evenOddMarkets = [];
-                match.tiedMatchMarket = null;
-                await Match.updateOne(
-                    { matchId: match.matchId },
-                    { $set: { fancyMarkets: [], figureMarkets: [], evenOddMarkets: [], tiedMatchMarket: null } }
-                ).catch(() => {});
-            }
-        }
+        // Ensure Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, and Even-Odd markets are populated
+        const fancyMarketsService = require('../services/fancyMarketsService');
+        match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
 
         const response = match.toObject ? match.toObject() : match;
         if (match.status === 'completed' || match.status === 'resulted') {
@@ -187,6 +173,38 @@ router.get('/:id', async (req, res) => {
         res.json(response);
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+// GET /api/matches/:id/scores - Retrieves the score breakdown by period according to official OddsAPI spec
+router.get('/:id/scores', async (req, res) => {
+    const fixtureId = req.params.id;
+    try {
+        const oddsApiRest = require('../services/oddsApiRest');
+        const data = await oddsApiRest.getScores(fixtureId);
+        return res.status(200).json(data);
+    } catch (err) {
+        const altMatchId = String(fixtureId).startsWith('id') ? String(fixtureId).replace(/^id/, '') : ('id' + String(fixtureId));
+        const match = await Match.findOne({
+            $or: [{ matchId: { $in: [fixtureId, altMatchId] } }, { oddsApiEventId: { $in: [fixtureId, altMatchId] } }]
+        });
+        if (match) {
+            if (match.score?.periods && Object.keys(match.score.periods).length > 0) {
+                return res.status(200).json({ fixtureId, scores: match.score.periods });
+            }
+            const p1 = parseInt(String(match.score?.teamA_runs || '0').split(/[\/-]/)[0], 10) || 0;
+            const p2 = parseInt(String(match.score?.teamB_runs || '0').split(/[\/-]/)[0], 10) || 0;
+            const nowIso = (match.score?.lastUpdated || new Date()).toISOString();
+            return res.status(200).json({
+                fixtureId,
+                scores: {
+                    "0": { participant1Score: p1, participant2Score: p2, updatedAt: nowIso },
+                    "1": { participant1Score: p1, participant2Score: 0, updatedAt: nowIso },
+                    "2": { participant1Score: 0, participant2Score: p2, updatedAt: nowIso }
+                }
+            });
+        }
+        return res.status(404).json({ error: { message: 'Fixture scores not found', code: 'NOT_FOUND' } });
     }
 });
 

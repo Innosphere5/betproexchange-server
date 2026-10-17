@@ -364,65 +364,89 @@ class FancyMarketsService {
   }
 
   /**
-   * Ensure a single match document has all required live markets.
-   * ONLY applies when match is LIVE (status === 'live' or inplay === true).
-   * For upcoming matches, live markets remain empty.
+   * Ensure a single match document has all required markets (Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, Even-Odd).
+   * For live matches, live quotes are mapped. For upcoming matches, markets are maintained in scheduled/suspended state
+   * so all market boards are visible accurately.
    */
   async ensureMatchMarkets(match, io = null) {
     if (!match) return match;
     const isLive = match.status === 'live' || match.inplay === true;
 
-    // Upcoming or completed matches do NOT have in-play fancy/figure/tied markets
-    if (!isLive) {
-      if (match.fancyMarkets?.length > 0 || match.figureMarkets?.length > 0 || match.evenOddMarkets?.length > 0 || match.tiedMatchMarket) {
-        match.fancyMarkets = [];
-        match.figureMarkets = [];
-        match.evenOddMarkets = [];
-        match.tiedMatchMarket = null;
-        try {
-          await Match.updateOne(
-            { matchId: match.matchId },
-            {
-              $set: {
-                fancyMarkets: [],
-                figureMarkets: [],
-                evenOddMarkets: [],
-                tiedMatchMarket: null
-              }
-            }
-          );
-        } catch (e) {}
-      }
-      return match;
-    }
+    let hasChanges = false;
 
-    // Match is LIVE -> Ensure live structures exist
+    // 1. Fancy Markets
     if (!match.fancyMarkets || match.fancyMarkets.length === 0) {
       match.fancyMarkets = this.extractFancyMarkets(null, match);
-    }
-    if (!match.figureMarkets || match.figureMarkets.length === 0) {
-      match.figureMarkets = this.extractFigureMarkets(null, match);
-    }
-    if (!match.evenOddMarkets || match.evenOddMarkets.length === 0) {
-      match.evenOddMarkets = this.extractEvenOddMarkets(null, match);
-    }
-    if (!match.tiedMatchMarket) {
-      match.tiedMatchMarket = this.extractTiedMatch(null);
+      hasChanges = true;
     }
 
-    try {
-      await Match.updateOne(
-        { matchId: match.matchId },
-        {
-          $set: {
-            fancyMarkets: match.fancyMarkets,
-            figureMarkets: match.figureMarkets,
-            evenOddMarkets: match.evenOddMarkets,
-            tiedMatchMarket: match.tiedMatchMarket
+    // 2. Figure Markets (0-9 Digits)
+    if (!match.figureMarkets || match.figureMarkets.length === 0) {
+      match.figureMarkets = this.extractFigureMarkets(null, match);
+      hasChanges = true;
+    }
+
+    // 3. Even/Odd Markets
+    if (!match.evenOddMarkets || match.evenOddMarkets.length === 0) {
+      match.evenOddMarkets = this.extractEvenOddMarkets(null, match);
+      hasChanges = true;
+    }
+
+    // 4. Tied Match (Others)
+    if (!match.tiedMatchMarket) {
+      match.tiedMatchMarket = this.extractTiedMatch(null);
+      hasChanges = true;
+    }
+
+    // 5. Default Bookmaker odds if missing
+    if (!match.bookmakerBackA && match.backOddsA) {
+      match.bookmakerBackA = match.backOddsA;
+      match.bookmakerLayA = match.layOddsA ? Number((match.layOddsA > match.backOddsA ? match.layOddsA + 0.01 : match.backOddsA + 0.02).toFixed(2)) : 1.97;
+      match.bookmakerBackB = match.backOddsB ? Number((match.backOddsB >= 2 ? match.backOddsB - 0.02 : match.backOddsB).toFixed(2)) : 2.05;
+      match.bookmakerLayB = match.layOddsB ? Number((match.layOddsB >= 2 ? match.layOddsB + 0.02 : match.layOddsB + 0.02).toFixed(2)) : 2.08;
+      match.bookmakerMarketStatus = match.bookmakerMarketStatus || 'OPEN';
+      hasChanges = true;
+    }
+
+    // 6. Default Toss odds if missing
+    if (!match.tossBackA) {
+      match.tossBackA = 1.98;
+      match.tossLayA = 2.02;
+      match.tossBackB = 1.98;
+      match.tossLayB = 2.02;
+      match.tossDepthBackA = "100";
+      match.tossDepthLayA = "100";
+      match.tossDepthBackB = "100";
+      match.tossDepthLayB = "100";
+      match.tossMarketStatus = match.tossMarketStatus || 'OPEN';
+      hasChanges = true;
+    }
+
+    if (hasChanges) {
+      try {
+        await Match.updateOne(
+          { matchId: match.matchId },
+          {
+            $set: {
+              fancyMarkets: match.fancyMarkets,
+              figureMarkets: match.figureMarkets,
+              evenOddMarkets: match.evenOddMarkets,
+              tiedMatchMarket: match.tiedMatchMarket,
+              bookmakerBackA: match.bookmakerBackA,
+              bookmakerLayA: match.bookmakerLayA,
+              bookmakerBackB: match.bookmakerBackB,
+              bookmakerLayB: match.bookmakerLayB,
+              bookmakerMarketStatus: match.bookmakerMarketStatus || 'OPEN',
+              tossBackA: match.tossBackA,
+              tossLayA: match.tossLayA,
+              tossBackB: match.tossBackB,
+              tossLayB: match.tossLayB,
+              tossMarketStatus: match.tossMarketStatus || 'OPEN'
+            }
           }
-        }
-      );
-    } catch (err) {}
+        );
+      } catch (err) {}
+    }
 
     return match;
   }

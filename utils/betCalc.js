@@ -57,11 +57,43 @@ function oddsBet({ side, selection, stake, odds }) {
   });
 }
 
+/**
+ * Numberline Rate Adjustment Algorithm:
+ * - When a user placed a bet at rate 7:
+ *     - If the market rate goes UP to 9, 10, 11 (rate >= 8):
+ *       user gets the amount at the 8 rate (not 9, 10, 11).
+ *     - If the market rate goes DOWN like 6, 4, 3, 2, 1 (rate <= 6):
+ *       user gets the amount of 5.
+ *     - If the market rate stays at 7:
+ *       user gets rate 7.
+ * - Otherwise (for any placed rate other than 7):
+ *     - Works normally as current.
+ */
+function getEffectiveSettlementRate(placedRate, marketRate) {
+  const placed = Number(placedRate);
+  if (placed === 7 && marketRate != null && !isNaN(marketRate)) {
+    const current = Number(marketRate);
+    if (current >= 8) {
+      return 8; // Capped at rate 8 if rate goes 9, 10, 11...
+    } else if (current <= 6) {
+      return 5; // Floored at rate 5 if rate goes down 6, 4, 3, 2, 1...
+    } else {
+      return current;
+    }
+  }
+  return placed;
+}
+
 /** Profit/loss of one bet if `winner` is the winning selection. */
-function oddsBetPL(bet, winner) {
+function oddsBetPL(bet, winner, currentMarketRate = null) {
   const s = typeof bet.side === 'string' ? bet.side.toUpperCase() : bet.side;
   const selectionWon = String(bet.selection).trim().toLowerCase() === String(winner).trim().toLowerCase();
-  if (s === SIDE.BACK) return selectionWon ? bet.potentialProfit : -bet.stake;
+  
+  const marketRate = currentMarketRate ?? bet.currentOdds ?? bet.closingOdds ?? bet.odds;
+  const effectiveRate = getEffectiveSettlementRate(bet.odds, marketRate);
+  const potentialProfit = roundDiv(bet.stake * (oddsX100(effectiveRate) - 100), 100);
+
+  if (s === SIDE.BACK) return selectionWon ? potentialProfit : -bet.stake;
   return selectionWon ? -bet.liability : bet.stake;
 }
 
@@ -180,5 +212,6 @@ module.exports = {
   accountSummary,
   formatUnits,
   formatCompact,
-  slipProfitText
+  slipProfitText,
+  getEffectiveSettlementRate
 };

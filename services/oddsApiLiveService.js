@@ -1006,8 +1006,100 @@ class OddsApiLiveService {
     this.deletedGraceTimers.set(eventId, timer);
   }
 
-  handleScoreUpdate(msg) {
-    // Implement if required
+  async handleScoreUpdate(msg) {
+    try {
+      const payload = msg.payload || msg;
+      const eventId = payload.fixtureId || payload.id;
+      if (!eventId) return;
+
+      let matchId = this.eventToMatchId.get(eventId);
+      if (!matchId) {
+        const match = await Match.findOne({
+          $or: [{ matchId: eventId }, { oddsApiEventId: eventId }]
+        });
+        if (match) {
+          matchId = match.matchId;
+          this.eventToMatchId.set(eventId, matchId);
+        }
+      }
+      if (!matchId) return;
+
+      const { extractLiveScorePayload } = require('./scoreService');
+      const matchInDb = await Match.findOne({ matchId });
+      if (!matchInDb) return;
+
+      const liveData = {
+        fixtureId: eventId,
+        participants: {
+          participant1Name: matchInDb.teamA,
+          participant2Name: matchInDb.teamB
+        },
+        tournament: {
+          tournamentName: matchInDb.league
+        },
+        scores: payload.scores || {}
+      };
+
+      const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
+      const teamA_score = parsedScore.teamA_runs;
+      const teamB_score = parsedScore.teamB_runs;
+
+      const p1Total = parseInt(teamA_score.split('/')[0], 10) || 0;
+      const p2Total = parseInt(teamB_score.split('/')[0], 10) || 0;
+
+      await Match.updateOne(
+        { matchId },
+        {
+          $set: {
+            score: {
+              teamA_runs: teamA_score,
+              teamB_runs: teamB_score,
+              overs:      parsedScore.overs,
+              wickets:    parsedScore.wickets,
+              target:     parsedScore.target,
+              runRate:    parsedScore.runRate,
+              reqRunRate: parsedScore.reqRunRate,
+              thisOver:   parsedScore.thisOver,
+              remRuns:    parsedScore.remRuns,
+              remBalls:   parsedScore.remBalls,
+              battingTeam: parsedScore.battingTeam,
+              battingTeamName: parsedScore.battingTeamName,
+              innings:    parsedScore.innings,
+              periods:    parsedScore.periods,
+              lastUpdated: new Date()
+            },
+            lastUpdated: new Date()
+          }
+        }
+      );
+
+      if (this.io) {
+        this.io.emit('live_score_update', {
+          matchId:    matchId,
+          score:      parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
+          overs:      parsedScore.overs,
+          wickets:    parsedScore.wickets,
+          status:     matchInDb.status,
+          teamA_runs: teamA_score,
+          teamB_runs: teamB_score,
+          target:     parsedScore.target,
+          runRate:    parsedScore.runRate,
+          reqRunRate: parsedScore.reqRunRate,
+          thisOver:   parsedScore.thisOver,
+          remRuns:    parsedScore.remRuns,
+          remBalls:   parsedScore.remBalls,
+          battingTeam: parsedScore.battingTeam,
+          battingTeamName: parsedScore.battingTeamName,
+          innings:    parsedScore.innings,
+          periods:    parsedScore.periods
+        });
+
+        const fancyMarketsService = require('./fancyMarketsService');
+        fancyMarketsService.handleLiveMatchOdds(matchId, this.io);
+      }
+    } catch (err) {
+      console.error('[OddsApiLive] ❌ handleScoreUpdate error:', err.message);
+    }
   }
 
   handleStatusUpdate(msg) {

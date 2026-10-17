@@ -13,6 +13,8 @@ const betSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now },
   status: { type: String, enum: ['pending', 'won', 'lost', 'cancelled', 'MATCHED', 'WIN', 'LOSE', 'CANCELLED'], default: 'pending' },
   result: { type: String, default: null },
+  effectiveOdds: { type: Number, default: null },
+  closingOdds: { type: Number, default: null },
   payout: { type: Number, default: 0 },
   settledAt: { type: Date, default: null }
 }, { timestamps: true });

@@ -1,4 +1,11 @@
-const { getData } = require('./apiManager');
+/**
+ * Cricket Engine
+ * 
+ * Responsible for parsing official OddsAPI / Oddspapi live score feeds,
+ * maintaining deterministic match states, and computing accurate cricket
+ * metrics (innings, batting team, target, overs, CRR, RRR, ball-by-ball)
+ * WITHOUT synthetic hallucinations or fake dot-ball timers.
+ */
 
 // Match state in-memory cache
 const liveMatchState = new Map();
@@ -14,8 +21,8 @@ function detectFormat(leagueName = '') {
     if (l.includes('hundred')) {
         return { name: 'The Hundred', maxOvers: 16.4, totalBalls: 100, avgRunRate: 8.5 };
     }
-    if (l.includes('odi') || l.includes('one day') || l.includes('50 over')) {
-        return { name: 'ODI', maxOvers: 50, totalBalls: 300, avgRunRate: 5.6 };
+    if (l.includes('odi') || l.includes('one day') || l.includes('50 over') || l.includes('league two') || l.includes('world cup')) {
+        return { name: 'ODI', maxOvers: 50, totalBalls: 300, avgRunRate: 5.4 };
     }
     if (l.includes('test') || l.includes('ranji') || l.includes('shield') || l.includes('trophy')) {
         return { name: 'Test', maxOvers: 90, totalBalls: 540, avgRunRate: 3.5 };
@@ -24,19 +31,115 @@ function detectFormat(leagueName = '') {
 }
 
 /**
- * Generate a realistic initial thisOver array for a given number of balls bowled
+ * Normalizes liveData.scores into the official period map:
+ * { "0": { participant1Score, participant2Score, updatedAt }, "1": {...}, "2": {...} }
  */
-function generateInitialThisOver(ballsBowled) {
-    const pool = ['0', '1', '1', '2', '4', '0', '6', '1', '0', '4'];
-    const count = ballsBowled % 6;
-    if (count === 0 && ballsBowled > 0) {
-        return ['1', '0', '4', '1', '2', '0']; // previous complete over
+function normalizeScoresBreakdown(rawScores = {}) {
+    const out = {};
+    const nowIso = new Date().toISOString();
+
+    if (!rawScores || typeof rawScores !== 'object') {
+        out["0"] = { participant1Score: 0, participant2Score: 0, updatedAt: nowIso };
+        return out;
     }
-    const result = [];
-    for (let i = 0; i < count; i++) {
-        result.push(pool[(ballsBowled + i) % pool.length]);
+
+    // 1. Direct period numbers e.g. "0", "1", "2", "3"
+    for (const [key, val] of Object.entries(rawScores)) {
+        if (!isNaN(key)) {
+            out[key] = {
+                participant1Score: Number(val?.participant1Score || 0),
+                participant2Score: Number(val?.participant2Score || 0),
+                updatedAt: val?.updatedAt || nowIso
+            };
+        }
     }
-    return result;
+
+    // 2. Map named keys like "result", "p1", "p2", "p3" to period numbers
+    if (rawScores.result && !out["0"]) {
+        out["0"] = {
+            participant1Score: Number(rawScores.result.participant1Score || 0),
+            participant2Score: Number(rawScores.result.participant2Score || 0),
+            updatedAt: rawScores.result.updatedAt || nowIso
+        };
+    }
+    if (rawScores.p1 && !out["1"]) {
+        out["1"] = {
+            participant1Score: Number(rawScores.p1.participant1Score || 0),
+            participant2Score: Number(rawScores.p1.participant2Score || 0),
+            updatedAt: rawScores.p1.updatedAt || nowIso
+        };
+    }
+    if (rawScores.p2 && !out["2"]) {
+        out["2"] = {
+            participant1Score: Number(rawScores.p2.participant1Score || 0),
+            participant2Score: Number(rawScores.p2.participant2Score || 0),
+            updatedAt: rawScores.p2.updatedAt || nowIso
+        };
+    }
+    if (rawScores.p3 && !out["3"]) {
+        out["3"] = {
+            participant1Score: Number(rawScores.p3.participant1Score || 0),
+            participant2Score: Number(rawScores.p3.participant2Score || 0),
+            updatedAt: rawScores.p3.updatedAt || nowIso
+        };
+    }
+
+    // 3. Fallback: If only result exists in "0", extract innings periods
+    if (out["0"] && (!out["1"] && !out["2"])) {
+        const p1Total = out["0"].participant1Score;
+        const p2Total = out["0"].participant2Score;
+        if (p1Total > 0 && p2Total > 0) {
+            out["1"] = {
+                participant1Score: p1Total,
+                participant2Score: 0,
+                updatedAt: out["0"].updatedAt
+            };
+            out["2"] = {
+                participant1Score: 0,
+                participant2Score: p2Total,
+                updatedAt: out["0"].updatedAt
+            };
+        } else if (p1Total > 0) {
+            out["1"] = {
+                participant1Score: p1Total,
+                participant2Score: 0,
+                updatedAt: out["0"].updatedAt
+            };
+        } else if (p2Total > 0) {
+            out["1"] = {
+                participant1Score: 0,
+                participant2Score: p2Total,
+                updatedAt: out["0"].updatedAt
+            };
+        }
+    }
+
+    if (!out["0"]) {
+        out["0"] = {
+            participant1Score: 0,
+            participant2Score: 0,
+            updatedAt: nowIso
+        };
+    }
+
+    return out;
+}
+
+/**
+ * Extract overall total scores from normalized period map or liveData
+ */
+function extractTotalScores(normalizedBreakdown, rawScores = {}) {
+    if (normalizedBreakdown["0"]) {
+        return {
+            p1Total: normalizedBreakdown["0"].participant1Score,
+            p2Total: normalizedBreakdown["0"].participant2Score
+        };
+    }
+    const res = rawScores.result || {};
+    return {
+        p1Total: Number(res.participant1Score || 0),
+        p2Total: Number(res.participant2Score || 0)
+    };
 }
 
 /**
@@ -46,10 +149,8 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
     const leagueName = liveData?.tournament?.tournamentName || '';
     const format = detectFormat(leagueName);
 
-    const scores = liveData?.scores || {};
-    const resultScore = scores.result || {};
-    const rawP1 = resultScore.participant1Score != null ? Number(resultScore.participant1Score) : 0;
-    const rawP2 = resultScore.participant2Score != null ? Number(resultScore.participant2Score) : 0;
+    const scoresBreakdown = normalizeScoresBreakdown(liveData?.scores || {});
+    const { p1Total, p2Total } = extractTotalScores(scoresBreakdown, liveData?.scores || {});
 
     let state = liveMatchState.get(matchId);
 
@@ -57,79 +158,49 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
         let innings = 1;
         let battingTeam = 'teamA';
         let target = 0;
-        let p1Runs = rawP1;
-        let p2Runs = rawP2;
-        let p1Wickets = 0;
-        let p2Wickets = 0;
+        let p1Runs = p1Total;
+        let p2Runs = p2Total;
+        let p1Wickets = existingScore?.teamA_runs ? parseInt(String(existingScore.teamA_runs).split('/')[1], 10) || 0 : 0;
+        let p2Wickets = existingScore?.teamB_runs ? parseInt(String(existingScore.teamB_runs).split('/')[1], 10) || 0 : 0;
         let ballsBowled = 0;
 
-        if (rawP1 > 0 && rawP2 > 0) {
-            innings = 2;
-            if (rawP2 > rawP1) {
-                battingTeam = 'teamA';
-                target = rawP2 + 1;
-                // Team B (West Indies) first innings completed total: e.g. 247/7
-                p2Wickets = 7;
-
-                // Team A (India) chasing target 248:
-                if (existingScore?.wickets != null && existingScore.wickets >= 0 && existingScore.wickets <= 4) {
-                    p1Wickets = Number(existingScore.wickets);
-                } else if (rawP1 < 75) {
-                    p1Wickets = 0; // 0 wickets in initial powerplay chase (e.g. IND 55-0)
-                } else if (rawP1 < 130) {
-                    p1Wickets = 1;
-                } else if (rawP1 < 175) {
-                    p1Wickets = 2;
-                } else if (rawP1 < 210) {
-                    p1Wickets = 3;
-                } else {
-                    p1Wickets = 4;
-                }
-
-                // In high chase of 248, CRR starts at ~14.8-15.0 (as IND 55-0 in 3.4 overs = 22 balls)
-                const estCRR = rawP1 < 70 ? 14.8 : (rawP1 < 130 ? 12.8 : 12.2);
-                ballsBowled = Math.min(format.totalBalls - 1, Math.max(1, Math.round((rawP1 / estCRR) * 6)));
-            } else {
-                battingTeam = 'teamB';
-                target = rawP1 + 1;
-                p1Wickets = 7;
-                if (existingScore?.wickets != null && existingScore.wickets >= 0 && existingScore.wickets <= 4) {
-                    p2Wickets = Number(existingScore.wickets);
-                } else if (rawP2 < 75) {
-                    p2Wickets = 0;
-                } else if (rawP2 < 130) {
-                    p2Wickets = 1;
-                } else if (rawP2 < 175) {
-                    p2Wickets = 2;
-                } else {
-                    p2Wickets = 3;
-                }
-                const estCRR = rawP2 < 70 ? 14.8 : (rawP2 < 130 ? 12.8 : 12.2);
-                ballsBowled = Math.min(format.totalBalls - 1, Math.max(1, Math.round((rawP2 / estCRR) * 6)));
-            }
-        } else if (rawP1 > 0) {
-            battingTeam = 'teamA';
-            p1Wickets = existingScore?.wickets != null ? Number(existingScore.wickets) : Math.min(5, Math.floor(rawP1 / 35));
-            ballsBowled = Math.min(format.totalBalls - 1, Math.max(1, Math.round((rawP1 / format.avgRunRate) * 6)));
-        } else if (rawP2 > 0) {
-            battingTeam = 'teamB';
-            p2Wickets = existingScore?.wickets != null ? Number(existingScore.wickets) : Math.min(5, Math.floor(rawP2 / 35));
-            ballsBowled = Math.min(format.totalBalls - 1, Math.max(1, Math.round((rawP2 / format.avgRunRate) * 6)));
-        }
-
-        // Restore overs if DB had a valid overs count > 0 and parsed balls is sensible
+        // Restore overs if DB has valid overs
         if (existingScore?.overs && existingScore.overs !== '0.0' && existingScore.overs !== 'Final') {
             const parts = String(existingScore.overs).split('.');
-            const parsedBalls = (parseInt(parts[0], 10) || 0) * 6 + (parseInt(parts[1], 10) || 0);
-            if (parsedBalls > 0 && Math.abs(parsedBalls - ballsBowled) <= 12) {
-                ballsBowled = parsedBalls;
+            ballsBowled = (parseInt(parts[0], 10) || 0) * 6 + (parseInt(parts[1], 10) || 0);
+        }
+
+        // Determine innings & batting team based on period breakdown and scores
+        if (scoresBreakdown["2"] && (scoresBreakdown["2"].participant1Score > 0 || scoresBreakdown["2"].participant2Score > 0)) {
+            innings = 2;
+            if (scoresBreakdown["2"].participant1Score > 0) {
+                battingTeam = 'teamA';
+                target = (scoresBreakdown["1"]?.participant2Score || p2Total) + 1;
+            } else {
+                battingTeam = 'teamB';
+                target = (scoresBreakdown["1"]?.participant1Score || p1Total) + 1;
             }
+        } else if (p1Total > 0 && p2Total > 0) {
+            innings = 2;
+            if (p1Total >= p2Total) {
+                // Team A scored higher / first, Team B is chasing
+                battingTeam = 'teamB';
+                target = p1Total + 1;
+            } else {
+                // Team B scored higher / first, Team A is chasing
+                battingTeam = 'teamA';
+                target = p2Total + 1;
+            }
+        } else if (p1Total > 0) {
+            innings = 1;
+            battingTeam = 'teamA';
+        } else if (p2Total > 0) {
+            innings = 1;
+            battingTeam = 'teamB';
         }
 
         const activeRuns = battingTeam === 'teamA' ? p1Runs : p2Runs;
-        const thisOver = Array.isArray(existingScore?.thisOver) && existingScore.thisOver.length > 0
-            ? existingScore.thisOver
-            : generateInitialThisOver(ballsBowled);
+        const thisOver = Array.isArray(existingScore?.thisOver) ? existingScore.thisOver : [];
 
         state = {
             matchId,
@@ -144,7 +215,8 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
             thisOver,
             target,
             lastApiScore: activeRuns,
-            lastDeliveryTime: Date.now()
+            lastScoreUpdate: Date.now(),
+            scoresBreakdown
         };
 
         liveMatchState.set(matchId, state);
@@ -154,79 +226,65 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
 }
 
 /**
- * Advance ball and score stats dynamically
+ * Advance ball and score stats dynamically based on verified events
  */
 function advanceCricketState(state, liveData) {
-    const scores = liveData?.scores || {};
-    const resultScore = scores.result || {};
-    const rawP1 = resultScore.participant1Score != null ? Number(resultScore.participant1Score) : 0;
-    const rawP2 = resultScore.participant2Score != null ? Number(resultScore.participant2Score) : 0;
+    const scoresBreakdown = normalizeScoresBreakdown(liveData?.scores || {});
+    state.scoresBreakdown = scoresBreakdown;
 
-    // Detect innings transition if scores shifted
-    if (rawP1 > 0 && rawP2 > 0 && state.innings === 1) {
-        state.innings = 2;
-        if (rawP2 > rawP1) {
+    const { p1Total, p2Total } = extractTotalScores(scoresBreakdown, liveData?.scores || {});
+
+    // Always anchor runs strictly to the authoritative API scores
+    if (p1Total >= 0) state.p1Runs = p1Total;
+    if (p2Total >= 0) state.p2Runs = p2Total;
+
+    // Detect innings transition
+    if (scoresBreakdown["2"] && (scoresBreakdown["2"].participant1Score > 0 || scoresBreakdown["2"].participant2Score > 0)) {
+        if (state.innings === 1) {
+            state.innings = 2;
+            state.ballsBowled = 0;
+            state.thisOver = [];
+        }
+        if (scoresBreakdown["2"].participant1Score > 0) {
             state.battingTeam = 'teamA';
-            state.target = rawP2 + 1;
+            state.target = (scoresBreakdown["1"]?.participant2Score || state.p2Runs) + 1;
         } else {
             state.battingTeam = 'teamB';
-            state.target = rawP1 + 1;
+            state.target = (scoresBreakdown["1"]?.participant1Score || state.p1Runs) + 1;
         }
+    } else if (state.p1Runs > 0 && state.p2Runs > 0 && state.innings === 1) {
+        state.innings = 2;
         state.ballsBowled = 0;
         state.thisOver = [];
-        state.lastDeliveryTime = Date.now();
+        if (state.p1Runs >= state.p2Runs) {
+            state.battingTeam = 'teamB';
+            state.target = state.p1Runs + 1;
+        } else {
+            state.battingTeam = 'teamA';
+            state.target = state.p2Runs + 1;
+        }
     }
 
-    // Always keep runs anchored strictly to the authoritative oddspapi score
-    if (rawP1 > 0) state.p1Runs = rawP1;
-    if (rawP2 > 0) state.p2Runs = rawP2;
+    const currentRaw = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
 
-    const currentRaw = state.battingTeam === 'teamA' ? rawP1 : rawP2;
-
+    // Real event-driven delivery logging: only record when authoritative runs change
     if (currentRaw > state.lastApiScore) {
-        // Runs increased from API!
         const delta = currentRaw - state.lastApiScore;
         state.lastApiScore = currentRaw;
 
         const delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
-        if (state.ballsBowled % 6 === 0) {
+        if (state.ballsBowled > 0 && state.ballsBowled % 6 === 0) {
             state.thisOver = [];
         }
         state.thisOver.push(delivery);
         state.ballsBowled += 1;
-        state.lastDeliveryTime = Date.now();
-
-        // Update wickets proportionally if milestone reached without random dice
-        if (state.target > 0) {
-            const activeRuns = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
-            if (activeRuns < 75) {
-                if (state.battingTeam === 'teamA') state.p1Wickets = 0;
-                else state.p2Wickets = 0;
-            } else if (activeRuns < 130) {
-                if (state.battingTeam === 'teamA') state.p1Wickets = Math.max(1, state.p1Wickets);
-                else state.p2Wickets = Math.max(1, state.p2Wickets);
-            } else if (activeRuns < 175) {
-                if (state.battingTeam === 'teamA') state.p1Wickets = Math.max(2, state.p1Wickets);
-                else state.p2Wickets = Math.max(2, state.p2Wickets);
-            } else if (activeRuns < 210) {
-                if (state.battingTeam === 'teamA') state.p1Wickets = Math.max(3, state.p1Wickets);
-                else state.p2Wickets = Math.max(3, state.p2Wickets);
-            }
-        }
-    } else if (currentRaw > 0) {
-        // Check if >= 22 seconds elapsed without run change (ball bowled is dot ball '0')
-        const elapsed = Date.now() - state.lastDeliveryTime;
-        if (elapsed >= 22000 && state.ballsBowled < state.format.totalBalls) {
-            if (state.ballsBowled % 6 === 0) {
-                state.thisOver = [];
-            }
-            state.thisOver.push('0');
-            state.ballsBowled += 1;
-            state.lastDeliveryTime = Date.now();
-        }
+        state.lastScoreUpdate = Date.now();
+    } else if (currentRaw < state.lastApiScore) {
+        // Reset or corrected score from API
+        state.lastApiScore = currentRaw;
     }
 
-    // Calculations
+    // Calculations for overs
     const oversCompleted = Math.floor(state.ballsBowled / 6);
     const ballsInOver = state.ballsBowled % 6;
     const overs = `${oversCompleted}.${ballsInOver}`;
@@ -246,8 +304,12 @@ function advanceCricketState(state, liveData) {
         reqRunRate = remBalls > 0 ? ((remRuns / (remBalls / 6))).toFixed(2) : '0.00';
     }
 
-    const teamA_runs = (state.p1Runs > 0 || state.p1Wickets > 0) ? `${state.p1Runs}/${state.p1Wickets}` : "0/0";
-    const teamB_runs = (state.p2Runs > 0 || state.p2Wickets > 0) ? `${state.p2Runs}/${state.p2Wickets}` : "0/0";
+    const teamA_runs = state.p1Wickets > 0 ? `${state.p1Runs}/${state.p1Wickets}` : `${state.p1Runs}`;
+    const teamB_runs = state.p2Wickets > 0 ? `${state.p2Runs}/${state.p2Wickets}` : `${state.p2Runs}`;
+
+    const participant1Name = liveData?.participants?.participant1Name || 'Team 1';
+    const participant2Name = liveData?.participants?.participant2Name || 'Team 2';
+    const battingTeamName = state.battingTeam === 'teamA' ? participant1Name : participant2Name;
 
     return {
         teamA_runs,
@@ -260,13 +322,18 @@ function advanceCricketState(state, liveData) {
         thisOver: state.thisOver,
         remRuns,
         remBalls,
+        battingTeam: state.battingTeam,
+        battingTeamName,
+        innings: state.innings,
         ballsBowled: state.ballsBowled,
-        totalBalls: state.format.totalBalls
+        totalBalls: state.format.totalBalls,
+        scoresBreakdown: state.scoresBreakdown
     };
 }
 
 module.exports = {
     detectFormat,
+    normalizeScoresBreakdown,
     getOrInitializeMatchState,
     advanceCricketState,
     liveMatchState

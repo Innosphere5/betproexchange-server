@@ -21,6 +21,10 @@ const matchSchema = new mongoose.Schema({
     thisOver: { type: [String], default: [] },
     remRuns: { type: Number, default: 0 },
     remBalls: { type: Number, default: 0 },
+    battingTeam: { type: String, default: 'teamA' },
+    battingTeamName: { type: String, default: '' },
+    innings: { type: Number, default: 1 },
+    periods: { type: mongoose.Schema.Types.Mixed, default: {} },
     lastUpdated: { type: Date, default: Date.now }
   },
   startTime: { type: Date, required: true },

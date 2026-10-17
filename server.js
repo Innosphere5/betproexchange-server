@@ -54,6 +54,42 @@ app.use('/api/aviator', aviatorRoutes);
 app.use('/api/aviatorx', aviatorxRoutes);
 app.use('/api/teenpatti', teenPattiRoutes);
 
+// Official GET /v4/scores endpoint as specified by oddsapi.io
+app.get(['/v4/scores', '/api/scores'], async (req, res) => {
+  const fixtureId = req.query.fixtureId;
+  if (!fixtureId) {
+    return res.status(400).json({ error: { message: 'fixtureId is required', code: 'MISSING_PARAM' } });
+  }
+  try {
+    const oddsApiRest = require('./services/oddsApiRest');
+    const data = await oddsApiRest.getScores(fixtureId);
+    return res.status(200).json(data);
+  } catch (err) {
+    const Match = require('./models/Match');
+    const altMatchId = String(fixtureId).startsWith('id') ? String(fixtureId).replace(/^id/, '') : ('id' + String(fixtureId));
+    const match = await Match.findOne({
+      $or: [{ matchId: { $in: [fixtureId, altMatchId] } }, { oddsApiEventId: { $in: [fixtureId, altMatchId] } }]
+    });
+    if (match) {
+      if (match.score?.periods && Object.keys(match.score.periods).length > 0) {
+        return res.status(200).json({ fixtureId, scores: match.score.periods });
+      }
+      const p1 = parseInt(String(match.score?.teamA_runs || '0').split(/[\/-]/)[0], 10) || 0;
+      const p2 = parseInt(String(match.score?.teamB_runs || '0').split(/[\/-]/)[0], 10) || 0;
+      const nowIso = (match.score?.lastUpdated || new Date()).toISOString();
+      return res.status(200).json({
+        fixtureId,
+        scores: {
+          "0": { participant1Score: p1, participant2Score: p2, updatedAt: nowIso },
+          "1": { participant1Score: p1, participant2Score: 0, updatedAt: nowIso },
+          "2": { participant1Score: 0, participant2Score: p2, updatedAt: nowIso }
+        }
+      });
+    }
+    return res.status(404).json({ error: { message: 'Fixture scores not found', code: 'NOT_FOUND' } });
+  }
+});
+
 // MongoDB Connection Options
 mongoose.set('bufferCommands', true);
 

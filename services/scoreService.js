@@ -48,7 +48,11 @@ const extractLiveScorePayload = (liveData, existingScore = {}) => {
         reqRunRate: computed.reqRunRate,
         thisOver: computed.thisOver,
         remRuns: computed.remRuns,
-        remBalls: computed.remBalls
+        remBalls: computed.remBalls,
+        battingTeam: computed.battingTeam,
+        battingTeamName: computed.battingTeamName,
+        innings: computed.innings,
+        periods: computed.scoresBreakdown || {}
     };
 };
 
@@ -102,20 +106,33 @@ const updateLiveScores = async (io) => {
                                   liveData.status?.statusId === 2 ||
                                   liveData.trueEndTime != null;
 
-            const isTargetReached = parsedScore.target > 0 && 
-                                    ((p1Total >= parsedScore.target && p1Total > p2Total) || 
-                                     (p2Total >= parsedScore.target && p2Total > p1Total));
+            const isTargetReached = parsedScore.target > 0 && (
+                (parsedScore.battingTeam === 'teamB' && p2Total >= parsedScore.target) ||
+                (parsedScore.battingTeam === 'teamA' && p1Total >= parsedScore.target)
+            );
 
-            const isBallsExhausted = parsedScore.target > 0 && parsedScore.remBalls === 0;
+            const isBallsExhausted = parsedScore.target > 0 && parsedScore.remBalls === 0 && parsedScore.remRuns > 0;
 
             const isFinished = isApiFinished || isTargetReached || isBallsExhausted;
 
             let winner = matchInDb.winner;
 
             if (isFinished) {
-                if (p1Total > p2Total) winner = matchInDb.teamA;
-                else if (p2Total > p1Total) winner = matchInDb.teamB;
-                else winner = 'TIE';
+                if (parsedScore.target > 0) {
+                    if (isTargetReached) {
+                        winner = parsedScore.battingTeam === 'teamB' ? matchInDb.teamB : matchInDb.teamA;
+                    } else if (p1Total > p2Total) {
+                        winner = matchInDb.teamA;
+                    } else if (p2Total > p1Total) {
+                        winner = matchInDb.teamB;
+                    } else {
+                        winner = 'TIE';
+                    }
+                } else {
+                    if (p1Total > p2Total) winner = matchInDb.teamA;
+                    else if (p2Total > p1Total) winner = matchInDb.teamB;
+                    else winner = 'TIE';
+                }
             }
 
             const currentStatus = isFinished ? 'completed' : 'live';
@@ -130,6 +147,7 @@ const updateLiveScores = async (io) => {
                 matchInDb.score?.thisOver?.join(',') !== parsedScore.thisOver.join(',') ||
                 matchInDb.score?.remRuns !== parsedScore.remRuns ||
                 matchInDb.score?.remBalls !== parsedScore.remBalls ||
+                matchInDb.score?.battingTeam !== parsedScore.battingTeam ||
                 matchInDb.status !== currentStatus
             );
 
@@ -151,6 +169,10 @@ const updateLiveScores = async (io) => {
                                 thisOver:   parsedScore.thisOver,
                                 remRuns:    parsedScore.remRuns,
                                 remBalls:   parsedScore.remBalls,
+                                battingTeam: parsedScore.battingTeam,
+                                battingTeamName: parsedScore.battingTeamName,
+                                innings:    parsedScore.innings,
+                                periods:    parsedScore.periods,
                                 lastUpdated: new Date()
                             },
                             lastUpdated: new Date()
@@ -163,7 +185,7 @@ const updateLiveScores = async (io) => {
             if (io) {
                 io.emit('live_score_update', {
                     matchId:    matchId,
-                    score:      p1Total,
+                    score:      parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
                     overs:      oversDisplay,
                     wickets:    parsedScore.wickets,
                     status:     currentStatus,
@@ -174,7 +196,11 @@ const updateLiveScores = async (io) => {
                     reqRunRate: parsedScore.reqRunRate,
                     thisOver:   parsedScore.thisOver,
                     remRuns:    parsedScore.remRuns,
-                    remBalls:   parsedScore.remBalls
+                    remBalls:   parsedScore.remBalls,
+                    battingTeam: parsedScore.battingTeam,
+                    battingTeamName: parsedScore.battingTeamName,
+                    innings:    parsedScore.innings,
+                    periods:    parsedScore.periods
                 });
 
                 const fancyMarketsService = require('./fancyMarketsService');
