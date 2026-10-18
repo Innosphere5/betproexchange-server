@@ -10,6 +10,7 @@ require('dotenv').config();
 
 const compression = require('compression');
 const User = require('./models/User');
+const Match = require('./models/Match');
 const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { initRoundManager, getCurrentRound } = require('./services/roundManager');
@@ -172,9 +173,29 @@ app.get('/api/user/wallet', auth, async (req, res) => {
 // Bet Placement Endpoint
 app.post('/api/user/bet', auth, async (req, res) => {
   try {
-    const { matchId, matchName, runner, stake, odds, isLive, type, marketType } = req.body;
+    const { matchId, runner, stake, odds, isLive, type, marketType } = req.body;
     if (!matchId) return res.status(400).json({ error: 'Missing matchId' });
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
+
+    // Validate that the match exists in the database from real API feed
+    const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+    const matchInDb = await Match.findOne({ matchId: { $in: [matchId, altMatchId] } });
+    if (!matchInDb) {
+      return res.status(404).json({ error: 'Match not found or is no longer available' });
+    }
+    if (matchInDb.status === 'completed' || matchInDb.status === 'cancelled') {
+      return res.status(400).json({ error: 'This match has already concluded' });
+    }
+    if (marketType === 'bookmaker' && matchInDb.bookmakerMarketStatus === 'CLOSED') {
+      return res.status(400).json({ error: 'Bookmaker market is closed for this match' });
+    }
+    if (matchInDb.marketStatus === 'CLOSED') {
+      return res.status(400).json({ error: 'Market is closed for this match' });
+    }
+
+    const officialMatchName = (matchInDb.teamA && matchInDb.teamB) 
+      ? `${matchInDb.teamA} v ${matchInDb.teamB}` 
+      : (req.body.matchName || 'Cricket Match');
 
     // Enforce toss market max bet of 2M
     if (marketType === 'toss' && stake > 2000000) {
@@ -212,7 +233,7 @@ app.post('/api/user/bet', auth, async (req, res) => {
     const user = await User.findOneAndUpdate(
       { username: req.user.userId, walletBalance: { $gte: liability } },
       { $inc: { walletBalance: -liability } },
-      { new: true }
+      { returnDocument: 'after' }
     );
 
     if (!user) return res.status(400).json({ error: 'Insufficient balance for bet liability' });
@@ -220,7 +241,7 @@ app.post('/api/user/bet', auth, async (req, res) => {
     const newBet = new Bet({
       userId: req.user.userId,
       matchId,
-      matchName,
+      matchName: officialMatchName,
       runner,
       stake,
       odds,
@@ -238,7 +259,8 @@ app.post('/api/user/bet', auth, async (req, res) => {
 
     res.json({ success: true, balance: user.walletBalance, bet: newBet });
   } catch (err) {
-    res.status(500).json({ error: 'Bet placement failed' });
+    console.error('[BET PLACEMENT ERROR]', err);
+    res.status(500).json({ error: err.message || 'Bet placement failed' });
   }
 });
 

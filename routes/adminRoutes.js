@@ -934,35 +934,10 @@ router.get('/current-position', auth, isAuthorized, async (req, res) => {
       matchId: { $in: betMatchIds }
     }).lean();
 
+    // Only include real verified matches from DB
+    const validMatchesFromDb = matchesFromDb.filter(m => m && m.teamA && m.teamB);
     const matchMap = new Map();
-    matchesFromDb.forEach(m => matchMap.set(m.matchId, m));
-
-    // Reconstruct match object if not in DB
-    bets.forEach(b => {
-      if (b.matchId && !matchMap.has(b.matchId)) {
-        let teamA = 'Team A';
-        let teamB = 'Team B';
-        if (b.matchName && (b.matchName.includes(' v ') || b.matchName.includes(' vs '))) {
-          const sep = b.matchName.includes(' v ') ? ' v ' : ' vs ';
-          const parts = b.matchName.split(sep);
-          teamA = parts[0]?.trim() || teamA;
-          teamB = parts[1]?.trim() || teamB;
-        } else if (b.runner) {
-          teamA = b.runner;
-        }
-        matchMap.set(b.matchId, {
-          matchId: b.matchId,
-          teamA,
-          teamB,
-          status: 'live',
-          winner: null,
-          backOddsA: b.odds || null,
-          layOddsA: null,
-          backOddsB: null,
-          layOddsB: null
-        });
-      }
-    });
+    validMatchesFromDb.forEach(m => matchMap.set(m.matchId, m));
 
     const COMMISSION_RATE = 0.05; // 5% exchange commission
     const results = [];
@@ -1272,36 +1247,10 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
       ]
     }).select('matchId teamA teamB status winner backOddsA backOddsB layOddsA layOddsB startTime updatedAt').lean();
 
-    // Map existing DB matches
+    // Only include real verified matches from DB
+    const validMatchesFromDb = matchesFromDb.filter(m => m && m.teamA && m.teamB);
     const matchMap = new Map();
-    matchesFromDb.forEach(m => matchMap.set(m.matchId, m));
-
-    // For any bets where match is not in DB, create a synthetic match representation from bet details
-    bets.forEach(b => {
-      if (b.matchId && !matchMap.has(b.matchId)) {
-        let teamA = 'Team A';
-        let teamB = 'Team B';
-        if (b.matchName && (b.matchName.includes(' v ') || b.matchName.includes(' vs '))) {
-          const sep = b.matchName.includes(' v ') ? ' v ' : ' vs ';
-          const parts = b.matchName.split(sep);
-          teamA = parts[0]?.trim() || teamA;
-          teamB = parts[1]?.trim() || teamB;
-        } else if (b.runner) {
-          teamA = b.runner;
-        }
-        matchMap.set(b.matchId, {
-          matchId: b.matchId,
-          teamA,
-          teamB,
-          status: 'live',
-          winner: null,
-          backOddsA: b.odds || null,
-          layOddsA: null,
-          backOddsB: null,
-          layOddsB: null
-        });
-      }
-    });
+    validMatchesFromDb.forEach(m => matchMap.set(m.matchId, m));
 
     const activeMatches = Array.from(matchMap.values());
 
@@ -1436,21 +1385,26 @@ router.get('/dashboard-stats', auth, isAuthorized, async (req, res) => {
           }
         });
 
-        // Resolve odds for this runner
+        // Resolve odds for this runner (hidden if match is completed / resulted)
         let backOdds = '--';
         let layOdds = '--';
-        if (normalizedR === m.teamA?.toLowerCase()) {
-          backOdds = m.backOddsA || '--';
-          layOdds = m.layOddsA || '--';
-        } else if (normalizedR === m.teamB?.toLowerCase()) {
-          backOdds = m.backOddsB || '--';
-          layOdds = m.layOddsB || '--';
-        }
+        if (isResulted) {
+          backOdds = '--';
+          layOdds = '--';
+        } else {
+          if (normalizedR === m.teamA?.toLowerCase()) {
+            backOdds = m.backOddsA || '--';
+            layOdds = m.layOddsA || '--';
+          } else if (normalizedR === m.teamB?.toLowerCase()) {
+            backOdds = m.backOddsB || '--';
+            layOdds = m.layOddsB || '--';
+          }
 
-        // If odds not in match doc, use latest bet odds
-        if (backOdds === '--' || backOdds == null) {
-          const sampleBet = matchBets.find(b => b.runner?.toLowerCase() === normalizedR);
-          if (sampleBet) backOdds = sampleBet.odds;
+          // If odds not in match doc, use latest bet odds only when live
+          if (backOdds === '--' || backOdds == null) {
+            const sampleBet = matchBets.find(b => b.runner?.toLowerCase() === normalizedR);
+            if (sampleBet) backOdds = sampleBet.odds;
+          }
         }
 
         const avgShare = totalStake > 0 ? Math.round(totalNetShareWeighted / totalStake) : (parent.share || 0);
@@ -2875,6 +2829,16 @@ router.post('/declare-match-winner', auth, isAuthorized, async (req, res) => {
     
     match.status = 'completed';
     match.winner = normDeclared;
+    match.marketStatus = 'CLOSED';
+    match.bookmakerMarketStatus = 'CLOSED';
+    match.backOddsA = null;
+    match.layOddsA = null;
+    match.backOddsB = null;
+    match.layOddsB = null;
+    match.bookmakerBackA = null;
+    match.bookmakerLayA = null;
+    match.bookmakerBackB = null;
+    match.bookmakerLayB = null;
     await match.save();
 
     const io = req.app.get('io');

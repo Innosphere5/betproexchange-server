@@ -9,20 +9,34 @@ const { settleMatch } = require('./settlementService');
  * Uses oddspapi REST API to fetch recently completed fixtures,
  * determine the winner, and trigger bet settlement.
  * 
- * ENHANCED: Also checks for results of every "MATCHED" bet in the DB, 
- * even if the Match object was deleted or is old.
+ * ENHANCED:
+ * 1. Checks all pending matches and ALL un-settled bets in DB.
+ * 2. Directly passes fixtureIds to Oddspapi v5 to retrieve official finished status & scores.
+ * 3. Handles flexible fixtureId matching (with/without 'id' prefix).
+ * 4. Extracts winner from Oddspapi scores (result, fulltime, or period breakdown).
+ * 5. Upserts Match record in DB if missing/pruned so UI reflects completed status & winner.
+ * 6. Invokes settleMatch which calculates liability/profit, updates wallets, and distributes
+ *    P/L up the hierarchy chain to reflect accurately in Daily Report and Final Sheet.
  */
 const processMatchResults = async (io) => {
     try {
         console.log('[ResultSettlement] Checking for completed match results...');
         
-        // 1. Get IDs from pending matches in DB
-        const pendingMatches = await Match.find({ status: { $ne: 'completed' } });
-        const pendingMatchIds = pendingMatches.map(m => m.matchId);
+        // 1. Get IDs from pending/un-resulted matches in DB
+        const pendingMatches = await Match.find({
+            $or: [
+                { status: { $ne: 'completed' } },
+                { winner: null },
+                { winner: { $exists: false } }
+            ]
+        });
+        const pendingMatchIds = pendingMatches.map(m => m.matchId).filter(Boolean);
 
-        // 2. Get IDs from active bets (this catches old matches that were pruned from DB)
-        const activeBets = await Bet.find({ status: { $in: ['pending', 'MATCHED'] }, marketType: { $ne: 'toss' } });
-        const betMatchIds = [...new Set(activeBets.map(b => b.matchId))];
+        // 2. Get IDs from active/unsettled bets (catches matches that were pruned from DB)
+        const activeBets = await Bet.find({
+            status: { $in: ['pending', 'MATCHED'] }
+        });
+        const betMatchIds = [...new Set(activeBets.map(b => b.matchId).filter(Boolean))];
 
         // Combine unique IDs to check
         const allIdsToCheck = [...new Set([...pendingMatchIds, ...betMatchIds])];
@@ -32,123 +46,216 @@ const processMatchResults = async (io) => {
             return;
         }
 
-        console.log(`[ResultSettlement] Found ${allIdsToCheck.length} unique match IDs to check result status.`);
+        console.log(`[ResultSettlement] Found ${allIdsToCheck.length} unique match IDs to check result status:`, allIdsToCheck);
 
-        // Fetch today's fixtures from oddspapi (covers yesterday through tomorrow)
-        const yesterdayTs = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
-        const tomorrowTs = Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000);
-
-        console.log(`[ResultSettlement] Fetching fixtures from oddspapi...`);
-
-        const response = await getData('fixtures', {
-            params: {
-                startTimeFrom: yesterdayTs,
-                startTimeTo: tomorrowTs,
+        // 3. Collect API fixtures:
+        // A. Direct targeted fetch by fixtureIds (handles fixtures regardless of start date)
+        // Format IDs both as original and with/without 'id' prefix to ensure Oddspapi matches
+        const formattedFixtureIds = [];
+        allIdsToCheck.forEach(id => {
+            const raw = String(id).trim();
+            if (raw) {
+                formattedFixtureIds.push(raw);
+                if (raw.startsWith('id')) {
+                    formattedFixtureIds.push(raw.replace(/^id/, ''));
+                } else {
+                    formattedFixtureIds.push(`id${raw}`);
+                }
             }
         });
 
-        if (!response || !Array.isArray(response)) {
-            console.warn('[ResultSettlement] API returned no fixture data.');
-            return;
+        const uniqueApiIds = [...new Set(formattedFixtureIds)];
+        const apiFixturesMap = new Map();
+
+        // Batch in groups of 20 IDs for Oddspapi
+        const BATCH_SIZE = 20;
+        for (let i = 0; i < uniqueApiIds.length; i += BATCH_SIZE) {
+            const chunk = uniqueApiIds.slice(i, i + BATCH_SIZE);
+            try {
+                const chunkResponse = await getData('fixtures', {
+                    params: { fixtureIds: chunk.join(',') }
+                });
+                if (Array.isArray(chunkResponse)) {
+                    chunkResponse.forEach(f => {
+                        const fId = String(f.fixtureId || f.id || '');
+                        if (fId) {
+                            apiFixturesMap.set(fId, f);
+                            apiFixturesMap.set(fId.replace(/^id/, ''), f);
+                            apiFixturesMap.set(`id${fId.replace(/^id/, '')}`, f);
+                        }
+                    });
+                }
+            } catch (err) {
+                console.warn(`[ResultSettlement] Failed to fetch fixtures chunk:`, err.message);
+            }
         }
 
-        const apiFixtures = response;
-        console.log(`[ResultSettlement] Fetched ${apiFixtures.length} fixtures for the check.`);
+        // B. Also fetch general recent fixtures window as a fallback
+        const yesterdayTs = Math.floor((Date.now() - 36 * 60 * 60 * 1000) / 1000);
+        const tomorrowTs = Math.floor((Date.now() + 24 * 60 * 60 * 1000) / 1000);
+
+        try {
+            const windowResponse = await getData('fixtures', {
+                params: {
+                    startTimeFrom: yesterdayTs,
+                    startTimeTo: tomorrowTs,
+                }
+            });
+            if (Array.isArray(windowResponse)) {
+                windowResponse.forEach(f => {
+                    const fId = String(f.fixtureId || f.id || '');
+                    if (fId && !apiFixturesMap.has(fId)) {
+                        apiFixturesMap.set(fId, f);
+                        apiFixturesMap.set(fId.replace(/^id/, ''), f);
+                        apiFixturesMap.set(`id${fId.replace(/^id/, '')}`, f);
+                    }
+                });
+            }
+        } catch (err) {
+            console.warn(`[ResultSettlement] Failed window fetch:`, err.message);
+        }
+
+        console.log(`[ResultSettlement] Total API fixtures retrieved for settlement evaluation: ${apiFixturesMap.size}`);
 
         for (const matchId of allIdsToCheck) {
-            const apiMatch = apiFixtures.find(f => f.fixtureId === matchId);
+            const cleanId = String(matchId).replace(/^id/, '');
+            const altId = String(matchId).startsWith('id') ? cleanId : `id${cleanId}`;
+
+            const apiMatch = apiFixturesMap.get(String(matchId)) ||
+                             apiFixturesMap.get(cleanId) ||
+                             apiFixturesMap.get(altId);
 
             if (!apiMatch) {
                 continue;
             }
 
+            const statusObj = apiMatch.status || {};
+            const statusName = String(statusObj.statusName || '').toLowerCase().trim();
+            const statusId = Number(statusObj.statusId);
+
             // oddspapi statuses: statusId=2 means "Finished", statusId=3 means "Cancelled"
-            const isCompleted = apiMatch.status?.statusName === 'Finished' || 
-                                apiMatch.status?.statusId === 2 ||
+            const isCompleted = statusName === 'finished' || 
+                                statusName === 'ended' ||
+                                statusId === 2 ||
                                 apiMatch.trueEndTime != null;
 
-            const isCancelled = apiMatch.status?.statusName === 'Cancelled' ||
-                                apiMatch.status?.statusId === 3;
+            const isCancelled = statusName === 'cancelled' ||
+                                statusName === 'abandoned' ||
+                                statusId === 3;
 
-            // OddsPapi v5 Update (9 Oct 2026): Handle reissuedFixtureId for postponed/re-listed matches
+            // Handle reissuedFixtureId for postponed/re-listed matches
             if (isCancelled) {
                 const reissuedId = apiMatch.reissuedFixtureId;
                 if (reissuedId) {
-                    console.log(`[ResultSettlement] 🔁 Match ${matchId} fixture ${apiMatch.fixtureId} reissued as ${reissuedId}. Carrying over bets & positions...`);
-                    const dbMatch = pendingMatches.find(m => m.matchId === matchId);
-                    if (dbMatch) {
-                        dbMatch.reissuedFixtureId = reissuedId;
-                        dbMatch.oddsApiEventId = reissuedId;
-                        dbMatch.lastUpdated = new Date();
-                        await dbMatch.save();
-                    }
-                    // Do NOT refund bets; positions are carried over to replacement fixture
+                    console.log(`[ResultSettlement] 🔁 Match ${matchId} fixture reissued as ${reissuedId}. Carrying over bets...`);
+                    await Match.updateMany(
+                        { matchId: { $in: [matchId, altId] } },
+                        { $set: { reissuedFixtureId: reissuedId, oddsApiEventId: reissuedId, lastUpdated: new Date() } }
+                    );
                     continue;
                 }
 
-                // If reissuedFixtureId is null, per OddsPapi v5 docs: "plenty of cancellations get one hours or days later"
-                // Only settle as REFUND if the match start time was > 12h ago (permanent cancellation confirmed)
                 const startTimeMs = apiMatch.startTime ? apiMatch.startTime * 1000 : 0;
                 const hoursSinceStart = startTimeMs > 0 ? (Date.now() - startTimeMs) / (1000 * 60 * 60) : 0;
 
                 if (hoursSinceStart > 12) {
-                    console.log(`[ResultSettlement] ⛔ Permanent cancellation confirmed for ${matchId} (no reissuedFixtureId after 12h). Refunding bets.`);
-                    const dbMatch = pendingMatches.find(m => m.matchId === matchId);
-                    if (dbMatch) {
-                        dbMatch.status = 'completed';
-                        dbMatch.winner = 'REFUND';
-                        dbMatch.lastUpdated = new Date();
-                        await dbMatch.save();
-                    }
+                    console.log(`[ResultSettlement] ⛔ Permanent cancellation confirmed for ${matchId}. Refunding bets.`);
+                    await Match.updateMany(
+                        { matchId: { $in: [matchId, altId] } },
+                        { $set: { status: 'completed', winner: 'REFUND', marketStatus: 'CLOSED', lastUpdated: new Date() } }
+                    );
                     await settleMatch(matchId, 'REFUND', io);
-                } else {
-                    console.log(`[ResultSettlement] ⏳ Match ${matchId} cancelled with null reissuedFixtureId. Holding settlement for possible reissue.`);
                 }
                 continue;
             }
 
             if (isCompleted) {
-                console.log(`[ResultSettlement] 🏆 Match ${matchId} is ${apiMatch.status?.statusName}.`);
+                console.log(`[ResultSettlement] 🏆 Match ${matchId} (${apiMatch.participants?.participant1Name} v ${apiMatch.participants?.participant2Name}) is FINISHED.`);
 
-                let winningTeam = 'VOID'; 
+                // Extract scores
+                const scoresObj = apiMatch.scores || {};
+                const resultScore = scoresObj.result || scoresObj.fulltime || scoresObj['0'] || {};
+                let p1Score = Number(resultScore.participant1Score || 0);
+                let p2Score = Number(resultScore.participant2Score || 0);
 
-                // 1. Update Match record if it exists
-                const dbMatch = pendingMatches.find(m => m.matchId === matchId);
-
-                if (apiMatch.status?.statusName === 'Finished') {
-                    const p1Score = apiMatch.scores?.result?.participant1Score || 0;
-                    const p2Score = apiMatch.scores?.result?.participant2Score || 0;
-                    const p1Name = dbMatch?.teamA || apiMatch.participants?.participant1Name || 'Team 1';
-                    const p2Name = dbMatch?.teamB || apiMatch.participants?.participant2Name || 'Team 2';
-
-                    if (p1Score > p2Score) winningTeam = p1Name;
-                    else if (p2Score > p1Score) winningTeam = p2Name;
-                    else winningTeam = 'TIE';
+                // Fallback score scan across periods if result/fulltime not explicitly set
+                if (p1Score === 0 && p2Score === 0) {
+                    for (const [key, val] of Object.entries(scoresObj)) {
+                        if (val && typeof val === 'object') {
+                            const s1 = Number(val.participant1Score || 0);
+                            const s2 = Number(val.participant2Score || 0);
+                            if (s1 > p1Score) p1Score = s1;
+                            if (s2 > p2Score) p2Score = s2;
+                        }
+                    }
                 }
 
-                console.log(`[ResultSettlement] Identified winner for ${matchId}: ${winningTeam}`);
+                let dbMatch = await Match.findOne({ matchId: { $in: [matchId, altId] } });
+                const sampleBet = activeBets.find(b => b.matchId === matchId || b.matchId === altId);
 
-                if (dbMatch) {
-                    const p1Score = apiMatch.scores?.result?.participant1Score || 0;
-                    const p2Score = apiMatch.scores?.result?.participant2Score || 0;
+                const p1Name = dbMatch?.teamA || apiMatch.participants?.participant1Name || 'Team 1';
+                const p2Name = dbMatch?.teamB || apiMatch.participants?.participant2Name || 'Team 2';
 
-                    dbMatch.status = 'completed';
-                    dbMatch.winner = winningTeam;
-                    dbMatch.score = {
-                        teamA_runs: `${p1Score}`,
-                        teamB_runs: `${p2Score}`,
-                        overs: "Final",
-                        lastUpdated: new Date()
-                    };
-                    await dbMatch.save();
+                let winningTeam = 'VOID';
+                if (p1Score > p2Score) winningTeam = p1Name;
+                else if (p2Score > p1Score) winningTeam = p2Name;
+                else if (p1Score > 0 && p1Score === p2Score) winningTeam = 'TIE';
+                else if (sampleBet && sampleBet.matchName) {
+                    // If scores are somehow tie or 0/0, use tie or result from external provider
+                    winningTeam = p1Score > p2Score ? p1Name : (p2Score > p1Score ? p2Name : 'TIE');
                 }
 
-                // 2. Trigger Bet Settlement for this match
+                console.log(`[ResultSettlement] Identified winner for ${matchId}: "${winningTeam}" (Scores: ${p1Name} ${p1Score} - ${p2Name} ${p2Score})`);
+
+                // Upsert Match record in DB so it permanently shows completed with winner
+                const updatedMatch = await Match.findOneAndUpdate(
+                    { matchId: { $in: [matchId, altId] } },
+                    {
+                        $set: {
+                            matchId: matchId,
+                            oddsApiEventId: apiMatch.fixtureId || apiMatch.id || matchId,
+                            teamA: p1Name,
+                            teamB: p2Name,
+                            league: apiMatch.tournament?.tournamentName || dbMatch?.league || 'Cricket',
+                            status: 'completed',
+                            winner: winningTeam,
+                            score: {
+                                teamA_runs: `${p1Score}`,
+                                teamB_runs: `${p2Score}`,
+                                overs: "Final",
+                                lastUpdated: new Date()
+                            },
+                            marketStatus: 'CLOSED',
+                            bookmakerMarketStatus: 'CLOSED',
+                            backOddsA: null,
+                            layOddsA: null,
+                            backOddsB: null,
+                            layOddsB: null,
+                            bookmakerBackA: null,
+                            bookmakerLayA: null,
+                            bookmakerBackB: null,
+                            bookmakerLayB: null,
+                            lastUpdated: new Date()
+                        }
+                    },
+                    { upsert: true, new: true }
+                );
+
+                // Trigger Bet Settlement for this match across all parent hierarchies
                 await settleMatch(matchId, winningTeam, io);
+
+                if (io && updatedMatch) {
+                    io.emit('match_updated', updatedMatch);
+                    io.emit('match_settled', {
+                        matchId: matchId,
+                        winner: winningTeam,
+                        score: updatedMatch.score
+                    });
+                }
             }
         }
 
-        // Notify UI about match updates
+        // Notify UI about match list updates
         if (io) {
             const allMatches = await Match.find().sort({ startTime: 1 });
             io.emit('matches_updated', allMatches);

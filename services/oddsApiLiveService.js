@@ -1131,6 +1131,17 @@ class OddsApiLiveService {
         { oddsApiEventId: msg.reissuedFixtureId, updatedAt: new Date() }
       ).catch(() => {});
     }
+
+    // Real-time Match Completion detection & automated settlement
+    const isFinished = Number(msg.statusId) === 2 ||
+                       String(msg.status || '').toLowerCase() === "finished" ||
+                       String(msg.status || '').toLowerCase() === "ended" ||
+                       String(msg.statusName || '').toLowerCase() === "finished";
+    if (isFinished) {
+      console.log(`[OddsApiLive] 🏆 Live event ${eventId} (match ${matchId}) status updated to Finished. Triggering settlement pipeline...`);
+      const { processMatchResults } = require("./resultSettlementService");
+      processMatchResults(this.io).catch(e => console.error("[OddsApiLive] Settlement trigger error:", e.message));
+    }
   }
 
   async updateMarketStatus(matchId, status) {

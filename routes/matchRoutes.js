@@ -129,26 +129,27 @@ router.get('/:id', async (req, res) => {
                 } else if (sampleBet.runner) {
                     teamA = sampleBet.runner;
                 }
+                const isSettled = ['won', 'lost', 'cancelled', 'refund'].includes(sampleBet.status?.toLowerCase());
                 const reconstructed = {
                     matchId: req.params.id,
                     name: sampleBet.matchName || `${teamA} v ${teamB}`,
                     teamA,
                     teamB,
                     league: 'Cricket Match',
-                    status: 'live',
-                    inplay: true,
-                    backOddsA: sampleBet.odds || 1.95,
-                    layOddsA: sampleBet.odds ? Number((Number(sampleBet.odds) + 0.02).toFixed(2)) : 1.97,
-                    backOddsB: 2.05,
-                    layOddsB: 2.08,
-                    startTime: new Date(),
+                    status: isSettled ? 'completed' : 'live',
+                    inplay: !isSettled,
+                    isCompleted: isSettled,
+                    winner: sampleBet.result || null,
+                    backOddsA: isSettled ? null : (sampleBet.odds || null),
+                    layOddsA: null,
+                    backOddsB: null,
+                    layOddsB: null,
+                    startTime: sampleBet.createdAt || new Date(),
+                    marketStatus: isSettled ? 'CLOSED' : 'SUSPENDED',
+                    bookmakerMarketStatus: isSettled ? 'CLOSED' : 'SUSPENDED',
                     score: {
-                        teamA_runs: '188',
-                        teamA_wickets: '3',
-                        overs: '18',
-                        crr: '10.44',
-                        thisOver: '1 1 4 4 1 1',
-                        overRuns: '12'
+                        overs: isSettled ? 'Final' : '0.0',
+                        lastUpdated: new Date()
                     },
                     toObject: function() { return this; }
                 };
@@ -162,11 +163,28 @@ router.get('/:id', async (req, res) => {
         match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
 
         const response = match.toObject ? match.toObject() : match;
-        if (match.status === 'completed' || match.status === 'resulted') {
+        const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);
+        if (isMatchCompleted) {
             response.api_message = "Match is completed and result has been declared.";
             response.isCompleted = true;
+            response.status = 'completed';
+            response.marketStatus = 'CLOSED';
+            response.bookmakerMarketStatus = 'CLOSED';
+            response.tossMarketStatus = 'CLOSED';
+            response.backOddsA = null;
+            response.layOddsA = null;
+            response.backOddsB = null;
+            response.layOddsB = null;
+            response.bookmakerBackA = null;
+            response.bookmakerLayA = null;
+            response.bookmakerBackB = null;
+            response.bookmakerLayB = null;
+            response.tossBackA = null;
+            response.tossLayA = null;
+            response.tossBackB = null;
+            response.tossLayB = null;
+            response.winner = match.winner || response.winner || null;
         } else {
-            response.winner = null;
             response.isCompleted = false;
         }
 

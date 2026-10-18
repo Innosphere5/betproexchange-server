@@ -79,7 +79,11 @@ const updateLiveScores = async (io) => {
             let matchInDb = await Match.findOne({ matchId });
 
             if (!matchInDb) {
-                // Upsert new live match if it was missed by matchService
+                const { shouldIncludeFixture } = require('./fixtureFilter');
+                if (!shouldIncludeFixture(liveData)) {
+                    continue;
+                }
+                // Upsert new live match if it was missed by matchService and passes filter
                 matchInDb = await Match.create({
                     matchId: matchId,
                     tournamentId: liveData.tournament?.tournamentId || null,
@@ -91,7 +95,7 @@ const updateLiveScores = async (io) => {
                     sportKey: 'cricket_international',
                     lastUpdated: new Date()
                 });
-                console.log(`[ScoreService] Automatically added missing LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
+                console.log(`[ScoreService] Automatically added verified real LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
             }
 
             const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
@@ -215,14 +219,10 @@ const updateLiveScores = async (io) => {
             matchId: { $nin: liveMatchIdsFromApi } 
         });
 
-        for (const match of staleMatches) {
-            // If match started more than 4 hours ago and is not in live feed, mark as completed
-            const fourHoursAgo = new Date(Date.now() - 4 * 60 * 60 * 1000);
-            if (match.startTime < fourHoursAgo) {
-                console.log(`[ScoreService] 🏁 Marking stale live match as completed: ${match.teamA} v ${match.teamB}`);
-                await Match.updateOne({ matchId: match.matchId }, { $set: { status: 'completed' } });
-                updatedCount++;
-            }
+        if (staleMatches.length > 0) {
+            console.log(`[ScoreService] 🏁 Found ${staleMatches.length} stale live matches not in live feed. Triggering result settlement evaluation...`);
+            const { processMatchResults } = require('./resultSettlementService');
+            processMatchResults(io).catch(err => console.error('[ScoreService] Settlement trigger error:', err.message));
         }
 
         if (updatedCount > 0) {
