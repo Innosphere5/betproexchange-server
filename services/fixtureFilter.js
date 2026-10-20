@@ -61,6 +61,14 @@ const TIER1_FRANCHISE_LEAGUES = [
   "mlc",
   "womens premier league",
   "wpl",
+  "t20 south africa cup",
+  "south africa cup",
+  "csa",
+  "one-day cup",
+  "sheffield shield",
+  "super smash",
+  "vitality blast",
+  "t20 blast",
 ];
 
 const DOMESTIC_BLACKLIST_PATTERNS = [
@@ -70,22 +78,10 @@ const DOMESTIC_BLACKLIST_PATTERNS = [
   /\b(u19|u 19|under 19|under 19s|u23|under 23|youth)\b/i,
   // Legends / Veterans / Masters / Exhibition
   /\b(legends|championship of legends|road safety|veterans|masters)\b/i,
-  // "A" teams / second-tier development / emerging
-  /\b(india a|australia a|england lions|pakistan shaheens|south africa emerging|nigeria a|team a|new zealand a|west indies a)\b/i,
-  // South African domestic leagues
-  /\b(csa t20 challenge|csa 4 day|csa pro50|csa pro20|csa provincial)\b/i,
-  // Australian domestic state cricket
-  /\b(marsh one day|sheffield shield)\b/i,
-  // USA / Regional minor leagues
-  /\b(minor league|minor league cricket)\b/i,
-  // Local African / Regional cups
-  /\b(eswatini|t10 eswatini|eswatini cup|nigeria quadrangular|quadrangular|north american cup)\b/i,
-  // Minor local Indian State T20 leagues
-  /\b(odisha pro t20|uttarakhand premier league|andhra premier league|pondicherry|bengal pro|tamil nadu premier|tnpl|maharaja trophy|kpl|delhi premier league|dpl|up t20|baroda premier|saurashtra premier|mumbai t20)\b/i,
-  // European T10 / amateur
+  // European T10 amateur / club
   /\b(european cricket|ecs|ecl|t10 european)\b/i,
-  // Club / invitational cricket
-  /\b(cricket club|club xi|county championship|second xi|2nd xi)\b/i,
+  // Minor local club cricket
+  /\b(cricket club|club xi)\b/i,
 ];
 
 function isVirtualOrSimulated(fixture) {
@@ -248,7 +244,33 @@ function isTargetBPExchFixture(fixture) {
 }
 
 function isInternationalFixture(fixture) {
-  return isTargetBPExchFixture(fixture);
+  if (!fixture) return false;
+  const p1 = normalizeText(
+    fixture?.participants?.participant1Name || fixture?.home_team || fixture?.teamA || "",
+  );
+  const p2 = normalizeText(
+    fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "",
+  );
+  const tName = normalizeText(
+    fixture?.tournament?.tournamentName || fixture?.league || fixture?.tournament || "",
+  );
+  return (
+    isNationalTeam(p1) ||
+    isNationalTeam(p2) ||
+    /\b(odi|t20i|test series|tri series|world cup|champions trophy|asia cup|icc)\b/i.test(tName)
+  );
+}
+
+function isPakistanOrIndia(teamStr) {
+  const cleaned = cleanTeamName(teamStr);
+  return cleaned === "pakistan" || cleaned === "india";
+}
+
+function getFormatBonus(tName) {
+  if (/\b(odi|one day|one-day)\b/i.test(tName)) return 300;
+  if (/\b(t20|t20i|twenty20)\b/i.test(tName)) return 250;
+  if (/\b(test|test match)\b/i.test(tName)) return 200;
+  return 100;
 }
 
 function getCricketPriority(fixture) {
@@ -273,30 +295,60 @@ function getCricketPriority(fixture) {
         ),
       ),
   );
-  const liveBonus = isLive ? 300 : 0;
+  const isCompleted = Boolean(
+    fixture?.status === "completed" ||
+      /finished|completed|ended/i.test(
+        normalizeText(
+          fixture?.status?.statusName || fixture?.status?.shortName || "",
+        ),
+      ),
+  );
 
+  // Live matches have absolute top priority (+20000)
+  // Completed matches have penalty (-5000) so they sit at the bottom
+  if (isLive) return 20000;
+  if (isCompleted) return -5000;
+
+  let prio = 0;
+  const p1IsPakInd = isPakistanOrIndia(p1);
+  const p2IsPakInd = isPakistanOrIndia(p2);
   const p1IsT1 = isTier1NationalTeam(p1);
   const p2IsT1 = isTier1NationalTeam(p2);
 
-  // Tier 1: Top International bilateral/ICC between Tier 1 nations (ENG vs SL, AUS vs SA, IND vs PAK)
-  if (p1IsT1 && p2IsT1) {
-    return liveBonus + 800;
+  // Tier 1: Top International featuring Pakistan or India (e.g. PAK vs ENG, PAK vs SL, IND vs NZ)
+  if ((p1IsPakInd || p2IsPakInd) && p1IsT1 && p2IsT1) {
+    prio += 3000;
+  } else if (p1IsPakInd || p2IsPakInd) {
+    // Pakistan or India vs other nation (e.g. IND vs ZIM)
+    prio += 2400;
+  } else if (p1IsT1 && p2IsT1) {
+    // Other Tier 1 bilateral (e.g. AUS vs ENG, SA vs AUS, ENG vs SL)
+    prio += 2000;
+  } else if (p1IsT1 || p2IsT1) {
+    // Tier 1 vs Tier 2 Associate (e.g. NAM vs IRE)
+    prio += 1500;
+  } else {
+    // Tier 2 Franchise / other ICC (IPL, PSL, BBL, CWC League 2)
+    prio += 1000;
   }
 
-  // Tier 1b: One Tier 1 nation playing against an associate in international series
-  if (p1IsT1 || p2IsT1) {
-    return liveBonus + 700;
-  }
+  // International format priority: ODI (+300) > T20/T20I (+250) > Test (+200)
+  prio += getFormatBonus(tName);
 
-  // Tier 2: Premier franchise league (IPL, PSL, BBL)
-  for (const league of TIER1_FRANCHISE_LEAGUES) {
-    if (tName.includes(league)) {
-      return liveBonus + 600;
+  // Time-window urgency bonus (matches happening in next 48h to 7 days get priority boost)
+  const startTimeMs = getFixtureStartTimeMs(fixture);
+  if (startTimeMs) {
+    const diffHours = (startTimeMs - Date.now()) / (3600 * 1000);
+    if (diffHours >= 0 && diffHours <= 48) {
+      prio += 500;
+    } else if (diffHours > 48 && diffHours <= 168) {
+      prio += 300;
+    } else if (diffHours > 168 && diffHours <= 336) {
+      prio += 100;
     }
   }
 
-  // Tier 3: Other official ICC tournaments (CWC League 2)
-  return liveBonus + 400;
+  return prio;
 }
 
 function hasOddsMarket(fixture) {
@@ -344,8 +396,12 @@ function shouldIncludeFixture(fixture, now = new Date()) {
 
   if (startTimeMs !== null) {
     const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
-    // Allow up to 7 days in advance for international cricket matches
-    const maxWindowMs = 7 * 24 * 60 * 60 * 1000;
+    // Allow up to 30 days in advance for international cricket matches (bilateral tours, series, ICC events)
+    // and up to 7 days for franchise leagues
+    const isInternational = isInternationalFixture(fixture);
+    const maxWindowMs = isInternational
+      ? 30 * 24 * 60 * 60 * 1000
+      : 7 * 24 * 60 * 60 * 1000;
     const isWithinWindow =
       startTimeMs >= nowMs - 24 * 60 * 60 * 1000 &&
       startTimeMs <= nowMs + maxWindowMs;
@@ -388,6 +444,7 @@ module.exports = {
   selectDisplayableFixtures,
   getCricketPriority,
   isInternationalFixture,
+  isPakistanOrIndia,
   isTargetBPExchFixture,
   isVirtualOrSimulated,
 };

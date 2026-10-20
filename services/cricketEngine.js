@@ -226,7 +226,11 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
 }
 
 /**
- * Advance ball and score stats dynamically based on verified events
+ * Advance ball and score stats dynamically based on verified events.
+ * 
+ * IMPORTANT: oddspapi v5 only provides total runs (no overs, wickets, or ball-by-ball).
+ * We estimate overs from runs using the format's average run rate, which produces
+ * realistic CRR/RRR values instead of the old broken ball-delta counting.
  */
 function advanceCricketState(state, liveData) {
     const scoresBreakdown = normalizeScoresBreakdown(liveData?.scores || {});
@@ -242,7 +246,6 @@ function advanceCricketState(state, liveData) {
     if (scoresBreakdown["2"] && (scoresBreakdown["2"].participant1Score > 0 || scoresBreakdown["2"].participant2Score > 0)) {
         if (state.innings === 1) {
             state.innings = 2;
-            state.ballsBowled = 0;
             state.thisOver = [];
         }
         if (scoresBreakdown["2"].participant1Score > 0) {
@@ -254,7 +257,6 @@ function advanceCricketState(state, liveData) {
         }
     } else if (state.p1Runs > 0 && state.p2Runs > 0 && state.innings === 1) {
         state.innings = 2;
-        state.ballsBowled = 0;
         state.thisOver = [];
         if (state.p1Runs >= state.p2Runs) {
             state.battingTeam = 'teamB';
@@ -267,31 +269,44 @@ function advanceCricketState(state, liveData) {
 
     const currentRaw = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
 
-    // Real event-driven delivery logging: only record when authoritative runs change
+    // Track run deltas for thisOver display only
     if (currentRaw > state.lastApiScore) {
         const delta = currentRaw - state.lastApiScore;
         state.lastApiScore = currentRaw;
-
         const delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
-        if (state.ballsBowled > 0 && state.ballsBowled % 6 === 0) {
-            state.thisOver = [];
-        }
         state.thisOver.push(delivery);
-        state.ballsBowled += 1;
+        // Keep thisOver to max 6 entries (current over)
+        if (state.thisOver.length > 6) {
+            state.thisOver = state.thisOver.slice(-6);
+        }
         state.lastScoreUpdate = Date.now();
     } else if (currentRaw < state.lastApiScore) {
-        // Reset or corrected score from API
         state.lastApiScore = currentRaw;
     }
 
-    // Calculations for overs
-    const oversCompleted = Math.floor(state.ballsBowled / 6);
-    const ballsInOver = state.ballsBowled % 6;
-    const overs = `${oversCompleted}.${ballsInOver}`;
-    const oversFloat = oversCompleted + (ballsInOver / 6);
-
+    // ─── Estimate overs from runs using format average run rate ───
+    // Since oddspapi provides NO overs/balls data, we estimate based on:
+    // runs / avgRunRate = approximate overs bowled
     const activeRuns = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
-    const activeWickets = state.battingTeam === 'teamA' ? state.p1Wickets : state.p2Wickets;
+    const avgRPO = state.format.avgRunRate || 5.5; // runs per over for format
+    const maxOvers = state.format.maxOvers || 50;
+    
+    let estimatedOversFloat = 0;
+    if (activeRuns > 0) {
+        // Estimate overs: runs / average_run_rate, capped at format max
+        estimatedOversFloat = Math.min(activeRuns / avgRPO, maxOvers);
+        // Round to nearest 0.1 (cricket notation)
+        estimatedOversFloat = Math.round(estimatedOversFloat * 10) / 10;
+    }
+    
+    // Convert float to cricket overs notation (e.g., 37.5 means 37 overs 5 balls)
+    const estimatedOversWhole = Math.floor(estimatedOversFloat);
+    const estimatedBallsFrac = Math.round((estimatedOversFloat - estimatedOversWhole) * 6);
+    const estimatedBalls = Math.min(estimatedBallsFrac, 5); // max 5 balls in an over
+    const overs = `${estimatedOversWhole}.${estimatedBalls}`;
+    const oversFloat = estimatedOversWhole + (estimatedBalls / 6);
+    const totalBallsBowled = estimatedOversWhole * 6 + estimatedBalls;
+
     const runRate = oversFloat > 0 ? (activeRuns / oversFloat).toFixed(2) : '0.00';
 
     let remRuns = 0;
@@ -300,12 +315,12 @@ function advanceCricketState(state, liveData) {
 
     if (state.innings === 2 && state.target > 0) {
         remRuns = Math.max(0, state.target - activeRuns);
-        remBalls = Math.max(0, state.format.totalBalls - state.ballsBowled);
+        remBalls = Math.max(0, state.format.totalBalls - totalBallsBowled);
         reqRunRate = remBalls > 0 ? ((remRuns / (remBalls / 6))).toFixed(2) : '0.00';
     }
 
-    const teamA_runs = state.p1Wickets > 0 ? `${state.p1Runs}/${state.p1Wickets}` : `${state.p1Runs}`;
-    const teamB_runs = state.p2Wickets > 0 ? `${state.p2Runs}/${state.p2Wickets}` : `${state.p2Runs}`;
+    const teamA_runs = `${state.p1Runs}`;
+    const teamB_runs = `${state.p2Runs}`;
 
     const participant1Name = liveData?.participants?.participant1Name || 'Team 1';
     const participant2Name = liveData?.participants?.participant2Name || 'Team 2';
@@ -315,7 +330,7 @@ function advanceCricketState(state, liveData) {
         teamA_runs,
         teamB_runs,
         overs,
-        wickets: activeWickets,
+        wickets: 0, // oddspapi doesn't provide wickets
         target: state.target,
         runRate,
         reqRunRate,
@@ -325,7 +340,7 @@ function advanceCricketState(state, liveData) {
         battingTeam: state.battingTeam,
         battingTeamName,
         innings: state.innings,
-        ballsBowled: state.ballsBowled,
+        ballsBowled: totalBallsBowled,
         totalBalls: state.format.totalBalls,
         scoresBreakdown: state.scoresBreakdown
     };

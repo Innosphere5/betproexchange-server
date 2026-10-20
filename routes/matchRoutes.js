@@ -9,27 +9,30 @@ const { shouldIncludeFixture } = require('../services/fixtureFilter');
 const { SIDE, FANCY, oddsBet, oddsBook, fancyBet, fancyBook, accountSummary } = require('../utils/betCalc');
 const { getViewerNetShare, getAllDescendantUsernames, findUserByKey } = require('../services/hierarchyHelper');
 
-// Helper to deduplicate matches by team names
+// Helper to deduplicate matches by team names on the same day
 function deduplicateMatches(matches) {
     const uniqueMap = new Map();
     for (const m of matches) {
         const mObj = m.toObject ? m.toObject() : m;
-        const key = [mObj.teamA, mObj.teamB].sort().join('-');
+        // Group by normalized teams and date (YYYY-MM-DD) so different matches in a series are preserved
+        const dateKey = mObj.startTime ? new Date(mObj.startTime).toISOString().slice(0, 10) : 'nodate';
+        const teamsKey = [mObj.teamA, mObj.teamB].sort().join('-').toLowerCase();
+        const key = `${teamsKey}_${dateKey}`;
         
         if (uniqueMap.has(key)) {
             const existing = uniqueMap.get(key);
-            const mHasOdds = mObj.backOddsA != null;
-            const existingHasOdds = existing.backOddsA != null;
+            const mHasOdds = mObj.backOddsA != null || mObj.backOddsB != null;
+            const existingHasOdds = existing.backOddsA != null || existing.backOddsB != null;
             
             if (mObj.status === 'live' && existing.status !== 'live') {
                 uniqueMap.set(key, mObj);
             } else if (mObj.status === existing.status) {
                 if (mHasOdds && !existingHasOdds) {
                     uniqueMap.set(key, mObj);
-                } else if (mHasOdds === existingHasOdds) {
-                    if (new Date(mObj.startTime) > new Date(existing.startTime)) {
-                        uniqueMap.set(key, mObj);
-                    }
+                } else if (!mHasOdds && existingHasOdds) {
+                    // keep existing with odds
+                } else {
+                    uniqueMap.set(key, mObj);
                 }
             }
         } else {
@@ -45,9 +48,7 @@ router.get('/live', async (req, res) => {
         const liveMatches = await Match.find({ status: 'live' }).sort({ startTime: -1 });
         const now = new Date();
         const filtered = deduplicateMatches(liveMatches)
-            .filter((match) => shouldIncludeFixture(match, now))
-            .filter((match) => Boolean(match.backOddsA !== null || match.backOddsB !== null || match.layOddsA !== null || match.layOddsB !== null))
-            .slice(0, 7);
+            .filter((match) => shouldIncludeFixture(match, now));
         res.json(filtered);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -96,13 +97,29 @@ router.get('/odds-status', async (req, res) => {
 // Get all matches
 router.get('/', async (req, res) => {
     try {
-        const matches = await Match.find().sort({ startTime: 1 });
+        const matches = await Match.find({ status: { $ne: 'cancelled' } }).sort({ startTime: 1 });
         const now = new Date();
-        const filtered = deduplicateMatches(matches)
-            .filter((match) => shouldIncludeFixture(match, now))
-            .filter((match) => Boolean(match.backOddsA !== null || match.backOddsB !== null || match.layOddsA !== null || match.layOddsB !== null || match.status === 'live'))
-            .slice(0, 7);
-        res.json(filtered);
+        const { getCricketPriority } = require('../services/fixtureFilter');
+
+        const deduped = deduplicateMatches(matches)
+            .filter((match) => shouldIncludeFixture(match, now));
+
+        // Sort: Live first, then by cricket priority (International Tier 1 > Tier 2 > Franchise > other), then by start time
+        deduped.sort((a, b) => {
+            const isLiveA = a.status === 'live';
+            const isLiveB = b.status === 'live';
+            if (isLiveA !== isLiveB) return isLiveB ? 1 : -1;
+
+            const prioA = getCricketPriority(a);
+            const prioB = getCricketPriority(b);
+            if (prioB !== prioA) return prioB - prioA;
+
+            const timeA = new Date(a.startTime || 0).getTime();
+            const timeB = new Date(b.startTime || 0).getTime();
+            return timeA - timeB;
+        });
+
+        res.json(deduped);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

@@ -181,19 +181,33 @@ const fetchUpcomingMatches = async (io) => {
       );
     }
 
-    // 2. Fetch upcoming fixtures from oddspapi (next 7 days)
+    // 2. Fetch upcoming fixtures from oddspapi (next 30 days) and live fixtures
     const now = new Date();
     const nowTs = Math.floor(now.getTime() / 1000);
-    const sevenDaysLater = nowTs + 7 * 24 * 3600;
+    const windowStartTs = nowTs - 24 * 3600; // include matches from the last 24h
+    const windowEndTs = nowTs + 30 * 24 * 3600; // 30 days in advance for international tours and series
 
-    const response = await getData("fixtures", {
-      params: {
-        startTimeFrom: nowTs,
-        startTimeTo: sevenDaysLater,
-      },
-    });
+    const [upcomingFixtures, liveFixtures] = await Promise.all([
+      getData("fixtures", {
+        params: {
+          startTimeFrom: windowStartTs,
+          startTimeTo: windowEndTs,
+        },
+      }).catch(() => []),
+      getData("fixtures/live").catch(() => []),
+    ]);
 
-    if (!response || !Array.isArray(response) || response.length === 0) {
+    // Merge and deduplicate raw fixture objects by fixture ID
+    const fixtureMap = new Map();
+    for (const f of [...(liveFixtures || []), ...(upcomingFixtures || [])]) {
+      const fId = f?.fixtureId || f?.id;
+      if (fId && !fixtureMap.has(fId)) {
+        fixtureMap.set(fId, f);
+      }
+    }
+    const response = Array.from(fixtureMap.values());
+
+    if (!response || response.length === 0) {
       console.warn("[MatchService] No fixtures returned or API error.");
       return;
     }
@@ -219,26 +233,34 @@ const fetchUpcomingMatches = async (io) => {
 
     // 4. Fetch odds for candidates (checking international fixtures first)
     const fixturePool = [];
-    const maxFixturesToProcess = 30;
+    const maxFixturesToProcess = 60;
 
     for (const fixture of validCandidates) {
       const fixtureId = fixture.fixtureId || fixture.id;
       if (!fixtureId) continue;
 
       const isInternational = isInternationalFixture(fixture);
+      const isLive = Boolean(fixture.status?.live || fixture.status === "live");
+      const startMs = (fixture.startTime || 0) * 1000;
+      const isWithin72Hours = startMs <= Date.now() + 72 * 3600 * 1000;
+
       let oddsResponse = null;
       let parsedOdds = null;
 
-      try {
-        oddsResponse = await getData("fixtures/odds", {
-          params: { fixtureId },
-        });
+      // Only call odds endpoint if match is live or starting within 72 hours
+      // Pre-game matches 4-30 days out do not have open exchange odds yet
+      if (isLive || isWithin72Hours || fixture.hasOdds) {
+        try {
+          oddsResponse = await getData("fixtures/odds", {
+            params: { fixtureId },
+          });
 
-        if (oddsResponse) {
-          parsedOdds = extractMatchOdds(oddsResponse);
+          if (oddsResponse) {
+            parsedOdds = extractMatchOdds(oddsResponse);
+          }
+        } catch (err) {
+          console.warn(`[MatchService] Could not fetch odds for fixture ${fixtureId}:`, err.message);
         }
-      } catch (err) {
-        console.warn(`[MatchService] Could not fetch odds for fixture ${fixtureId}:`, err.message);
       }
 
       const hasOdds = Boolean(parsedOdds && (parsedOdds.backOddsA !== null || parsedOdds.backOddsB !== null));
@@ -293,21 +315,46 @@ const fetchUpcomingMatches = async (io) => {
 
     // 6. Upsert matches and MarketOdds into DB
     for (const m of topMatches) {
-      await Match.findOneAndUpdate(
-        { matchId: m.matchId },
-        {
-          $set: m,
-          $setOnInsert: {
-            score: {
-              teamA_runs: "0/0",
-              teamB_runs: "0/0",
-              overs: "0.0",
-              lastUpdated: new Date(),
+      // Check if match already exists with odds from OddsApiLiveService
+      const existingMatch = await Match.findOne({ matchId: m.matchId }).lean();
+      const existingHasOdds = existingMatch && existingMatch.backOddsA != null;
+      const syncHasNoOdds = m.backOddsA == null;
+
+      // If this sync has no odds but existing match DOES have odds (from OddsApiLiveService),
+      // don't overwrite the odds/marketStatus — preserve what OddsApiLiveService set.
+      if (syncHasNoOdds && existingHasOdds) {
+        // Only update non-odds fields (teams, league, startTime, status, etc.)
+        await Match.findOneAndUpdate(
+          { matchId: m.matchId },
+          {
+            $set: {
+              teamA: m.teamA,
+              teamB: m.teamB,
+              league: m.league,
+              startTime: m.startTime,
+              status: m.status,
+              sportKey: m.sportKey,
+              lastUpdated: m.lastUpdated,
             },
           },
-        },
-        { upsert: true, returnDocument: "after" },
-      );
+        );
+      } else {
+        await Match.findOneAndUpdate(
+          { matchId: m.matchId },
+          {
+            $set: m,
+            $setOnInsert: {
+              score: {
+                teamA_runs: "0/0",
+                teamB_runs: "0/0",
+                overs: "0.0",
+                lastUpdated: new Date(),
+              },
+            },
+          },
+          { upsert: true, returnDocument: "after" },
+        );
+      }
 
       // Also upsert to MarketOdds if odds exist
       if (m.backOddsA !== null) {

@@ -133,11 +133,14 @@ const processMatchResults = async (io) => {
             const statusName = String(statusObj.statusName || '').toLowerCase().trim();
             const statusId = Number(statusObj.statusId);
 
+            const isLive = Boolean(apiMatch.status?.live || statusName === 'live' || statusId === 1);
+
             // oddspapi statuses: statusId=2 means "Finished", statusId=3 means "Cancelled"
-            const isCompleted = statusName === 'finished' || 
+            const isCompleted = !isLive && (
+                                statusName === 'finished' || 
                                 statusName === 'ended' ||
-                                statusId === 2 ||
-                                apiMatch.trueEndTime != null;
+                                statusId === 2
+            );
 
             const isCancelled = statusName === 'cancelled' ||
                                 statusName === 'abandoned' ||

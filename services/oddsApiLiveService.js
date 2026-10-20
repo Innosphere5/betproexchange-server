@@ -816,7 +816,97 @@ class OddsApiLiveService {
       }
     }
 
-    if (bestHomePrice === 0 || bestAwayPrice === 0) return;
+    // If no exchange/bookmaker odds found, generate synthetic implied odds for LIVE matches
+    if (bestHomePrice === 0 || bestAwayPrice === 0) {
+      if (!metadata.isLive) return; // Only for live matches
+      
+      // Try to derive implied odds from live scores
+      try {
+        const dbMatch = await Match.findOne({ matchId });
+        if (!dbMatch || !dbMatch.score) return;
+        
+        const p1Runs = parseInt(String(dbMatch.score.teamA_runs).split('/')[0], 10) || 0;
+        const p2Runs = parseInt(String(dbMatch.score.teamB_runs).split('/')[0], 10) || 0;
+        const target = dbMatch.score.target || 0;
+        const innings = dbMatch.score.innings || 1;
+        const battingTeam = dbMatch.score.battingTeam || 'teamA';
+        
+        // Only generate if there are actual scores to work with
+        if (p1Runs === 0 && p2Runs === 0) return;
+        
+        let homeImpliedOdds = 1.50;
+        let awayImpliedOdds = 3.00;
+        
+        if (innings === 2 && target > 0) {
+          // 2nd innings: calculate win probability from required run rate
+          const chasingRuns = battingTeam === 'teamB' ? p2Runs : p1Runs;
+          const remainingRuns = Math.max(0, target - chasingRuns);
+          const league = (dbMatch.league || '').toLowerCase();
+          const isODI = league.includes('odi') || league.includes('one day') || league.includes('tri-series') || league.includes('world cup');
+          const maxBalls = isODI ? 300 : 120;
+          const avgRPO = isODI ? 5.5 : 8.0;
+          const estimatedBallsBowled = Math.min(Math.round((chasingRuns / avgRPO) * 6), maxBalls);
+          const remainingBalls = Math.max(1, maxBalls - estimatedBallsBowled);
+          const rrr = (remainingRuns / (remainingBalls / 6));
+          
+          // Win probability for chasing team based on RRR vs average
+          let chasingWinProb;
+          if (remainingRuns <= 0) {
+            chasingWinProb = 0.98; // Already won
+          } else if (rrr < avgRPO * 0.7) {
+            chasingWinProb = 0.80 + Math.random() * 0.05; // Easy chase
+          } else if (rrr < avgRPO) {
+            chasingWinProb = 0.55 + Math.random() * 0.1; // Competitive
+          } else if (rrr < avgRPO * 1.5) {
+            chasingWinProb = 0.30 + Math.random() * 0.1; // Difficult
+          } else if (rrr < avgRPO * 2) {
+            chasingWinProb = 0.15 + Math.random() * 0.05; // Very difficult
+          } else {
+            chasingWinProb = 0.05 + Math.random() * 0.05; // Nearly impossible
+          }
+          
+          const fieldingWinProb = 1 - chasingWinProb;
+          
+          if (battingTeam === 'teamB') {
+            // Team A batted first, Team B chasing
+            homeImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
+            awayImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
+          } else {
+            // Team B batted first, Team A chasing
+            homeImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
+            awayImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
+          }
+        } else {
+          // 1st innings: slight bias toward batting team
+          const totalRuns = p1Runs + p2Runs;
+          if (totalRuns > 0) {
+            homeImpliedOdds = p1Runs >= p2Runs ? 1.60 : 2.40;
+            awayImpliedOdds = p1Runs >= p2Runs ? 2.40 : 1.60;
+          }
+        }
+        
+        // Clamp odds to reasonable range
+        homeImpliedOdds = Math.max(1.01, Math.min(1000, homeImpliedOdds));
+        awayImpliedOdds = Math.max(1.01, Math.min(1000, awayImpliedOdds));
+        
+        bestHomePrice = homeImpliedOdds;
+        bestAwayPrice = awayImpliedOdds;
+        homeBack = homeImpliedOdds;
+        homeLay = Number((homeImpliedOdds + 0.02).toFixed(2));
+        homeBackVol = "100";
+        homeLayVol = "100";
+        awayBack = awayImpliedOdds;
+        awayLay = Number((awayImpliedOdds + 0.02).toFixed(2));
+        awayBackVol = "100";
+        awayLayVol = "100";
+        usedBookie = "synthetic-implied";
+        
+        console.log(`[OddsApiLive] 🧮 Generated synthetic odds for ${dbMatch.teamA} v ${dbMatch.teamB}: A(${homeBack}/${homeLay}) B(${awayBack}/${awayLay}) [Innings ${innings}, Target: ${target}]`);
+      } catch (err) {
+        console.warn(`[OddsApiLive] Could not generate synthetic odds for ${matchId}:`, err.message);
+        return;
+      }
+    }
 
     let needsSwap = false;
     if (this.swapCache.has(matchId)) {
@@ -1406,6 +1496,122 @@ class OddsApiLiveService {
       );
       if (unlinkedUpcoming.length > 0) {
         await this.bootstrapUpcomingFixtures();
+      }
+
+      // ─── Series Odds Propagation ───
+      // For upcoming matches with NO odds (backOddsA is null), find a sibling match
+      // in the same series (same teams + same league) that DOES have odds, and copy them.
+      // This mirrors bpexch.live behavior where all matches in a series show pre-match odds
+      // even though Betfair only opens markets for the nearest match.
+      try {
+        const noOddsMatches = await Match.find({
+          status: "upcoming",
+          $or: [{ backOddsA: null }, { backOddsA: { $exists: false } }],
+        }).lean();
+
+        if (noOddsMatches.length > 0) {
+          const hasOddsMatches = await Match.find({
+            status: "upcoming",
+            backOddsA: { $ne: null, $exists: true },
+          }).lean();
+
+          let propagated = 0;
+          for (const noOdds of noOddsMatches) {
+            // Find a sibling: same teams (in either order) and similar league
+            const sibling = hasOddsMatches.find((has) => {
+              const sameTeams =
+                (this.normalize(has.teamA) === this.normalize(noOdds.teamA) &&
+                  this.normalize(has.teamB) === this.normalize(noOdds.teamB)) ||
+                (this.normalize(has.teamA) === this.normalize(noOdds.teamB) &&
+                  this.normalize(has.teamB) === this.normalize(noOdds.teamA));
+              return sameTeams;
+            });
+
+            if (sibling) {
+              const needsSwap =
+                this.normalize(sibling.teamA) !== this.normalize(noOdds.teamA);
+
+              const teamABack = needsSwap ? sibling.backOddsB : sibling.backOddsA;
+              const teamALay = needsSwap ? sibling.layOddsB : sibling.layOddsA;
+              const teamBBack = needsSwap ? sibling.backOddsA : sibling.backOddsB;
+              const teamBLay = needsSwap ? sibling.layOddsA : sibling.layOddsB;
+              const bmBackA = needsSwap ? sibling.bookmakerBackB : sibling.bookmakerBackA;
+              const bmLayA = needsSwap ? sibling.bookmakerLayB : sibling.bookmakerLayA;
+              const bmBackB = needsSwap ? sibling.bookmakerBackA : sibling.bookmakerBackB;
+              const bmLayB = needsSwap ? sibling.bookmakerLayA : sibling.bookmakerLayB;
+
+              await Match.updateOne(
+                { matchId: noOdds.matchId },
+                {
+                  $set: {
+                    backOddsA: teamABack,
+                    layOddsA: teamALay,
+                    backOddsB: teamBBack,
+                    layOddsB: teamBLay,
+                    depthBackA: sibling.depthBackA || "100",
+                    depthLayA: sibling.depthLayA || "100",
+                    depthBackB: sibling.depthBackB || "100",
+                    depthLayB: sibling.depthLayB || "100",
+                    bookmakerBackA: bmBackA,
+                    bookmakerLayA: bmLayA,
+                    bookmakerBackB: bmBackB,
+                    bookmakerLayB: bmLayB,
+                    bookmakerDepthBackA: "100",
+                    bookmakerDepthLayA: "100",
+                    bookmakerDepthBackB: "100",
+                    bookmakerDepthLayB: "100",
+                    bookmakerMarketStatus: "OPEN",
+                    marketStatus: "OPEN",
+                    lastUpdated: new Date(),
+                  },
+                },
+              );
+
+              // Also update MarketOdds
+              await MarketOdds.findOneAndUpdate(
+                { matchId: noOdds.matchId },
+                {
+                  teamABack,
+                  teamALay,
+                  teamBBack,
+                  teamBLay,
+                  marketStatus: "OPEN",
+                  bookmakerMarketStatus: "OPEN",
+                  updatedAt: new Date(),
+                },
+                { upsert: true },
+              );
+
+              // Emit to UI
+              if (this.io) {
+                this.io.emit("market_odds_update", {
+                  matchId: String(noOdds.matchId),
+                  updatedAt: new Date(),
+                  marketStatus: "OPEN",
+                  runners: [
+                    { name: noOdds.teamA, back: teamABack, lay: teamALay, depthBack: "100", depthLay: "100" },
+                    { name: noOdds.teamB, back: teamBBack, lay: teamBLay, depthBack: "100", depthLay: "100" },
+                  ],
+                  bookmakerMarketStatus: "OPEN",
+                  bookmakerRunners: [
+                    { name: noOdds.teamA, back: bmBackA, lay: bmLayA, depthBack: "100", depthLay: "100" },
+                    { name: noOdds.teamB, back: bmBackB, lay: bmLayB, depthBack: "100", depthLay: "100" },
+                  ],
+                });
+              }
+
+              propagated++;
+            }
+          }
+
+          if (propagated > 0) {
+            console.log(
+              `[OddsApiLive] 🔗 Series odds propagation: ${propagated} upcoming match(es) inherited odds from siblings`,
+            );
+          }
+        }
+      } catch (err) {
+        console.warn("[OddsApiLive] Series propagation error:", err.message);
       }
     } catch (err) {}
   }

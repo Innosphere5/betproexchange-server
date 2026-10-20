@@ -7,8 +7,9 @@ const { fetchUpcomingMatches } = require('../services/matchService');
  * Runs every 24 hours to fetch new matches into the database.
  */
 const initMatchFetchJob = (io) => {
-    cron.schedule('0 0 * * *', () => {
-        console.log('Running daily match fetch job...');
+    // Runs every 15 minutes to keep upcoming & live fixtures synced with oddspapi
+    cron.schedule('*/15 * * * *', () => {
+        console.log('[Cron] Running periodic match fetch job (every 15m)...');
         fetchUpcomingMatches(io);
     });
 };
