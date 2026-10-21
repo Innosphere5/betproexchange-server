@@ -181,6 +181,8 @@ router.get('/:id', async (req, res) => {
 
         const response = match.toObject ? match.toObject() : match;
         const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);
+        const isMatchLive = match.status === 'live' || (match.startTime && new Date() >= new Date(match.startTime));
+
         if (isMatchCompleted) {
             response.api_message = "Match is completed and result has been declared.";
             response.isCompleted = true;
@@ -203,6 +205,14 @@ router.get('/:id', async (req, res) => {
             response.winner = match.winner || response.winner || null;
         } else {
             response.isCompleted = false;
+            // Real cricket logic: Once match is LIVE or start time has passed, the toss is already completed!
+            if (isMatchLive) {
+                response.tossMarketStatus = 'CLOSED';
+                response.tossBackA = null;
+                response.tossLayA = null;
+                response.tossBackB = null;
+                response.tossLayB = null;
+            }
         }
 
         res.json(response);

@@ -92,10 +92,15 @@ const updateLiveScores = async (io) => {
                     league: liveData.tournament?.tournamentName || 'Unknown League',
                     startTime: new Date((liveData.startTime || Math.floor(Date.now() / 1000)) * 1000),
                     status: 'live',
+                    tossMarketStatus: 'CLOSED',
+                    tossBackA: null,
+                    tossLayA: null,
+                    tossBackB: null,
+                    tossLayB: null,
                     sportKey: 'cricket_international',
                     lastUpdated: new Date()
                 });
-                console.log(`[ScoreService] Automatically added verified real LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB}`);
+                console.log(`[ScoreService] Automatically added verified real LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB} (Toss Closed)`);
             }
 
             const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
@@ -161,35 +166,60 @@ const updateLiveScores = async (io) => {
                 matchInDb.status !== currentStatus
             );
 
-            if (hasChanged) {
-                await Match.updateOne(
-                    { matchId },
-                    {
-                        $set: {
-                            status: currentStatus,
-                            winner: winner,
-                            score: {
-                                teamA_runs: teamA_score,
-                                teamB_runs: teamB_score,
-                                overs:      oversDisplay,
-                                wickets:    parsedScore.wickets,
-                                target:     parsedScore.target,
-                                runRate:    parsedScore.runRate,
-                                reqRunRate: parsedScore.reqRunRate,
-                                thisOver:   parsedScore.thisOver,
-                                remRuns:    parsedScore.remRuns,
-                                remBalls:   parsedScore.remBalls,
-                                battingTeam: parsedScore.battingTeam,
-                                battingTeamName: parsedScore.battingTeamName,
-                                innings:    parsedScore.innings,
-                                periods:    parsedScore.periods,
-                                lastUpdated: new Date()
-                            },
-                            lastUpdated: new Date()
-                        }
-                    }
-                );
+            const shouldCloseToss = matchInDb.tossMarketStatus !== 'CLOSED' || matchInDb.tossBackA !== null;
+
+            if (hasChanged || shouldCloseToss) {
+                const updatePayload = {
+                    status: currentStatus,
+                    winner: winner,
+                    score: {
+                        teamA_runs: teamA_score,
+                        teamB_runs: teamB_score,
+                        overs:      oversDisplay,
+                        wickets:    parsedScore.wickets,
+                        target:     parsedScore.target,
+                        runRate:    parsedScore.runRate,
+                        reqRunRate: parsedScore.reqRunRate,
+                        thisOver:   parsedScore.thisOver,
+                        remRuns:    parsedScore.remRuns,
+                        remBalls:   parsedScore.remBalls,
+                        battingTeam: parsedScore.battingTeam,
+                        battingTeamName: parsedScore.battingTeamName,
+                        innings:    parsedScore.innings,
+                        periods:    parsedScore.periods,
+                        lastUpdated: new Date()
+                    },
+                    lastUpdated: new Date()
+                };
+
+                if (shouldCloseToss) {
+                    updatePayload.tossMarketStatus = 'CLOSED';
+                    updatePayload.tossBackA = null;
+                    updatePayload.tossLayA = null;
+                    updatePayload.tossBackB = null;
+                    updatePayload.tossLayB = null;
+                    updatePayload.tossDepthBackA = '0';
+                    updatePayload.tossDepthLayA = '0';
+                    updatePayload.tossDepthBackB = '0';
+                    updatePayload.tossDepthLayB = '0';
+                }
+
+                await Match.updateOne({ matchId }, { $set: updatePayload });
                 updatedCount++;
+
+                if (shouldCloseToss && io) {
+                    io.emit('toss_odds_update', {
+                        matchId: String(matchId),
+                        tossMarketStatus: 'CLOSED',
+                        tossWinner: matchInDb.tossWinner || null,
+                        tossBackA: null,
+                        tossLayA: null,
+                        tossBackB: null,
+                        tossLayB: null,
+                        isLive: currentStatus === 'live',
+                        updatedAt: new Date()
+                    });
+                }
             }
 
             if (io) {

@@ -3,14 +3,15 @@
  * 
  * Generates synthetic toss odds for cricket matches.
  * 
- * Logic:
- * - Toss is a coin flip → odds are ~2.00 (50/50) with slight exchange-style spread
- * - Back odds: 1.90–2.00, Lay odds: 2.00–2.10 (tight spread like real exchanges)
- * - Depth volumes are synthetic but realistic (50–500 range)
- * - Toss market is OPEN only for upcoming/live matches where toss hasn't been decided
- * - Once tossWinner is set, market closes and toss bets are settled
+ * Real-Time Cricket Logic:
+ * - In real-time cricket, the toss happens 25–30 minutes BEFORE the match start time.
+ * - Once a match reaches its start time, goes live, or has started/completed, the toss has ALREADY been completed.
+ * - Therefore, the Toss market MUST be CLOSED for all live, started, and completed matches.
+ * - Active toss odds (Back/Lay) are strictly PRE-MATCH (upcoming fixtures before start time).
+ * - Once closed, toss odds are nullified and the market is marked 'CLOSED'.
+ * - Any pending/MATCHED toss bets remain until settled by admin or match conclusion.
  * 
- * MaxBet: 2M (enforced on frontend, not in odds engine)
+ * MaxBet: 2M (enforced on frontend & backend)
  */
 
 const Match = require('../models/Match');
@@ -59,59 +60,126 @@ function generateDepth() {
   };
 }
 
+/**
+ * Helper to check whether a match has started or is live/completed.
+ */
+function isMatchStartedOrLive(match, now = new Date()) {
+  if (!match) return false;
+  if (['live', 'completed', 'resulted', 'closed'].includes(match.status)) return true;
+  if (match.startTime && now >= new Date(match.startTime)) return true;
+  return false;
+}
+
 // ─── Core Polling Loop ─────────────────────────────────────────────────────────
 
 async function updateTossOdds() {
   try {
-    // Only generate toss odds for matches that:
-    // 1. Are upcoming or live
-    // 2. Don't have a toss winner yet
-    // 3. Have match odds (meaning they're active on the platform)
-    const matches = await Match.find({
-      status: { $in: ['upcoming', 'live'] },
-      tossWinner: null,
-      backOddsA: { $ne: null } // Only if match odds exist (match is active)
+    const now = new Date();
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 1: Sweep and CLOSE Toss Market for any match that is LIVE, STARTED,
+    // or COMPLETED where the toss market is still marked OPEN or has active odds.
+    // In real cricket, the toss is 100% completed by match start time!
+    // ─────────────────────────────────────────────────────────────────────────
+    const startedOrLiveMatches = await Match.find({
+      $or: [
+        { status: { $in: ['live', 'completed', 'resulted'] } },
+        { startTime: { $lte: now } }
+      ],
+      $or: [
+        { tossMarketStatus: { $ne: 'CLOSED' } },
+        { tossBackA: { $ne: null } },
+        { tossLayA: { $ne: null } }
+      ]
     });
 
-    if (matches.length === 0) return;
+    for (const match of startedOrLiveMatches) {
+      await Match.updateOne(
+        { matchId: match.matchId },
+        {
+          $set: {
+            tossMarketStatus: 'CLOSED',
+            tossBackA: null,
+            tossLayA: null,
+            tossBackB: null,
+            tossLayB: null,
+            tossDepthBackA: '0',
+            tossDepthLayA: '0',
+            tossDepthBackB: '0',
+            tossDepthLayB: '0',
+            lastUpdated: now
+          }
+        }
+      );
 
-    const now = new Date();
+      console.log(`[TossEngine] 🔒 Toss market CLOSED for started/live match: ${match.teamA} v ${match.teamB} (Status: ${match.status})`);
+
+      if (ioInstance) {
+        ioInstance.emit('toss_odds_update', {
+          matchId: String(match.matchId),
+          tossMarketStatus: 'CLOSED',
+          tossWinner: match.tossWinner || null,
+          tossBackA: null,
+          tossLayA: null,
+          tossBackB: null,
+          tossLayB: null,
+          tossDepthBackA: '0',
+          tossDepthLayA: '0',
+          tossDepthBackB: '0',
+          tossDepthLayB: '0',
+          isLive: match.status === 'live',
+          updatedAt: now
+        });
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STEP 2: Only generate active Toss Odds for strictly UPCOMING matches
+    // whose start time is in the FUTURE and toss hasn't been decided yet.
+    // ─────────────────────────────────────────────────────────────────────────
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrowEnd = new Date(todayStart.getTime() + 2 * 24 * 60 * 60 * 1000);
+    const upcomingWindowEnd = new Date(todayStart.getTime() + 2 * 24 * 60 * 60 * 1000); // next 48h
 
-    for (const match of matches) {
-      const matchStartTime = new Date(match.startTime);
-      const isLive = match.status === 'live';
-      const isToday = matchStartTime >= todayStart && matchStartTime < tomorrowEnd;
+    const upcomingMatches = await Match.find({
+      status: 'upcoming',
+      startTime: { $gt: now, $lt: upcomingWindowEnd },
+      tossWinner: null,
+      backOddsA: { $ne: null } // Only if match odds exist (match is active on platform)
+    });
 
-      // Only generate toss odds for today's and tomorrow's matches, or live matches
-      if (!isLive && !isToday) continue;
+    if (upcomingMatches.length === 0) return;
+
+    for (const match of upcomingMatches) {
+      // Re-verify that match hasn't started yet
+      if (isMatchStartedOrLive(match, now)) continue;
 
       const odds = generateTossOdds();
       const depth = generateDepth();
 
       // Check if odds actually changed (avoid unnecessary DB writes)
       const changed = match.tossBackA !== odds.backA ||
-                       match.tossLayA !== odds.layA ||
-                       match.tossBackB !== odds.backB ||
-                       match.tossLayB !== odds.layB;
+                      match.tossLayA !== odds.layA ||
+                      match.tossBackB !== odds.backB ||
+                      match.tossLayB !== odds.layB;
 
       if (!changed && match.tossMarketStatus === 'OPEN') continue;
 
-      // Update match in DB
-      await Match.findOneAndUpdate(
+      // Update upcoming match toss odds in DB
+      await Match.updateOne(
         { matchId: match.matchId },
         {
-          tossBackA: odds.backA,
-          tossLayA: odds.layA,
-          tossBackB: odds.backB,
-          tossLayB: odds.layB,
-          tossDepthBackA: depth.depthBackA,
-          tossDepthLayA: depth.depthLayA,
-          tossDepthBackB: depth.depthBackB,
-          tossDepthLayB: depth.depthLayB,
-          tossMarketStatus: 'OPEN',
-          lastUpdated: now
+          $set: {
+            tossBackA: odds.backA,
+            tossLayA: odds.layA,
+            tossBackB: odds.backB,
+            tossLayB: odds.layB,
+            tossDepthBackA: depth.depthBackA,
+            tossDepthLayA: depth.depthLayA,
+            tossDepthBackB: depth.depthBackB,
+            tossDepthLayB: depth.depthLayB,
+            tossMarketStatus: 'OPEN',
+            lastUpdated: now
+          }
         }
       );
 
@@ -149,7 +217,7 @@ async function updateTossOdds() {
  * Called when admin declares the toss winner.
  * 
  * @param {string} matchId - The match ID
- * @param {string} tossWinner - The team that won the toss (runner name as stored in bet)
+ * @param {string} tossWinner - The team that won the toss (runner name as stored in bet) or 'REFUND'
  * @param {object} io - Socket.io instance
  */
 async function settleToss(matchId, tossWinner, io) {
@@ -157,23 +225,28 @@ async function settleToss(matchId, tossWinner, io) {
     console.log(`[TossSettlement] Beginning toss settlement for matchId: ${matchId}`);
     console.log(`[TossSettlement] Toss Winner: ${tossWinner}`);
 
-    // Find all pending toss bets for this match
-    const tossBets = await Bet.find({ matchId, marketType: 'toss', status: 'pending' });
+    const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+    const matchIdList = [matchId, altMatchId];
 
-    if (tossBets.length === 0) {
-      console.log(`[TossSettlement] No pending toss bets for matchId: ${matchId}`);
-      return;
-    }
+    // Find all active toss bets for this match (both pending and MATCHED)
+    const tossBets = await Bet.find({
+      matchId: { $in: matchIdList },
+      marketType: 'toss',
+      status: { $in: ['pending', 'MATCHED'] }
+    });
 
     const isRefund = tossWinner === 'REFUND' || tossWinner === 'VOID';
 
     for (const bet of tossBets) {
-      if (bet.status !== 'pending') continue;
+      if (!['pending', 'MATCHED'].includes(bet.status)) continue;
+
+      const isBack = bet.type === 'back';
+      const liability = (!isBack && bet.odds > 1) ? Math.round(bet.stake * (bet.odds - 1)) : bet.stake;
 
       if (isRefund) {
         const user = await User.findOneAndUpdate(
           { username: bet.userId },
-          { $inc: { walletBalance: bet.stake } },
+          { $inc: { walletBalance: liability } },
           { new: true }
         );
 
@@ -182,32 +255,31 @@ async function settleToss(matchId, tossWinner, io) {
         bet.settledAt = new Date();
         await bet.save();
 
-        console.log(`[TossSettlement] REFUND: User ${bet.userId} refunded ${bet.stake}`);
+        console.log(`[TossSettlement] REFUND: User ${bet.userId} refunded ${liability}`);
 
         if (io && user) {
           io.emit('wallet_updated', { userId: user.username, balance: user.walletBalance });
           io.emit('bet_settled', {
             betId: bet._id,
             status: 'cancelled',
-            message: `Toss Void: ${bet.stake} refunded`,
+            message: `Toss Void: ${liability} refunded`,
             matchName: bet.matchName
           });
         }
         continue;
       }
 
-      // Determine if user won: 
+      // Determine if user won:
       // The runner field stores e.g. "England To Win The Toss"
       // The tossWinner is the team name e.g. "England"
-      // Check if the bet runner contains the toss winner's team name
-      const isBack = bet.type === 'back';
-      const runnerWon = bet.runner.includes(tossWinner);
+      const runnerWon = bet.runner.toLowerCase().includes(tossWinner.toLowerCase());
       const isWin = isBack ? runnerWon : !runnerWon;
 
       if (isWin) {
-        const grossWin = bet.stake * bet.odds;
-        const commission = grossWin * 0.05;
-        const netWin = grossWin - commission;
+        const profit = isBack ? (bet.stake * (bet.odds - 1)) : bet.stake;
+        const grossReturn = liability + profit;
+        const commission = profit * 0.05;
+        const netWin = grossReturn - commission;
 
         const user = await User.findOneAndUpdate(
           { username: bet.userId },
@@ -221,10 +293,10 @@ async function settleToss(matchId, tossWinner, io) {
         bet.settledAt = new Date();
         await bet.save();
 
-        const houseLoss = -(netWin - bet.stake);
+        const houseLoss = -(profit - commission);
         await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner });
 
-        console.log(`[TossSettlement] WIN: User ${bet.userId} won ${netWin.toFixed(2)} (Gross: ${grossWin}, Comm: ${commission.toFixed(2)})`);
+        console.log(`[TossSettlement] WIN: User ${bet.userId} won ${netWin.toFixed(2)} (Gross: ${grossReturn}, Comm: ${commission.toFixed(2)})`);
 
         if (io) {
           io.emit('bet_settled', { betId: bet._id, status: 'won', payout: netWin, matchName: bet.matchName });
@@ -237,9 +309,9 @@ async function settleToss(matchId, tossWinner, io) {
         bet.settledAt = new Date();
         await bet.save();
 
-        await distributeProfitLoss(bet.userId, bet.stake, { matchName: bet.matchName, selection: bet.runner });
+        await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner });
 
-        console.log(`[TossSettlement] LOSE: User ${bet.userId} lost stake of ${bet.stake}`);
+        console.log(`[TossSettlement] LOSE: User ${bet.userId} lost stake/liability of ${liability}`);
 
         if (io) {
           io.emit('bet_settled', { betId: bet._id, status: 'lost', payout: 0, matchName: bet.matchName });
@@ -247,15 +319,39 @@ async function settleToss(matchId, tossWinner, io) {
       }
     }
 
-    // Close the toss market
-    await Match.findOneAndUpdate(
-      { matchId },
-      { tossMarketStatus: 'CLOSED', tossWinner, lastUpdated: new Date() }
+    // Close the toss market and nullify live odds
+    await Match.updateMany(
+      { matchId: { $in: matchIdList } },
+      {
+        $set: {
+          tossMarketStatus: 'CLOSED',
+          tossWinner,
+          tossBackA: null,
+          tossLayA: null,
+          tossBackB: null,
+          tossLayB: null,
+          tossDepthBackA: '0',
+          tossDepthLayA: '0',
+          tossDepthBackB: '0',
+          tossDepthLayB: '0',
+          lastUpdated: new Date()
+        }
+      }
     );
 
-    // Emit toss market closed to UI
+    // Emit toss market closed with winner to UI
     if (io) {
-      io.emit('toss_odds_update', { matchId: String(matchId), tossMarketStatus: 'CLOSED', tossWinner });
+      matchIdList.forEach(id => {
+        io.emit('toss_odds_update', {
+          matchId: String(id),
+          tossMarketStatus: 'CLOSED',
+          tossWinner,
+          tossBackA: null,
+          tossLayA: null,
+          tossBackB: null,
+          tossLayB: null
+        });
+      });
     }
 
     console.log(`[TossSettlement] Finished settling ${tossBets.length} toss bets for matchId: ${matchId}`);
@@ -270,10 +366,12 @@ function initTossOddsEngine(io) {
   ioInstance = io;
   console.log('[TossEngine] 🎯 Toss Odds Engine initialized');
 
-  // Initial run
+  // Immediate check & sweep on startup
   updateTossOdds();
 
-  // Poll every 10 seconds to refresh toss odds with slight drift
+  // Poll every 10 seconds:
+  // - Closes toss market for any match reaching start time or going live
+  // - Keeps toss odds active and alive ONLY for upcoming matches
   pollInterval = setInterval(updateTossOdds, 10000);
 }
 
@@ -281,4 +379,4 @@ function destroyTossOddsEngine() {
   if (pollInterval) clearInterval(pollInterval);
 }
 
-module.exports = { initTossOddsEngine, destroyTossOddsEngine, settleToss };
+module.exports = { initTossOddsEngine, destroyTossOddsEngine, settleToss, isMatchStartedOrLive };

@@ -193,6 +193,14 @@ app.post('/api/user/bet', auth, async (req, res) => {
       return res.status(400).json({ error: 'Market is closed for this match' });
     }
 
+    // Enforce toss market validation: strictly closed for live or completed matches
+    if (marketType === 'toss') {
+      const isStartedOrLive = matchInDb.status === 'live' || matchInDb.status === 'completed' || matchInDb.status === 'resulted' || (matchInDb.startTime && new Date() >= new Date(matchInDb.startTime));
+      if (isStartedOrLive || matchInDb.tossMarketStatus === 'CLOSED' || matchInDb.tossWinner) {
+        return res.status(400).json({ error: 'Toss betting is closed for this match (toss already completed)' });
+      }
+    }
+
     const officialMatchName = (matchInDb.teamA && matchInDb.teamB) 
       ? `${matchInDb.teamA} v ${matchInDb.teamB}` 
       : (req.body.matchName || 'Cricket Match');

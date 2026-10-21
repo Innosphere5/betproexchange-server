@@ -408,8 +408,25 @@ class FancyMarketsService {
       hasChanges = true;
     }
 
-    // 6. Default Toss odds if missing
-    if (!match.tossBackA) {
+    // 6. Toss odds handling:
+    // Real cricket logic: if match is live, started, or completed, Toss is completed! Market MUST be CLOSED.
+    const now = new Date();
+    const isStartedOrLive = match.status === 'live' || match.status === 'completed' || match.status === 'resulted' || (match.startTime && now >= new Date(match.startTime));
+
+    if (isStartedOrLive) {
+      if (match.tossMarketStatus !== 'CLOSED' || match.tossBackA !== null) {
+        match.tossMarketStatus = 'CLOSED';
+        match.tossBackA = null;
+        match.tossLayA = null;
+        match.tossBackB = null;
+        match.tossLayB = null;
+        match.tossDepthBackA = '0';
+        match.tossDepthLayA = '0';
+        match.tossDepthBackB = '0';
+        match.tossDepthLayB = '0';
+        hasChanges = true;
+      }
+    } else if (!match.tossWinner && !match.tossBackA) {
       match.tossBackA = 1.98;
       match.tossLayA = 2.02;
       match.tossBackB = 1.98;
@@ -418,7 +435,7 @@ class FancyMarketsService {
       match.tossDepthLayA = "100";
       match.tossDepthBackB = "100";
       match.tossDepthLayB = "100";
-      match.tossMarketStatus = match.tossMarketStatus || 'OPEN';
+      match.tossMarketStatus = 'OPEN';
       hasChanges = true;
     }
 
@@ -441,7 +458,11 @@ class FancyMarketsService {
               tossLayA: match.tossLayA,
               tossBackB: match.tossBackB,
               tossLayB: match.tossLayB,
-              tossMarketStatus: match.tossMarketStatus || 'OPEN'
+              tossDepthBackA: match.tossDepthBackA,
+              tossDepthLayA: match.tossDepthLayA,
+              tossDepthBackB: match.tossDepthBackB,
+              tossDepthLayB: match.tossDepthLayB,
+              tossMarketStatus: match.tossMarketStatus
             }
           }
         );

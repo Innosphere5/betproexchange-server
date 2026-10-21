@@ -20,8 +20,22 @@ const updateMatchStatuses = async (io) => {
             if (newStatus !== match.status) {
                 match.status = newStatus;
                 match.lastUpdated = now;
+
+                // When match goes live, toss has completed in real time → close toss market
+                if (newStatus === 'live') {
+                    match.tossMarketStatus = 'CLOSED';
+                    match.tossBackA = null;
+                    match.tossLayA = null;
+                    match.tossBackB = null;
+                    match.tossLayB = null;
+                    match.tossDepthBackA = '0';
+                    match.tossDepthLayA = '0';
+                    match.tossDepthBackB = '0';
+                    match.tossDepthLayB = '0';
+                }
+
                 await match.save();
-                console.log(`[StatusService] Match ${match.matchId} status updated to ${newStatus}`);
+                console.log(`[StatusService] Match ${match.matchId} status updated to ${newStatus}${newStatus === 'live' ? ' (Toss Market Closed)' : ''}`);
 
                 // Immediately sync with UI so "LIVE" badge appears
                 if (io) {
@@ -29,6 +43,20 @@ const updateMatchStatuses = async (io) => {
                         matchId: match.matchId,
                         status: newStatus
                     });
+
+                    if (newStatus === 'live') {
+                        io.emit('toss_odds_update', {
+                            matchId: String(match.matchId),
+                            tossMarketStatus: 'CLOSED',
+                            tossWinner: match.tossWinner || null,
+                            tossBackA: null,
+                            tossLayA: null,
+                            tossBackB: null,
+                            tossLayB: null,
+                            isLive: true,
+                            updatedAt: now
+                        });
+                    }
                 }
             }
         }
