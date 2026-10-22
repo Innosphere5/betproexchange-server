@@ -25,25 +25,15 @@ let pollInterval = null;
 // ─── Toss Odds Generation ──────────────────────────────────────────────────────
 
 /**
- * Generate realistic toss odds with slight random drift
- * Real exchanges show toss odds between 1.90–2.10 with tight back/lay spreads
+ * Universal toss odds for any match:
+ * Strictly 1.98 for Back, 2.02 for Lay
  */
 function generateTossOdds() {
-  // Base is 2.00 (50/50), with slight random drift to feel alive
-  const drift = (Math.random() - 0.5) * 0.10; // ±0.05
-
-  const backA = Number((1.95 + drift).toFixed(2));
-  const layA = Number((backA + 0.04).toFixed(2)); // 4-tick spread
-
-  // Team B is the mirror: if A is favored slightly, B is slightly higher
-  const backB = Number((1.95 - drift).toFixed(2));
-  const layB = Number((backB + 0.04).toFixed(2));
-
   return {
-    backA: Math.max(1.80, Math.min(2.10, backA)),
-    layA: Math.max(1.84, Math.min(2.14, layA)),
-    backB: Math.max(1.80, Math.min(2.10, backB)),
-    layB: Math.max(1.84, Math.min(2.14, layB)),
+    backA: 1.98,
+    layA: 2.02,
+    backB: 1.98,
+    layB: 2.02,
   };
 }
 
@@ -365,6 +355,28 @@ async function settleToss(matchId, tossWinner, io) {
 function initTossOddsEngine(io) {
   ioInstance = io;
   console.log('[TossEngine] 🎯 Toss Odds Engine initialized');
+
+  // Normalize all existing open/upcoming matches to universal toss odds (1.98 & 2.02)
+  Match.updateMany(
+    {
+      status: 'upcoming',
+      tossWinner: null,
+      tossMarketStatus: { $ne: 'CLOSED' }
+    },
+    {
+      $set: {
+        tossBackA: 1.98,
+        tossLayA: 2.02,
+        tossBackB: 1.98,
+        tossLayB: 2.02,
+        tossDepthBackA: '100',
+        tossDepthLayA: '100',
+        tossDepthBackB: '100',
+        tossDepthLayB: '100',
+        tossMarketStatus: 'OPEN'
+      }
+    }
+  ).catch(err => console.error('[TossEngine] Error normalizing toss odds:', err.message));
 
   // Immediate check & sweep on startup
   updateTossOdds();

@@ -170,12 +170,149 @@ app.get('/api/user/wallet', auth, async (req, res) => {
   }
 });
 
+// Helper: Validate odds strictly against currently active shown market odds
+function matchesTeamName(runnerStr, teamStr) {
+  if (!runnerStr || !teamStr) return false;
+  const r = runnerStr.trim().toLowerCase();
+  const t = teamStr.trim().toLowerCase();
+  return r === t || r.includes(t) || t.includes(r);
+}
+
+function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
+  const normRunner = String(runner || '').trim().toLowerCase();
+  const type = (betType || 'back').toLowerCase();
+  const mType = (marketType || 'match_odds').toLowerCase();
+
+  // 1. Universal Toss Odds: strictly 1.98 for Back, 2.02 for Lay across all matches
+  if (mType === 'toss') {
+    return type === 'lay' ? [2.02] : [1.98];
+  }
+
+  const teamAName = String(matchInDb.teamA || '').trim();
+  const teamBName = String(matchInDb.teamB || '').trim();
+  const isTeamA = matchesTeamName(normRunner, teamAName);
+  const isTeamB = matchesTeamName(normRunner, teamBName);
+
+  // 2. Bookmaker Market
+  if (mType === 'bookmaker') {
+    if (isTeamA) {
+      if (type === 'back') {
+        const list = [];
+        if (matchInDb.bookmakerBackA) list.push(Number(matchInDb.bookmakerBackA));
+        if (matchInDb.backOddsA) list.push(Number(matchInDb.backOddsA));
+        return list;
+      } else {
+        const list = [];
+        if (matchInDb.bookmakerLayA) list.push(Number(matchInDb.bookmakerLayA));
+        if (matchInDb.layOddsA) {
+          list.push(Number(matchInDb.layOddsA));
+          list.push(Number((matchInDb.layOddsA > (matchInDb.backOddsA || 0) ? matchInDb.layOddsA + 0.01 : (matchInDb.backOddsA || 0) + 0.02).toFixed(2)));
+        }
+        return list;
+      }
+    } else if (isTeamB) {
+      if (type === 'back') {
+        const list = [];
+        if (matchInDb.bookmakerBackB) list.push(Number(matchInDb.bookmakerBackB));
+        if (matchInDb.backOddsB) {
+          list.push(Number(matchInDb.backOddsB));
+          list.push(Number((matchInDb.backOddsB >= 2 ? matchInDb.backOddsB - 0.02 : matchInDb.backOddsB).toFixed(2)));
+        }
+        return list;
+      } else {
+        const list = [];
+        if (matchInDb.bookmakerLayB) list.push(Number(matchInDb.bookmakerLayB));
+        if (matchInDb.layOddsB) {
+          list.push(Number(matchInDb.layOddsB));
+          list.push(Number((matchInDb.layOddsB >= 2 ? matchInDb.layOddsB + 0.02 : matchInDb.layOddsB + 0.02).toFixed(2)));
+        }
+        return list;
+      }
+    }
+    return [];
+  }
+
+  // 3. Figure Market
+  if (mType === 'figure') {
+    if (Array.isArray(matchInDb.figureMarkets)) {
+      const digitMatch = normRunner.match(/digit\s*(\d+)/i);
+      if (digitMatch) {
+        const digitNum = parseInt(digitMatch[1], 10);
+        for (const fig of matchInDb.figureMarkets) {
+          const foundDigit = fig.digits?.find(d => d.digit === digitNum);
+          if (foundDigit && foundDigit.odds) {
+            return [Number(foundDigit.odds)];
+          }
+        }
+      }
+    }
+    return [8.85];
+  }
+
+  // 4. Fancy Market
+  if (mType === 'fancy') {
+    if (Array.isArray(matchInDb.fancyMarkets)) {
+      const item = matchInDb.fancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
+      if (item) {
+        const p = type === 'lay' ? (item.layPrice || 1.95) : (item.backPrice || 1.95);
+        return p ? [Number(p)] : [1.95];
+      }
+    }
+    return [1.95];
+  }
+
+  // 5. Even / Odd Market
+  if (mType === 'even_odd') {
+    if (Array.isArray(matchInDb.evenOddMarkets)) {
+      const item = matchInDb.evenOddMarkets.find(eo => normRunner.includes(String(eo.name).toLowerCase()) || String(eo.name).toLowerCase().includes(normRunner));
+      if (item) {
+        const p = type === 'lay' ? eo.layPrice : eo.backPrice;
+        return p ? [Number(p)] : [];
+      }
+    }
+    return [];
+  }
+
+  // 6. Tied Match Market
+  if (mType === 'tied_match') {
+    if (matchInDb.tiedMatchMarket?.runners) {
+      const isYes = normRunner.includes('yes');
+      const isNo = normRunner.includes('no');
+      const runnerItem = matchInDb.tiedMatchMarket.runners.find(r => {
+        const rName = String(r.name).toLowerCase();
+        return (isYes && rName === 'yes') || (isNo && rName === 'no');
+      });
+      if (runnerItem) {
+        const oddsList = type === 'back' ? (runnerItem.backOdds || []) : (runnerItem.layOdds || []);
+        return oddsList.map(o => Number(o.price)).filter(p => !isNaN(p) && p > 0);
+      }
+    }
+    return [];
+  }
+
+  // 7. Match Odds (standard)
+  if (isTeamA) {
+    const val = type === 'back' ? matchInDb.backOddsA : matchInDb.layOddsA;
+    return val ? [Number(val)] : [];
+  } else if (isTeamB) {
+    const val = type === 'back' ? matchInDb.backOddsB : matchInDb.layOddsB;
+    return val ? [Number(val)] : [];
+  }
+
+  return [];
+}
+
 // Bet Placement Endpoint
 app.post('/api/user/bet', auth, async (req, res) => {
   try {
     const { matchId, runner, stake, odds, isLive, type, marketType } = req.body;
     if (!matchId) return res.status(400).json({ error: 'Missing matchId' });
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
+
+    const numOdds = parseFloat(odds);
+    if (!numOdds || isNaN(numOdds) || numOdds <= 1) {
+      return res.status(400).json({ error: 'Bet not placed to this market' });
+    }
 
     // Validate that the match exists in the database from real API feed
     const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
@@ -199,6 +336,15 @@ app.post('/api/user/bet', auth, async (req, res) => {
       if (isStartedOrLive || matchInDb.tossMarketStatus === 'CLOSED' || matchInDb.tossWinner) {
         return res.status(400).json({ error: 'Toss betting is closed for this match (toss already completed)' });
       }
+    }
+
+    // Validate that the submitted odds strictly match the currently shown/active market odds
+    const betType = (type || 'back').toLowerCase();
+    const validOdds = getValidMarketOddsList(matchInDb, runner, betType, marketType);
+    const matchesExpected = validOdds.some(expected => Math.abs(numOdds - expected) <= 0.001);
+
+    if (!matchesExpected) {
+      return res.status(400).json({ error: 'Bet not placed to this market' });
     }
 
     const officialMatchName = (matchInDb.teamA && matchInDb.teamB) 
@@ -235,8 +381,7 @@ app.post('/api/user/bet', auth, async (req, res) => {
       return res.status(400).json({ error: 'Tied Match market max bet is 500K' });
     }
 
-    const betType = (type || 'back').toLowerCase();
-    const liability = (betType === 'lay' && odds > 1) ? Math.round(stake * (odds - 1)) : stake;
+    const liability = (betType === 'lay' && numOdds > 1) ? Math.round(stake * (numOdds - 1)) : stake;
 
     const user = await User.findOneAndUpdate(
       { username: req.user.userId, walletBalance: { $gte: liability } },

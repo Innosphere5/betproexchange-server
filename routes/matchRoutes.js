@@ -119,6 +119,18 @@ router.get('/', async (req, res) => {
             return timeA - timeB;
         });
 
+        for (const match of deduped) {
+            const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);
+            const isMatchLive = match.status === 'live' || (match.startTime && now >= new Date(match.startTime));
+            if (!isMatchCompleted && !isMatchLive && !match.tossWinner && match.tossMarketStatus !== 'CLOSED') {
+                match.tossBackA = 1.98;
+                match.tossLayA = 2.02;
+                match.tossBackB = 1.98;
+                match.tossLayB = 2.02;
+                match.tossMarketStatus = 'OPEN';
+            }
+        }
+
         res.json(deduped);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -212,6 +224,13 @@ router.get('/:id', async (req, res) => {
                 response.tossLayA = null;
                 response.tossBackB = null;
                 response.tossLayB = null;
+            } else if (!match.tossWinner && match.tossMarketStatus !== 'CLOSED') {
+                // Universal Toss Odds: 1.98 for Back, 2.02 for Lay
+                response.tossBackA = 1.98;
+                response.tossLayA = 2.02;
+                response.tossBackB = 1.98;
+                response.tossLayB = 2.02;
+                response.tossMarketStatus = 'OPEN';
             }
         }
 

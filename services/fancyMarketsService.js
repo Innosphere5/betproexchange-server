@@ -426,17 +426,19 @@ class FancyMarketsService {
         match.tossDepthLayB = '0';
         hasChanges = true;
       }
-    } else if (!match.tossWinner && !match.tossBackA) {
-      match.tossBackA = 1.98;
-      match.tossLayA = 2.02;
-      match.tossBackB = 1.98;
-      match.tossLayB = 2.02;
-      match.tossDepthBackA = "100";
-      match.tossDepthLayA = "100";
-      match.tossDepthBackB = "100";
-      match.tossDepthLayB = "100";
-      match.tossMarketStatus = 'OPEN';
-      hasChanges = true;
+    } else if (!match.tossWinner) {
+      if (match.tossBackA !== 1.98 || match.tossLayA !== 2.02 || match.tossBackB !== 1.98 || match.tossLayB !== 2.02 || match.tossMarketStatus !== 'OPEN') {
+        match.tossBackA = 1.98;
+        match.tossLayA = 2.02;
+        match.tossBackB = 1.98;
+        match.tossLayB = 2.02;
+        match.tossDepthBackA = "100";
+        match.tossDepthLayA = "100";
+        match.tossDepthBackB = "100";
+        match.tossDepthLayB = "100";
+        match.tossMarketStatus = 'OPEN';
+        hasChanges = true;
+      }
     }
 
     if (hasChanges) {
