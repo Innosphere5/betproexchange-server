@@ -1,6 +1,7 @@
 const Match = require('../models/Match');
 const { getData } = require('./apiManager');
 const { getOrInitializeMatchState, advanceCricketState } = require('./cricketEngine');
+const { sportmonksScoreService, parseSportmonksFixture } = require('./sportmonksScoreService');
 
 const normalizeScoreValue = (value, fallback = 0) => {
     if (value === null || value === undefined || value === '') return fallback;
@@ -18,7 +19,32 @@ const normalizeScoreText = (value, fallback = '0.0') => {
  * Computes realistic and comprehensive cricket live score metrics
  * (overs, CRR, RRR, target, ball-by-ball thisOver, remaining runs/balls).
  */
-const extractLiveScorePayload = (liveData, existingScore = {}) => {
+const extractLiveScorePayload = (liveData, existingMatchOrScore = {}) => {
+    if (!liveData) {
+        return {
+            teamA_runs: "0/0",
+            teamB_runs: "0/0",
+            teamA_wickets: 0,
+            teamB_wickets: 0,
+            overs: "0.0",
+            wickets: 0,
+            target: 0,
+            runRate: "0.00",
+            reqRunRate: "0.00",
+            thisOver: [],
+            remRuns: 0,
+            remBalls: 0
+        };
+    }
+
+    const matchObj = existingMatchOrScore?.teamA ? existingMatchOrScore : null;
+    const existingScore = existingMatchOrScore?.score || existingMatchOrScore;
+
+    // If Sportmonks payload
+    if (liveData.runs || liveData.localteam || liveData.balls) {
+        return parseSportmonksFixture(liveData, matchObj);
+    }
+
     const matchId = liveData?.fixtureId;
     if (!matchId) {
         return {
@@ -41,6 +67,8 @@ const extractLiveScorePayload = (liveData, existingScore = {}) => {
     return {
         teamA_runs: computed.teamA_runs,
         teamB_runs: computed.teamB_runs,
+        teamA_wickets: computed.teamA_wickets ?? (parseInt(String(computed.teamA_runs).split('/')[1], 10) || 0),
+        teamB_wickets: computed.teamB_wickets ?? (parseInt(String(computed.teamB_runs).split('/')[1], 10) || 0),
         overs: computed.overs,
         wickets: computed.wickets,
         target: computed.target,
@@ -59,13 +87,16 @@ const extractLiveScorePayload = (liveData, existingScore = {}) => {
 /**
  * updateLiveScores
  * 
- * Migrated to oddspapi REST API (v5.oddspapi.io) + Cricket Engine.
- * Fetches live fixtures from /fixtures/live endpoint.
- * Computes in-play details and emits real-time updates via Socket.IO.
+ * Primary live score provider: Sportmonks Cricket API v2.0
+ * Live in-play metrics (score, wickets, overs, target, CRR, RRR, ball-by-ball)
+ * Emits real-time updates via Socket.IO with zero delay.
  */
 const updateLiveScores = async (io) => {
     try {
-        // 1. Fetch live fixtures from oddspapi
+        const count = await sportmonksScoreService.syncLiveScores(io);
+        if (count > 0) return;
+
+        // Fallback: Oddspapi /fixtures/live if no Sportmonks matches found
         const response = await getData('fixtures/live');
 
         if (!response || !Array.isArray(response) || response.length === 0) {
@@ -175,6 +206,8 @@ const updateLiveScores = async (io) => {
                     score: {
                         teamA_runs: teamA_score,
                         teamB_runs: teamB_score,
+                        teamA_wickets: parsedScore.teamA_wickets,
+                        teamB_wickets: parsedScore.teamB_wickets,
                         overs:      oversDisplay,
                         wickets:    parsedScore.wickets,
                         target:     parsedScore.target,
@@ -228,6 +261,8 @@ const updateLiveScores = async (io) => {
                     score:      parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
                     overs:      oversDisplay,
                     wickets:    parsedScore.wickets,
+                    teamA_wickets: parsedScore.teamA_wickets,
+                    teamB_wickets: parsedScore.teamB_wickets,
                     status:     currentStatus,
                     teamA_runs: teamA_score,
                     teamB_runs: teamB_score,

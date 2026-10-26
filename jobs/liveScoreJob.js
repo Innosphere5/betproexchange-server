@@ -1,23 +1,15 @@
-const cron = require('node-cron');
-const { updateLiveScores } = require('../services/scoreService');
+const { sportmonksScoreService } = require('../services/sportmonksScoreService');
 
 /**
- * Live Score Update Job
+ * Live Score Real-Time Engine Job
  * 
- * Runs every 20 seconds.
- * Orchestrates live score updates via ScoreService.
+ * Sub-3s adaptive polling for live cricket in-play matches using Sportmonks API.
+ * Emits real-time live_score_update events via Socket.IO with zero delay.
  */
 const initLiveScoreJob = (io) => {
-    // Cron schedule: every 15 seconds
-    cron.schedule('*/15 * * * * *', async () => {
-        try {
-            await updateLiveScores(io);
-        } catch (error) {
-            console.error('[LiveScoreJob] Error:', error.message);
-        }
-    });
-
-    console.log('✅ LiveScoreJob initialized (15s interval)');
+    sportmonksScoreService.startLiveScoreEngine(io);
+    console.log('✅ Real-time Sportmonks LiveScore Engine initialized');
 };
 
 module.exports = { initLiveScoreJob };
+

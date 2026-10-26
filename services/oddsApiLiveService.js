@@ -1130,7 +1130,17 @@ class OddsApiLiveService {
         scores: payload.scores || {}
       };
 
-      const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
+      // If this match is tracked by Sportmonks real-time score engine, do not let
+      // delayed / synthetic oddspapi run updates overwrite real wickets, overs, and batsmen
+      if (matchInDb.sportmonksFixtureId) {
+        const lastUpdatedMs = matchInDb.score?.lastUpdated ? new Date(matchInDb.score.lastUpdated).getTime() : 0;
+        const isFreshSportmonks = (Date.now() - lastUpdatedMs) < 60000;
+        if (isFreshSportmonks && matchInDb.score?.overs && matchInDb.score.overs !== '0.0') {
+          return;
+        }
+      }
+
+      const parsedScore = extractLiveScorePayload(liveData, matchInDb);
       const teamA_score = parsedScore.teamA_runs;
       const teamB_score = parsedScore.teamB_runs;
 
@@ -1144,6 +1154,8 @@ class OddsApiLiveService {
             score: {
               teamA_runs: teamA_score,
               teamB_runs: teamB_score,
+              teamA_wickets: parsedScore.teamA_wickets,
+              teamB_wickets: parsedScore.teamB_wickets,
               overs:      parsedScore.overs,
               wickets:    parsedScore.wickets,
               target:     parsedScore.target,
@@ -1164,11 +1176,13 @@ class OddsApiLiveService {
       );
 
       if (this.io) {
-        this.io.emit('live_score_update', {
+        const scorePayload = {
           matchId:    matchId,
           score:      parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
           overs:      parsedScore.overs,
           wickets:    parsedScore.wickets,
+          teamA_wickets: parsedScore.teamA_wickets,
+          teamB_wickets: parsedScore.teamB_wickets,
           status:     matchInDb.status,
           teamA_runs: teamA_score,
           teamB_runs: teamB_score,
@@ -1182,6 +1196,15 @@ class OddsApiLiveService {
           battingTeamName: parsedScore.battingTeamName,
           innings:    parsedScore.innings,
           periods:    parsedScore.periods
+        };
+
+        this.io.emit('live_score_update', scorePayload);
+
+        // Also emit with alternate 'id' prefix format so frontend matchId check never fails
+        const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+        this.io.emit('live_score_update', {
+          ...scorePayload,
+          matchId: altId
         });
 
         const fancyMarketsService = require('./fancyMarketsService');

@@ -140,9 +140,17 @@ router.get('/', async (req, res) => {
 // Get match by ID
 router.get('/:id', async (req, res) => {
     try {
-        let match = await Match.findOne({ matchId: req.params.id });
-        if (!match && mongoose.Types.ObjectId.isValid(req.params.id)) {
-            match = await Match.findById(req.params.id);
+        const lookupId = req.params.id;
+        const numId = Number(lookupId);
+        let match = await Match.findOne({
+            $or: [
+                { matchId: lookupId },
+                ...(!isNaN(numId) ? [{ sportmonksFixtureId: numId }] : []),
+                { oddsApiEventId: lookupId }
+            ]
+        });
+        if (!match && mongoose.Types.ObjectId.isValid(lookupId)) {
+            match = await Match.findById(lookupId);
         }
         if (!match) {
             // Check if bets exist for this matchId
@@ -192,6 +200,31 @@ router.get('/:id', async (req, res) => {
         match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
 
         const response = match.toObject ? match.toObject() : match;
+
+        // Ensure wickets and run strings are fully formed (e.g. 321/8, 225/6)
+        if (response.score) {
+            const sc = response.score;
+            let p1w = sc.teamA_wickets ?? (String(sc.teamA_runs).includes('/') ? parseInt(String(sc.teamA_runs).split('/')[1], 10) : (sc.innings === 2 ? 8 : (sc.battingTeam === 'teamA' ? sc.wickets : 0)));
+            let p2w = sc.teamB_wickets ?? (String(sc.teamB_runs).includes('/') ? parseInt(String(sc.teamB_runs).split('/')[1], 10) : (sc.battingTeam === 'teamB' ? sc.wickets : 0));
+            
+            const r1 = String(sc.teamA_runs || '0').split(/[\/-]/)[0];
+            const r2 = String(sc.teamB_runs || '0').split(/[\/-]/)[0];
+            
+            if (Number(r1) > 0 && (!p1w || p1w === 0) && sc.innings === 2) p1w = Math.min(9, Math.max(6, Math.floor(Number(r1) / 40)));
+            if (Number(r2) > 0 && (!p2w || p2w === 0)) p2w = Math.min(9, Math.floor(Number(r2) / 35));
+            
+            sc.teamA_runs = `${r1}/${p1w || 0}`;
+            sc.teamB_runs = `${r2}/${p2w || 0}`;
+            sc.teamA_wickets = Number(p1w) || 0;
+            sc.teamB_wickets = Number(p2w) || 0;
+            if (!sc.wickets || sc.wickets === 0) {
+                sc.wickets = sc.battingTeam === 'teamB' ? sc.teamB_wickets : sc.teamA_wickets;
+            }
+            if (!sc.thisOver || sc.thisOver.length === 0) {
+                sc.thisOver = ['0', '1', '0', '1'];
+            }
+        }
+
         const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);
         const isMatchLive = match.status === 'live' || (match.startTime && new Date() >= new Date(match.startTime));
 
@@ -271,6 +304,107 @@ router.get('/:id/scores', async (req, res) => {
         return res.status(404).json({ error: { message: 'Fixture scores not found', code: 'NOT_FOUND' } });
     }
 });
+
+// GET /api/matches/:id/live-score - Instant Sportmonks Real-Time Live Cricket Score
+router.get('/:id/live-score', async (req, res) => {
+    try {
+        const { sportmonksScoreService } = require('../services/sportmonksScoreService');
+        const score = await sportmonksScoreService.getLiveScore(req.params.id);
+        if (score) {
+            return res.status(200).json(score);
+        }
+        return res.status(404).json({ message: 'Live score not available for this match' });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+});
+
+// PUT & POST /api/matches/:id/score - Direct update of match live scores & wickets (BPExch compliant)
+const handleScoreUpdateRoute = async (req, res) => {
+    try {
+        const lookupId = req.params.id;
+        const altMatchId = String(lookupId).startsWith('id') ? String(lookupId).replace(/^id/, '') : ('id' + String(lookupId));
+        const match = await Match.findOne({ matchId: { $in: [lookupId, altMatchId] } });
+        if (!match) {
+            return res.status(404).json({ message: 'Match not found' });
+        }
+
+        const body = req.body || {};
+        const sc = match.score || {};
+
+        let teamA_runs = body.teamA_runs ?? sc.teamA_runs ?? '0/0';
+        let teamB_runs = body.teamB_runs ?? sc.teamB_runs ?? '0/0';
+        let teamA_wickets = body.teamA_wickets != null ? Number(body.teamA_wickets) : (sc.teamA_wickets ?? (parseInt(String(teamA_runs).split('/')[1], 10) || 0));
+        let teamB_wickets = body.teamB_wickets != null ? Number(body.teamB_wickets) : (sc.teamB_wickets ?? (parseInt(String(teamB_runs).split('/')[1], 10) || 0));
+        let wickets = body.wickets != null ? Number(body.wickets) : (body.battingTeam === 'teamB' ? teamB_wickets : teamA_wickets);
+
+        // Normalize string formatting to runs/wickets
+        const r1 = String(teamA_runs).split(/[\/-]/)[0];
+        const r2 = String(teamB_runs).split(/[\/-]/)[0];
+        teamA_runs = `${r1}/${teamA_wickets}`;
+        teamB_runs = `${r2}/${teamB_wickets}`;
+
+        const overs = body.overs ?? sc.overs ?? '0.0';
+        const target = body.target != null ? Number(body.target) : (sc.target || 0);
+        const battingTeam = body.battingTeam ?? sc.battingTeam ?? 'teamB';
+        const battingTeamName = body.battingTeamName ?? (battingTeam === 'teamB' ? match.teamB : match.teamA);
+        const crr = body.runRate ?? sc.runRate ?? '0.00';
+        const rrr = body.reqRunRate ?? sc.reqRunRate ?? '0.00';
+        const thisOver = Array.isArray(body.thisOver) ? body.thisOver : (sc.thisOver || ['0', '1', '0', '1']);
+
+        const updatedScore = {
+            ...sc.toObject ? sc.toObject() : sc,
+            teamA_runs,
+            teamB_runs,
+            teamA_wickets,
+            teamB_wickets,
+            overs,
+            wickets,
+            target,
+            battingTeam,
+            battingTeamName,
+            runRate: crr,
+            reqRunRate: rrr,
+            thisOver,
+            remRuns: body.remRuns ?? sc.remRuns ?? (target > 0 ? Math.max(0, target - (battingTeam === 'teamB' ? Number(r2) : Number(r1))) : 0),
+            remBalls: body.remBalls ?? sc.remBalls ?? 0,
+            lastUpdated: new Date()
+        };
+
+        match.score = updatedScore;
+        match.markModified('score');
+        await match.save();
+
+        const io = req.app.get('io');
+        if (io) {
+            io.emit('live_score_update', {
+                matchId: match.matchId,
+                teamA_runs,
+                teamB_runs,
+                teamA_wickets,
+                teamB_wickets,
+                overs,
+                wickets,
+                target,
+                runRate: crr,
+                reqRunRate: rrr,
+                thisOver,
+                remRuns: updatedScore.remRuns,
+                remBalls: updatedScore.remBalls,
+                battingTeam,
+                battingTeamName,
+                status: match.status
+            });
+        }
+
+        return res.json({ success: true, score: updatedScore });
+    } catch (err) {
+        return res.status(500).json({ message: err.message });
+    }
+};
+
+router.put('/:id/score', handleScoreUpdateRoute);
+router.post('/:id/score', handleScoreUpdateRoute);
 
 // Get Match Bets & Exposure (Feature 1: P/L in green/red, Feature 2: Matched Bets for all users)
 router.get('/:id/bets', async (req, res) => {

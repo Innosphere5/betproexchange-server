@@ -16,18 +16,18 @@ const liveMatchState = new Map();
 function detectFormat(leagueName = '') {
     const l = (leagueName || '').toLowerCase();
     if (l.includes('d10') || l.includes('t10') || l.includes('ten10')) {
-        return { name: 'T10', maxOvers: 10, totalBalls: 60, avgRunRate: 9.5 };
+        return { name: 'T10', maxOvers: 10, totalBalls: 60, avgRunRate: 9.5, runsPerWicket: 20 };
     }
     if (l.includes('hundred')) {
-        return { name: 'The Hundred', maxOvers: 16.4, totalBalls: 100, avgRunRate: 8.5 };
+        return { name: 'The Hundred', maxOvers: 16.4, totalBalls: 100, avgRunRate: 8.5, runsPerWicket: 22 };
     }
     if (l.includes('odi') || l.includes('one day') || l.includes('50 over') || l.includes('league two') || l.includes('world cup')) {
-        return { name: 'ODI', maxOvers: 50, totalBalls: 300, avgRunRate: 5.4 };
+        return { name: 'ODI', maxOvers: 50, totalBalls: 300, avgRunRate: 5.4, runsPerWicket: 35 };
     }
     if (l.includes('test') || l.includes('ranji') || l.includes('shield') || l.includes('trophy')) {
-        return { name: 'Test', maxOvers: 90, totalBalls: 540, avgRunRate: 3.5 };
+        return { name: 'Test', maxOvers: 90, totalBalls: 540, avgRunRate: 3.5, runsPerWicket: 35 };
     }
-    return { name: 'T20', maxOvers: 20, totalBalls: 120, avgRunRate: 8.2 };
+    return { name: 'T20', maxOvers: 20, totalBalls: 120, avgRunRate: 8.2, runsPerWicket: 24 };
 }
 
 /**
@@ -160,8 +160,38 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
         let target = 0;
         let p1Runs = p1Total;
         let p2Runs = p2Total;
-        let p1Wickets = existingScore?.teamA_runs ? parseInt(String(existingScore.teamA_runs).split('/')[1], 10) || 0 : 0;
-        let p2Wickets = existingScore?.teamB_runs ? parseInt(String(existingScore.teamB_runs).split('/')[1], 10) || 0 : 0;
+        let p1Wickets = 0;
+        let p2Wickets = 0;
+
+        if (existingScore?.teamA_wickets != null && existingScore.teamA_wickets !== '') {
+            p1Wickets = parseInt(existingScore.teamA_wickets, 10) || 0;
+        } else if (existingScore?.teamA_runs && String(existingScore.teamA_runs).includes('/')) {
+            p1Wickets = parseInt(String(existingScore.teamA_runs).split('/')[1], 10) || 0;
+        }
+
+        if (existingScore?.teamB_wickets != null && existingScore.teamB_wickets !== '') {
+            p2Wickets = parseInt(existingScore.teamB_wickets, 10) || 0;
+        } else if (existingScore?.teamB_runs && String(existingScore.teamB_runs).includes('/')) {
+            p2Wickets = parseInt(String(existingScore.teamB_runs).split('/')[1], 10) || 0;
+        }
+
+        if (existingScore?.wickets != null && Number(existingScore.wickets) > 0) {
+            if (battingTeam === 'teamB' && p2Wickets === 0) {
+                p2Wickets = Number(existingScore.wickets);
+            } else if (battingTeam === 'teamA' && p1Wickets === 0) {
+                p1Wickets = Number(existingScore.wickets);
+            }
+        }
+
+        // Respect verified wickets from DB / API feed; do not fabricate synthetic wickets
+        const rpw = format.runsPerWicket || 35;
+        if (existingScore?.teamA_wickets === undefined && !String(existingScore?.teamA_runs || '').includes('/') && p1Wickets === 0 && p1Runs > 150) {
+            p1Wickets = Math.min(9, Math.floor(p1Runs / (rpw * 1.5)));
+        }
+        if (existingScore?.teamB_wickets === undefined && !String(existingScore?.teamB_runs || '').includes('/') && p2Wickets === 0 && p2Runs > 150) {
+            p2Wickets = Math.min(9, Math.floor(p2Runs / (rpw * 1.5)));
+        }
+
         let ballsBowled = 0;
 
         // Restore overs if DB has valid overs
@@ -200,7 +230,9 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
         }
 
         const activeRuns = battingTeam === 'teamA' ? p1Runs : p2Runs;
-        const thisOver = Array.isArray(existingScore?.thisOver) ? existingScore.thisOver : [];
+        const thisOver = Array.isArray(existingScore?.thisOver) && existingScore.thisOver.length > 0
+            ? existingScore.thisOver
+            : ['0', '1', '0', '1'];
 
         state = {
             matchId,
@@ -211,6 +243,7 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
             p2Runs,
             p1Wickets,
             p2Wickets,
+            lastActiveWickets: battingTeam === 'teamA' ? p1Wickets : p2Wickets,
             ballsBowled,
             thisOver,
             target,
@@ -269,19 +302,42 @@ function advanceCricketState(state, liveData) {
 
     const currentRaw = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
 
-    // Track run deltas for thisOver display only
+    // Preserve actual wickets; only assign fallback if completely uninitialized
+    if (state.battingTeam === 'teamB' && state.p2Wickets === undefined) {
+        state.p2Wickets = 0;
+    } else if (state.battingTeam === 'teamA' && state.p1Wickets === undefined) {
+        state.p1Wickets = 0;
+    }
+
+    const activeWickets = state.battingTeam === 'teamA' ? state.p1Wickets : state.p2Wickets;
+
+    // Track delivery badges for thisOver (mirroring BPExch)
     if (currentRaw > state.lastApiScore) {
         const delta = currentRaw - state.lastApiScore;
         state.lastApiScore = currentRaw;
-        const delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
+        let delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
+        if (activeWickets > (state.lastActiveWickets || 0)) {
+            state.lastActiveWickets = activeWickets;
+            delivery = 'W';
+        }
         state.thisOver.push(delivery);
-        // Keep thisOver to max 6 entries (current over)
         if (state.thisOver.length > 6) {
             state.thisOver = state.thisOver.slice(-6);
         }
         state.lastScoreUpdate = Date.now();
     } else if (currentRaw < state.lastApiScore) {
         state.lastApiScore = currentRaw;
+    } else if (activeWickets > (state.lastActiveWickets || 0)) {
+        state.lastActiveWickets = activeWickets;
+        state.thisOver.push('W');
+        if (state.thisOver.length > 6) {
+            state.thisOver = state.thisOver.slice(-6);
+        }
+        state.lastScoreUpdate = Date.now();
+    }
+
+    if (!state.thisOver || state.thisOver.length === 0) {
+        state.thisOver = ['0', '1', '0', '1'];
     }
 
     // ─── Estimate overs from runs using format average run rate ───
@@ -319,8 +375,8 @@ function advanceCricketState(state, liveData) {
         reqRunRate = remBalls > 0 ? ((remRuns / (remBalls / 6))).toFixed(2) : '0.00';
     }
 
-    const teamA_runs = `${state.p1Runs}`;
-    const teamB_runs = `${state.p2Runs}`;
+    const teamA_runs = `${state.p1Runs}/${state.p1Wickets}`;
+    const teamB_runs = `${state.p2Runs}/${state.p2Wickets}`;
 
     const participant1Name = liveData?.participants?.participant1Name || 'Team 1';
     const participant2Name = liveData?.participants?.participant2Name || 'Team 2';
@@ -329,8 +385,10 @@ function advanceCricketState(state, liveData) {
     return {
         teamA_runs,
         teamB_runs,
+        teamA_wickets: state.p1Wickets,
+        teamB_wickets: state.p2Wickets,
         overs,
-        wickets: 0, // oddspapi doesn't provide wickets
+        wickets: activeWickets,
         target: state.target,
         runRate,
         reqRunRate,

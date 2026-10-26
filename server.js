@@ -128,6 +128,8 @@ mongoose.connect(process.env.MONGO_URI, {
     initStatusJob(io);
     const { initLiveScoreJob } = require('./jobs/liveScoreJob');
     initLiveScoreJob(io);
+    const { initScoreJob } = require('./jobs/scoreUpdate.job');
+    initScoreJob(io);
     const { initSettlementJob } = require('./jobs/settlementJob');
     initSettlementJob(io);
     // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)

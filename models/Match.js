@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const matchSchema = new mongoose.Schema({
   matchId: { type: String, required: true, unique: true, index: true },
+  sportmonksFixtureId: { type: Number, default: null, index: true },
   oddsApiEventId: { type: String, default: null, index: true },
   reissuedFixtureId: { type: String, default: null },
   tournamentId: { type: Number, index: true }, // oddspapi tournament ID
@@ -13,6 +14,8 @@ const matchSchema = new mongoose.Schema({
   score: {
     teamA_runs: { type: String, default: "0/0" },
     teamB_runs: { type: String, default: "0/0" },
+    teamA_wickets: { type: Number, default: 0 },
+    teamB_wickets: { type: Number, default: 0 },
     overs: { type: String, default: "0.0" },
     wickets: { type: Number, default: 0 },
     target: { type: Number, default: 0 },
@@ -24,6 +27,10 @@ const matchSchema = new mongoose.Schema({
     battingTeam: { type: String, default: 'teamA' },
     battingTeamName: { type: String, default: '' },
     innings: { type: Number, default: 1 },
+    statusText: { type: String, default: '' },
+    batsmen: { type: mongoose.Schema.Types.Mixed, default: [] },
+    bowler: { type: mongoose.Schema.Types.Mixed, default: null },
+    lastBall: { type: String, default: '' },
     periods: { type: mongoose.Schema.Types.Mixed, default: {} },
     lastUpdated: { type: Date, default: Date.now }
   },
