@@ -72,14 +72,20 @@ async function updateTossOdds() {
     // In real cricket, the toss is 100% completed by match start time!
     // ─────────────────────────────────────────────────────────────────────────
     const startedOrLiveMatches = await Match.find({
-      $or: [
-        { status: { $in: ['live', 'completed', 'resulted'] } },
-        { startTime: { $lte: now } }
-      ],
-      $or: [
-        { tossMarketStatus: { $ne: 'CLOSED' } },
-        { tossBackA: { $ne: null } },
-        { tossLayA: { $ne: null } }
+      $and: [
+        {
+          $or: [
+            { status: { $in: ['live', 'completed', 'resulted'] } },
+            { startTime: { $lte: now } }
+          ]
+        },
+        {
+          $or: [
+            { tossMarketStatus: { $ne: 'CLOSED' } },
+            { tossBackA: { $ne: null } },
+            { tossLayA: { $ne: null } }
+          ]
+        }
       ]
     });
 
@@ -127,14 +133,10 @@ async function updateTossOdds() {
     // STEP 2: Only generate active Toss Odds for strictly UPCOMING matches
     // whose start time is in the FUTURE and toss hasn't been decided yet.
     // ─────────────────────────────────────────────────────────────────────────
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const upcomingWindowEnd = new Date(todayStart.getTime() + 2 * 24 * 60 * 60 * 1000); // next 48h
-
     const upcomingMatches = await Match.find({
       status: 'upcoming',
-      startTime: { $gt: now, $lt: upcomingWindowEnd },
-      tossWinner: null,
-      backOddsA: { $ne: null } // Only if match odds exist (match is active on platform)
+      startTime: { $gt: now },
+      tossWinner: null
     });
 
     if (upcomingMatches.length === 0) return;
@@ -356,12 +358,13 @@ function initTossOddsEngine(io) {
   ioInstance = io;
   console.log('[TossEngine] 🎯 Toss Odds Engine initialized');
 
-  // Normalize all existing open/upcoming matches to universal toss odds (1.98 & 2.02)
+  // Normalize all existing upcoming matches to universal toss odds (1.98 & 2.02)
+  const now = new Date();
   Match.updateMany(
     {
       status: 'upcoming',
-      tossWinner: null,
-      tossMarketStatus: { $ne: 'CLOSED' }
+      startTime: { $gt: now },
+      tossWinner: null
     },
     {
       $set: {

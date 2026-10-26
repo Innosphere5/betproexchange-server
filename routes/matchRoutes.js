@@ -257,13 +257,13 @@ router.get('/:id', async (req, res) => {
                 response.tossLayA = null;
                 response.tossBackB = null;
                 response.tossLayB = null;
-            } else if (!match.tossWinner && match.tossMarketStatus !== 'CLOSED') {
+            } else if (!match.tossWinner) {
                 // Universal Toss Odds: 1.98 for Back, 2.02 for Lay
                 response.tossBackA = 1.98;
                 response.tossLayA = 2.02;
                 response.tossBackB = 1.98;
                 response.tossLayB = 2.02;
-                response.tossMarketStatus = 'OPEN';
+                response.tossMarketStatus = match.tossMarketStatus === 'SUSPENDED' ? 'SUSPENDED' : 'OPEN';
             }
         }
 
@@ -682,9 +682,16 @@ router.get('/:id/bets', async (req, res) => {
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
+                        const normRunner = (b.runner || '').trim().toLowerCase();
+                        let sel = outcomes.find(o => o.toLowerCase() === normRunner);
+                        if (!sel) {
+                            if (teamA && (normRunner === teamA.toLowerCase() || normRunner.includes(teamA.toLowerCase()))) sel = tossA;
+                            else if (teamB && (normRunner === teamB.toLowerCase() || normRunner.includes(teamB.toLowerCase()))) sel = tossB;
+                            else sel = b.runner;
+                        }
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
-                            selection: b.runner,
+                            selection: sel,
                             stake: st,
                             odds: Number(b.odds) || 2
                         }));
