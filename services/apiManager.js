@@ -9,8 +9,8 @@ const SPORT_ID = 27; // Cricket
 const cache = new Map();
 
 const CACHE_TTL_MS = {
-  fixtures:   120 * 1000,     // 2 minutes — fixture list
-  livescores:  10 * 1000,     // 10 seconds — live scores
+  fixtures:    15 * 1000,     // 15 seconds — fast fixture & result sync
+  livescores:   5 * 1000,     // 5 seconds — real-time live scores
   tournaments: 3600 * 1000,   // 1 hour — tournament list
   markets:     24 * 3600 * 1000, // 24 hours — markets metadata
 };

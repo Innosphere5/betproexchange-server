@@ -13,8 +13,8 @@ const initSettlementJob = (io) => {
         processMatchResults(io);
     }, 3000);
 
-    // Schedule for every 2 minutes
-    cron.schedule('*/2 * * * *', () => {
+    // Schedule for every 1 minute for rapid settlement and UI update
+    cron.schedule('*/1 * * * *', () => {
         console.log('[SettlementJob] Triggering result check...');
         processMatchResults(io);
     });

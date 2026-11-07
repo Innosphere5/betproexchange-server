@@ -74,6 +74,17 @@ class OddsApiLiveService {
       () => this.pollUpcomingFixtures(),
       5 * 60 * 1000,
     );
+    // Real-time matching engine for open bets (checked every 2.5s)
+    const { checkAndMatchOpenBets } = require('./openBetMatcher');
+    this.openBetsMatcherInterval = setInterval(async () => {
+      try {
+        const Bet = require('../models/Bet');
+        const openBetMatchIds = await Bet.distinct('matchId', { status: { $in: ['OPEN', 'open', 'unmatched'] } });
+        for (const mId of openBetMatchIds) {
+          await checkAndMatchOpenBets(mId, this.io);
+        }
+      } catch (e) {}
+    }, 2500);
 
     console.log("[OddsApiLive] 🚀 Initializing odds-api.io v3 integration...");
     this.connect();
@@ -1046,6 +1057,12 @@ class OddsApiLiveService {
         io: this.io,
         isLive: metadata.isLive
       });
+
+      // Match any open bets whose requested odds rate matches or is satisfied by new market rate
+      try {
+        const { checkAndMatchOpenBets } = require('./openBetMatcher');
+        checkAndMatchOpenBets(matchId, this.io).catch(() => {});
+      } catch (err) {}
     }
 
     this.writeQueue.set(matchId, {
@@ -1671,6 +1688,7 @@ class OddsApiLiveService {
   }
 
   destroy() {
+    if (this.openBetsMatcherInterval) clearInterval(this.openBetsMatcherInterval);
     if (this.writeInterval) clearInterval(this.writeInterval);
     if (this.staleCheckInterval) clearInterval(this.staleCheckInterval);
     if (this.restPollInterval) clearInterval(this.restPollInterval);

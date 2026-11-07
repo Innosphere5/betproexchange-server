@@ -14,6 +14,7 @@ const Match = require('./models/Match');
 const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { validateBetLimit } = require('./services/limitService');
+const { checkAndMatchOpenBets, expireAndRefundOpenBets, cancelUserOpenBet } = require('./services/openBetMatcher');
 const { initRoundManager, getCurrentRound } = require('./services/roundManager');
 const { initAviatorManager } = require('./services/aviatorManager');
 const { initAviatorxManager } = require('./services/aviatorxManager');
@@ -491,14 +492,15 @@ app.post('/api/user/bet', auth, async (req, res) => {
       }
     }
 
-    // Validate that the submitted odds strictly match the currently shown/active market odds
+    // Check whether the submitted odds match current shown market odds or enter open bets
     const betType = (type || 'back').toLowerCase();
     const validOdds = getValidMarketOddsList(matchInDb, runner, betType, marketType);
     const matchesExpected = validOdds.some(expected => Math.abs(numOdds - expected) <= 0.001);
 
-    if (!matchesExpected) {
-      return res.status(400).json({ error: 'Bet not placed to this market' });
-    }
+    // If odds match current market odds -> status is 'MATCHED'
+    // If user incremented or decremented odds away from market rate -> placed as 'OPEN' (unmatched bet queue)
+    const initialStatus = matchesExpected ? 'MATCHED' : 'OPEN';
+    const isOpenBet = initialStatus === 'OPEN';
 
     const officialMatchName = (matchInDb.teamA && matchInDb.teamB) 
       ? `${matchInDb.teamA} v ${matchInDb.teamB}` 
@@ -537,23 +539,46 @@ app.post('/api/user/bet', auth, async (req, res) => {
       matchName: officialMatchName,
       runner,
       stake,
-      odds,
+      odds: numOdds,
       isLive: Boolean(isLive),
       type: type || 'back',
       marketType: marketType || 'match_odds',
-      status: 'MATCHED'
+      status: initialStatus
     });
     await newBet.save();
 
     if (io) {
-      io.emit('bet_placed', { matchId, bet: newBet });
+      io.emit('bet_placed', { matchId, bet: newBet, isOpenBet });
       io.emit('wallet_updated', { userId: req.user.userId, balance: user.walletBalance });
     }
 
-    res.json({ success: true, balance: user.walletBalance, bet: newBet });
+    // If placed as an open bet, immediately check if live odds can match it
+    if (isOpenBet) {
+      checkAndMatchOpenBets(matchId, io, matchInDb).catch(() => {});
+    }
+
+    res.json({ 
+      success: true, 
+      balance: user.walletBalance, 
+      bet: newBet,
+      isOpenBet,
+      message: isOpenBet 
+        ? `Open bet placed @ ${numOdds}. It will be matched when market odds reach this rate, or refunded if match concludes.`
+        : 'Bet placed successfully.'
+    });
   } catch (err) {
     console.error('[BET PLACEMENT ERROR]', err);
     res.status(500).json({ error: err.message || 'Bet placement failed' });
+  }
+});
+
+// Cancel Open Bet Endpoint
+app.post('/api/user/bets/:betId/cancel', auth, async (req, res) => {
+  try {
+    const result = await cancelUserOpenBet(req.params.betId, req.user.userId, io);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to cancel open bet' });
   }
 });
 

@@ -259,10 +259,25 @@ function parseSportmonksFixture(fixture, matchInDb = null) {
   }
 
   // Status mapping
-  const isFinished = fixture.status === 'Finished' || 
-                     fixture.status === 'Aband.' || 
-                     fixture.status === 'Postp.' || 
-                     fixture.live === false;
+  const fixtureStatusNorm = String(fixture.status || '').toLowerCase().trim();
+  const isApiFinished = fixtureStatusNorm === 'finished' || 
+                        fixtureStatusNorm === 'completed' ||
+                        fixtureStatusNorm === 'ended' ||
+                        fixtureStatusNorm === 'aband.' || 
+                        fixtureStatusNorm === 'postp.' || 
+                        fixtureStatusNorm === 'result' ||
+                        fixtureStatusNorm === 'no result' ||
+                        fixture.live === false;
+
+  const isTargetChased = target > 0 && (
+    (battingTeam === 'teamB' && teamB_score >= target) ||
+    (battingTeam === 'teamA' && teamA_score >= target)
+  );
+
+  const isAllOutInChase = target > 0 && currentWickets >= 10;
+  const isChaseBallsExhausted = target > 0 && remBalls === 0 && remRuns > 0;
+
+  const isFinished = isApiFinished || isTargetChased || isAllOutInChase || isChaseBallsExhausted;
 
   const status = isFinished ? 'completed' : 'live';
   const oversDisplay = isFinished ? 'Final' : String(currentOvers);
@@ -274,6 +289,20 @@ function parseSportmonksFixture(fixture, matchInDb = null) {
     else if (fixture.note && fixture.note.toLowerCase().includes('won')) {
       if (fixture.note.toLowerCase().includes(teamAName.toLowerCase())) winner = teamAName;
       else if (fixture.note.toLowerCase().includes(teamBName.toLowerCase())) winner = teamBName;
+    }
+
+    if (!winner) {
+      if (isTargetChased) {
+        winner = battingTeamName;
+      } else if (teamA_score > teamB_score) {
+        winner = teamAName;
+      } else if (teamB_score > teamA_score) {
+        winner = teamBName;
+      } else if (teamA_score > 0 && teamA_score === teamB_score) {
+        winner = 'TIE';
+      } else {
+        winner = 'VOID';
+      }
     }
   }
 
@@ -419,16 +448,23 @@ class SportmonksScoreService {
         console.warn('[SportmonksScoreService] ⚠️ Live scores fetch failed:', err.message);
       }
 
-      // Targeted recovery: also poll any DB matches marked 'live' with sportmonksFixtureId
-      const liveDbMatches = await Match.find({ status: 'live', sportmonksFixtureId: { $ne: null } });
+      // Targeted recovery: also poll any DB matches marked 'live'
+      const liveDbMatches = await Match.find({ status: 'live' });
       for (const dbM of liveDbMatches) {
-        const alreadyFetched = liveFixtures.some(f => f.id === dbM.sportmonksFixtureId);
-        if (!alreadyFetched) {
-          try {
-            const single = await sportmonksClient.getFixtureById(dbM.sportmonksFixtureId);
-            if (single && single.id) liveFixtures.push(single);
-          } catch (singleErr) {
-            // silent on single fixture poll error
+        let fId = dbM.sportmonksFixtureId;
+        if (!fId) {
+          const cand = await this.findMatchInDb({ id: Number(dbM.matchId) || 0, localteam: { name: dbM.teamA }, visitorteam: { name: dbM.teamB } });
+          fId = cand?.sportmonksFixtureId;
+        }
+        if (fId) {
+          const alreadyFetched = liveFixtures.some(f => f.id === fId);
+          if (!alreadyFetched) {
+            try {
+              const single = await sportmonksClient.getFixtureById(fId);
+              if (single && single.id) liveFixtures.push(single);
+            } catch (singleErr) {
+              // silent on single fixture poll error
+            }
           }
         }
       }
@@ -525,9 +561,45 @@ class SportmonksScoreService {
             updatePayload.tossDepthLayB = '0';
           }
 
+          const isCompleted = parsed.status === 'completed';
+          if (isCompleted) {
+            updatePayload.marketStatus = 'CLOSED';
+            updatePayload.bookmakerMarketStatus = 'CLOSED';
+            updatePayload.tossMarketStatus = 'CLOSED';
+            updatePayload.backOddsA = null;
+            updatePayload.layOddsA = null;
+            updatePayload.backOddsB = null;
+            updatePayload.layOddsB = null;
+            updatePayload.bookmakerBackA = null;
+            updatePayload.bookmakerLayA = null;
+            updatePayload.bookmakerBackB = null;
+            updatePayload.bookmakerLayB = null;
+            updatePayload.tossBackA = null;
+            updatePayload.tossLayA = null;
+            updatePayload.tossBackB = null;
+            updatePayload.tossLayB = null;
+          }
+
           await Match.updateOne({ matchId: matchDbId }, { $set: updatePayload });
           this.memoryCache.set(matchDbId, parsed);
           this.memoryCache.set(String(fixture.id), parsed);
+
+          if (isCompleted) {
+            const { settleMatch } = require('./settlementService');
+            settleMatch(matchDbId, parsed.winner || 'VOID', this.io).catch(err => {
+              console.error('[Sportmonks] Settlement error:', err.message);
+            });
+            if (this.io) {
+              const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
+              this.io.emit('match_updated', { ...updatedDoc, ...updatePayload });
+              this.io.emit('match_settled', {
+                matchId: matchDbId,
+                winner: parsed.winner,
+                score: updatePayload.score
+              });
+              Match.find().sort({ startTime: 1 }).then(all => this.io.emit('matches_updated', all)).catch(() => {});
+            }
+          }
 
           // Real-time broadcast to all connected WebSocket clients with zero delay
           if (this.io) {

@@ -93,11 +93,11 @@ const extractLiveScorePayload = (liveData, existingMatchOrScore = {}) => {
  */
 const updateLiveScores = async (io) => {
     try {
-        const count = await sportmonksScoreService.syncLiveScores(io);
-        if (count > 0) return;
+        // Run Sportmonks live scores sync (non-blocking)
+        await sportmonksScoreService.syncLiveScores(io).catch(() => 0);
 
-        // Fallback: Oddspapi /fixtures/live if no Sportmonks matches found
-        // IMPORTANT: Only process matches NOT recently updated by Sportmonks
+        // OddsPapi /fixtures/live fallback & supplementary sync
+        // IMPORTANT: Matches recently updated (<30s) by Sportmonks are preserved via the age guard below
         const response = await getData('fixtures/live');
 
         if (!response || !Array.isArray(response) || response.length === 0) {
@@ -168,7 +168,7 @@ const updateLiveScores = async (io) => {
 
             const isBallsExhausted = parsedScore.target > 0 && parsedScore.remBalls === 0 && parsedScore.remRuns > 0;
 
-            const isFinished = !isLiveStatus && (isApiFinished || isTargetReached || isBallsExhausted);
+            const isFinished = isApiFinished || (parsedScore.target > 0 && isTargetReached) || (!isLiveStatus && isBallsExhausted);
 
             let winner = null; // Always derive winner fresh — never carry stale DB value for live matches
 
@@ -209,7 +209,7 @@ const updateLiveScores = async (io) => {
 
             const shouldCloseToss = matchInDb.tossMarketStatus !== 'CLOSED' || matchInDb.tossBackA !== null;
 
-            if (hasChanged || shouldCloseToss) {
+            if (hasChanged || shouldCloseToss || isFinished) {
                 const updatePayload = {
                     status: currentStatus,
                     winner: winner,
@@ -247,8 +247,43 @@ const updateLiveScores = async (io) => {
                     updatePayload.tossDepthLayB = '0';
                 }
 
+                if (isFinished) {
+                    updatePayload.marketStatus = 'CLOSED';
+                    updatePayload.bookmakerMarketStatus = 'CLOSED';
+                    updatePayload.tossMarketStatus = 'CLOSED';
+                    updatePayload.backOddsA = null;
+                    updatePayload.layOddsA = null;
+                    updatePayload.backOddsB = null;
+                    updatePayload.layOddsB = null;
+                    updatePayload.bookmakerBackA = null;
+                    updatePayload.bookmakerLayA = null;
+                    updatePayload.bookmakerBackB = null;
+                    updatePayload.bookmakerLayB = null;
+                    updatePayload.tossBackA = null;
+                    updatePayload.tossLayA = null;
+                    updatePayload.tossBackB = null;
+                    updatePayload.tossLayB = null;
+                }
+
                 await Match.updateOne({ matchId }, { $set: updatePayload });
                 updatedCount++;
+
+                if (isFinished) {
+                    const { settleMatch } = require('./settlementService');
+                    settleMatch(matchId, winner || 'VOID', io).catch(err => {
+                        console.error('[ScoreService] Settlement error:', err.message);
+                    });
+                    if (io) {
+                        const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
+                        io.emit('match_updated', { ...updatedDoc, ...updatePayload });
+                        io.emit('match_settled', {
+                            matchId: matchId,
+                            winner: winner,
+                            score: updatePayload.score
+                        });
+                        Match.find().sort({ startTime: 1 }).then(all => io.emit('matches_updated', all)).catch(() => {});
+                    }
+                }
 
                 if (shouldCloseToss && io) {
                     io.emit('toss_odds_update', {

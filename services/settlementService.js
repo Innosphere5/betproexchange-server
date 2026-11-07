@@ -4,6 +4,7 @@ const User = require('../models/User');
 const Match = require('../models/Match');
 const { distributeProfitLoss } = require('./hierarchyService');
 const { capProfitByLimit } = require('./limitService');
+const { expireAndRefundOpenBets } = require('./openBetMatcher');
 
 /**
  * Numberline Rate Adjustment Algorithm:
@@ -46,6 +47,13 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
 
         const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
         const matchIdList = [matchId, altMatchId];
+
+        // 1. Expire any remaining unmatched open bets -> goes to garbage and refund users
+        try {
+            await expireAndRefundOpenBets(matchId, io, 'MATCH_SETTLED');
+        } catch (err) {
+            console.error('[SETTLEMENT] Error expiring open bets:', err.message);
+        }
 
         // Fetch match to resolve runner market rates if needed
         const match = await Match.findOne({ matchId: { $in: matchIdList } });

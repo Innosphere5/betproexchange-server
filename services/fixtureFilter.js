@@ -69,6 +69,17 @@ const TIER1_FRANCHISE_LEAGUES = [
   "super smash",
   "vitality blast",
   "t20 blast",
+  // T10 Leagues
+  "abu dhabi t10",
+  "t10 league",
+  "zim afro t10",
+  "us masters t10",
+  "max 60",
+  "european cricket series",
+  "ecs t10",
+  "ecl t10",
+  "t10 european",
+  "t10",
 ];
 
 const DOMESTIC_BLACKLIST_PATTERNS = [
@@ -78,9 +89,7 @@ const DOMESTIC_BLACKLIST_PATTERNS = [
   /\b(u19|u 19|under 19|under 19s|u23|under 23|youth)\b/i,
   // Legends / Veterans / Masters / Exhibition
   /\b(legends|championship of legends|road safety|veterans|masters)\b/i,
-  // European T10 amateur / club
-  /\b(european cricket|ecs|ecl|t10 european)\b/i,
-  // Minor local club cricket
+  // Minor local club cricket (excluding T10)
   /\b(cricket club|club xi)\b/i,
 ];
 
@@ -158,7 +167,7 @@ function isCricketFixture(fixture) {
   if (participantsText.includes("cricket")) return true;
 
   const combinedText = `${tournamentName} ${participantsText}`;
-  return /\b(cricket|t20|t20i|twenty20|twenty20 international|odi|one day international|one-day international|test|test match|icc|world cup|champions trophy|asia cup)\b/.test(
+  return /\b(cricket|t20|t20i|twenty20|twenty20 international|odi|one day international|one-day international|test|test match|t10|ten10|t-10|10 overs|10-over|icc|world cup|champions trophy|asia cup)\b/.test(
     combinedText,
   );
 }
@@ -168,6 +177,7 @@ function isCricketFixture(fixture) {
  * - International ODI, T20I, Test matches between recognised national teams (AUS, IND, PAK, SL, ENG, SA, NZ, etc.)
  * - Major international tournaments (ICC World Cup, Champions Trophy, Asia Cup, CWC League 2)
  * - Top-tier franchise leagues (IPL, PSL, BBL, CPL, etc.)
+ * - T10 leagues and tournaments (Abu Dhabi T10, Zim Afro T10, ECS, etc.)
  * - Rejects all minor/domestic/tournament-level state cricket
  */
 function isTargetBPExchFixture(fixture) {
@@ -188,15 +198,22 @@ function isTargetBPExchFixture(fixture) {
   );
 
   const combined = `${tName} ${p1} ${p2} ${sport}`;
+  const isT10 = /\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl)\b/i.test(tName) || /\b(t10|ten10)\b/i.test(combined);
 
-  // 1. Strict blacklist check
+  // 1. Strict blacklist check (domestic club filter is bypassed for official T10 tournaments)
   for (const pattern of DOMESTIC_BLACKLIST_PATTERNS) {
+    if (isT10 && pattern.source.includes('cricket club')) continue;
     if (pattern.test(combined)) {
       return false;
     }
   }
 
-  // 2. Tier 1 Franchise Leagues check (IPL, PSL, BBL, etc.)
+  // 2. T10 Match / Tournaments check (Abu Dhabi T10, Zim Afro, ECS, ECL, etc.)
+  if (isT10) {
+    return true;
+  }
+
+  // 3. Tier 1 Franchise Leagues check (IPL, PSL, BBL, etc.)
   for (const league of TIER1_FRANCHISE_LEAGUES) {
     if (tName.includes(league)) {
       return true;
@@ -269,6 +286,7 @@ function isPakistanOrIndia(teamStr) {
 function getFormatBonus(tName) {
   if (/\b(odi|one day|one-day)\b/i.test(tName)) return 300;
   if (/\b(t20|t20i|twenty20)\b/i.test(tName)) return 250;
+  if (/\b(t10|ten10|t-10)\b/i.test(tName)) return 220;
   if (/\b(test|test match)\b/i.test(tName)) return 200;
   return 100;
 }

@@ -11,7 +11,14 @@ const betSchema = new mongoose.Schema({
   marketType: { type: String, enum: ['match_odds', 'toss', 'bookmaker', 'fancy', 'figure', 'even_odd', 'tied_match'], default: 'match_odds' },
   isLive: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
-  status: { type: String, enum: ['pending', 'won', 'lost', 'cancelled', 'MATCHED', 'WIN', 'LOSE', 'CANCELLED'], default: 'pending' },
+  status: { 
+    type: String, 
+    enum: [
+      'pending', 'won', 'lost', 'cancelled', 'MATCHED', 'matched',
+      'OPEN', 'open', 'unmatched', 'WIN', 'LOSE', 'CANCELLED', 'VOID', 'void'
+    ], 
+    default: 'MATCHED' 
+  },
   result: { type: String, default: null },
   effectiveOdds: { type: Number, default: null },
   closingOdds: { type: Number, default: null },
