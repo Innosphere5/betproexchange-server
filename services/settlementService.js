@@ -3,6 +3,7 @@ const User = require('../models/User');
 
 const Match = require('../models/Match');
 const { distributeProfitLoss } = require('./hierarchyService');
+const { capProfitByLimit } = require('./limitService');
 
 /**
  * Numberline Rate Adjustment Algorithm:
@@ -136,7 +137,8 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
                 // For LAY: profit = stake. Return liability + netProfit (after 5% commission on net profit)
                 const profit = isBack ? Math.round(bet.stake * (effectiveOdds - 1)) : bet.stake;
                 const commission = Math.round(profit * 0.05);
-                const netProfit = profit - commission;
+                const rawNetProfit = profit - commission;
+                const { netProfit } = await capProfitByLimit(bet.userId, bet.marketType || 'cricket', rawNetProfit);
                 const netPayout = liability + netProfit;
                 
                 const user = await User.findOneAndUpdate(

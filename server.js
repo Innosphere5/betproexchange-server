@@ -13,6 +13,7 @@ const User = require('./models/User');
 const Match = require('./models/Match');
 const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
+const { validateBetLimit } = require('./services/limitService');
 const { initRoundManager, getCurrentRound } = require('./services/roundManager');
 const { initAviatorManager } = require('./services/aviatorManager');
 const { initAviatorxManager } = require('./services/aviatorxManager');
@@ -139,6 +140,10 @@ mongoose.connect(process.env.MONGO_URI, {
     // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
     const fancyMarketsService = require('./services/fancyMarketsService');
     fancyMarketsService.init(io);
+
+    // Initialize Suspension Engine (evaluated on stateSeq changes + 1-second timer)
+    const suspensionEngine = require('./services/suspension/suspensionEngine.js');
+    suspensionEngine.init(io);
 
     // Initialize Toss Odds Engine (synthetic toss market)
     const { initTossOddsEngine } = require('./services/tossOddsEngine');
@@ -304,12 +309,60 @@ function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
   return [];
 }
 
+/** Helper to check whether a market is currently suspended (SUSPENSION_ENGINE_CONTEXT.md) */
+function isMarketSuspended(matchInDb, runner, marketType) {
+  if (!matchInDb) return true;
+  const mType = (marketType || 'match_odds').toLowerCase();
+  const normRunner = String(runner || '').toLowerCase();
+
+  if (mType === 'figure' && Array.isArray(matchInDb.figureMarkets)) {
+    const digitMatch = normRunner.match(/digit\s*(\d+)/i);
+    const digitNum = digitMatch ? parseInt(digitMatch[1], 10) : null;
+    for (const fig of matchInDb.figureMarkets) {
+      if (fig.status === 'SUSPENDED') return true;
+      if (digitNum !== null && fig.digits) {
+        const found = fig.digits.find(d => d.digit === digitNum);
+        if (found && found.status === 'SUSPENDED') return true;
+      }
+    }
+  }
+
+  if (mType === 'fancy' && Array.isArray(matchInDb.fancyMarkets)) {
+    const item = matchInDb.fancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
+    if (item && item.status === 'SUSPENDED') return true;
+  }
+
+  if (mType === 'even_odd' && Array.isArray(matchInDb.evenOddMarkets)) {
+    const item = matchInDb.evenOddMarkets.find(eo => normRunner.includes(String(eo.name).toLowerCase()) || String(eo.name).toLowerCase().includes(normRunner));
+    if (item && item.status === 'SUSPENDED') return true;
+  }
+
+  if (mType === 'tied_match' && matchInDb.tiedMatchMarket) {
+    if (matchInDb.tiedMatchMarket.status === 'SUSPENDED') return true;
+  }
+
+  return false;
+}
+
+// Push status changes to clients by SSE (Section 5)
+app.get('/api/matches/:matchId/suspension-stream', (req, res) => {
+  const suspensionEngine = require('./services/suspension/suspensionEngine.js');
+  suspensionEngine.handleSSEStream(req, res);
+});
+
 // Bet Placement Endpoint
 app.post('/api/user/bet', auth, async (req, res) => {
   try {
     const { matchId, runner, stake, odds, isLive, type, marketType } = req.body;
     if (!matchId) return res.status(400).json({ error: 'Missing matchId' });
     if (!stake || isNaN(stake) || stake <= 0) return res.status(400).json({ error: 'Invalid stake' });
+
+    // Section 0 Gate: Paper mode by default; real money needs REAL_MONEY_ENABLED=true + LEGAL_SIGNOFF_REF
+    const isPaperMode = process.env.PAPER_MODE !== 'false';
+    const realMoneyAllowed = process.env.REAL_MONEY_ENABLED === 'true' && Boolean(process.env.LEGAL_SIGNOFF_REF);
+    if (!isPaperMode && !realMoneyAllowed) {
+      return res.status(403).json({ error: 'Real money wagering disabled without legal signoff ref' });
+    }
 
     const numOdds = parseFloat(odds);
     if (!numOdds || isNaN(numOdds) || numOdds <= 1) {
@@ -330,6 +383,21 @@ app.post('/api/user/bet', auth, async (req, res) => {
     }
     if (matchInDb.marketStatus === 'CLOSED') {
       return res.status(400).json({ error: 'Market is closed for this match' });
+    }
+
+    // Enforce suspension check
+    if (isMarketSuspended(matchInDb, runner, marketType)) {
+      return res.status(400).json({ error: 'Market is currently suspended' });
+    }
+
+    // Acceptance delay D per PRICING_ENGINE_CONTEXT.md / SUSPENSION_ENGINE_CONTEXT.md Section 5
+    const acceptanceDelayMs = parseInt(process.env.ACCEPTANCE_DELAY_MS || '0', 10);
+    if (acceptanceDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, acceptanceDelayMs));
+      const freshMatch = await Match.findOne({ matchId: { $in: [matchId, altMatchId] } });
+      if (!freshMatch || isMarketSuspended(freshMatch, runner, marketType)) {
+        return res.status(400).json({ error: 'Market was suspended during acceptance delay' });
+      }
     }
 
     // Enforce toss market validation: strictly closed for live or completed matches
@@ -353,35 +421,22 @@ app.post('/api/user/bet', auth, async (req, res) => {
       ? `${matchInDb.teamA} v ${matchInDb.teamB}` 
       : (req.body.matchName || 'Cricket Match');
 
-    // Enforce toss market max bet of 2M
-    if (marketType === 'toss' && stake > 2000000) {
-      return res.status(400).json({ error: 'Toss market max bet is 2M' });
+    // Calculate potential profit for profit limit validation
+    const potentialProfit = (betType === 'back') ? Math.round(stake * (numOdds - 1)) : stake;
+
+    // Resolve accurate category based on marketType and match sportKey
+    let betCategory = marketType || 'cricket';
+    if (!marketType || marketType === 'match_odds') {
+      const sport = (matchInDb.sportKey || '').toLowerCase();
+      if (sport.includes('soccer') || sport.includes('football')) betCategory = 'soccer';
+      else if (sport.includes('tennis')) betCategory = 'tennis';
+      else if (sport.includes('horse') || sport.includes('race')) betCategory = 'races';
+      else if (sport.includes('greyhound')) betCategory = 'greyhound';
+      else betCategory = 'cricket';
     }
 
-    // Enforce bookmaker market max bet of 1M
-    if (marketType === 'bookmaker' && stake > 1000000) {
-      return res.status(400).json({ error: 'Bookmaker market max bet is 1M' });
-    }
-
-    // Enforce fancy market max bet of 2M
-    if (marketType === 'fancy' && stake > 2000000) {
-      return res.status(400).json({ error: 'Fancy market max bet is 2M' });
-    }
-
-    // Enforce figure market max bet of 100K
-    if (marketType === 'figure' && stake > 100000) {
-      return res.status(400).json({ error: 'Figure market max bet is 100K' });
-    }
-
-    // Enforce even/odd market max bet of 2M
-    if (marketType === 'even_odd' && stake > 2000000) {
-      return res.status(400).json({ error: 'Even/Odd market max bet is 2M' });
-    }
-
-    // Enforce tied match market max bet of 500K
-    if (marketType === 'tied_match' && stake > 500000) {
-      return res.status(400).json({ error: 'Tied Match market max bet is 500K' });
-    }
+    // Validate hierarchical max bet sizes and profit limits for cricket & sports markets
+    await validateBetLimit(req.user.userId, betCategory, stake, potentialProfit);
 
     const liability = (betType === 'lay' && numOdds > 1) ? Math.round(stake * (numOdds - 1)) : stake;
 
@@ -432,6 +487,11 @@ app.post('/api/casino/bet', auth, async (req, res) => {
     if (!amount || isNaN(amount) || amount <= 0) {
       return res.status(400).json({ error: 'Invalid stake amount' });
     }
+
+    // Validate hierarchical max bet size and profit limit for Casino
+    const casinoOdds = 2.0;
+    const potentialProfit = amount * (casinoOdds - 1.0);
+    await validateBetLimit(req.user.userId, 'casino', amount, potentialProfit);
 
     // Atomic update to deduct wallet
     const user = await User.findOneAndUpdate(

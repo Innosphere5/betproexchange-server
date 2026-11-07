@@ -80,7 +80,11 @@ const matchSchema = new mongoose.Schema({
       layPrice: { type: Number, default: null },
       layVol: { type: String, default: "100" },
       status: { type: String, default: 'OPEN' },
-      maxBet: { type: Number, default: 100000 }
+      reasons: { type: [String], default: [] },
+      topReason: { type: String, default: null },
+      statusSince: { type: Date, default: Date.now },
+      manualHold: { type: Boolean, default: false },
+      maxBet: { type: Number, default: 2000000 }
     }],
     default: []
   },
@@ -91,6 +95,10 @@ const matchSchema = new mongoose.Schema({
       name: { type: String, required: true },  // e.g. "SOUTH AFRICA LEGENDS 15 OVER TOTAL LAST FIGURE"
       maxBet: { type: Number, default: 100000 },
       status: { type: String, default: 'OPEN' },
+      reasons: { type: [String], default: [] },
+      topReason: { type: String, default: null },
+      statusSince: { type: Date, default: Date.now },
+      manualHold: { type: Boolean, default: false },
       digits: {
         type: [{
           digit: { type: Number, required: true },  // 0-9
@@ -112,6 +120,10 @@ const matchSchema = new mongoose.Schema({
       layPrice: { type: Number, default: null },
       layVol: { type: String, default: "100" },
       status: { type: String, default: 'OPEN' },
+      reasons: { type: [String], default: [] },
+      topReason: { type: String, default: null },
+      statusSince: { type: Date, default: Date.now },
+      manualHold: { type: Boolean, default: false },
       maxBet: { type: Number, default: 2000000 }
     }],
     default: []
@@ -123,6 +135,10 @@ const matchSchema = new mongoose.Schema({
       name: { type: String, default: 'TIED MATCH' },
       maxBet: { type: Number, default: 500000 },
       status: { type: String, default: 'OPEN' },
+      reasons: { type: [String], default: [] },
+      topReason: { type: String, default: null },
+      statusSince: { type: Date, default: Date.now },
+      manualHold: { type: Boolean, default: false },
       runners: {
         type: [{
           name: { type: String, required: true },  // "Yes" or "No"

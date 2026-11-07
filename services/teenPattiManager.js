@@ -3,6 +3,7 @@ const TeenPattiHand = require('../models/TeenPattiHand');
 const TeenPattiBet = require('../models/TeenPattiBet');
 const User = require('../models/User');
 const { distributeCasinoPL } = require('./hierarchyService');
+const { validateBetLimit, capProfitByLimit } = require('./limitService');
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -391,7 +392,8 @@ async function settleBets(winningChoice, rankA, rankB) {
         bet.status = 'WIN';
         // Profit calculation
         const grossProfit = bet.amount * (finalOdds - 1);
-        const netProfit = grossProfit * 0.98; // 2% platform commission
+        const rawNetProfit = grossProfit * 0.98; // 2% platform commission
+        const { netProfit } = await capProfitByLimit(bet.userId, 'teenpatti', rawNetProfit);
         const payout = bet.amount + netProfit;
 
         // Atomic wallet credit
@@ -452,6 +454,10 @@ async function placeBet(userId, betType, amount) {
   if (!amount || isNaN(amount) || amount < 10) {
     throw new Error('Invalid stake amount (minimum 10)');
   }
+
+  // Validate hierarchical max bet size & profit limit for Teen Patti
+  const estimatedProfit = amount * (ROUND_SETTINGS.BACK_LAY_ODDS - 1);
+  await validateBetLimit(userId, 'teenpatti', amount, estimatedProfit);
 
   // Deduct balance atomically
   const user = await User.findOneAndUpdate(

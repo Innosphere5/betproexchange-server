@@ -3,6 +3,7 @@ const AviatorRound = require('../models/AviatorRound');
 const AviatorBet = require('../models/AviatorBet');
 const User = require('../models/User');
 const { distributeCasinoPL } = require('./hierarchyService');
+const { validateBetLimit, capProfitByLimit } = require('./limitService');
 
 let io = null;
 let currentRound = null;
@@ -402,6 +403,10 @@ async function placeBet(userId, betSlot, stake, autoCashoutMultiplier) {
     throw new Error('Invalid stake amount (minimum 10)');
   }
 
+  // Validate hierarchical max bet size & profit limit for Aviator
+  const estimatedProfit = autoCashoutMultiplier ? Math.round(stake * (parseFloat(autoCashoutMultiplier) - 1)) : 0;
+  await validateBetLimit(userId, 'aviator', stake, estimatedProfit);
+
   // Prevent double bets on same slot
   const existing = await AviatorBet.findOne({
     userId,
@@ -470,7 +475,8 @@ async function cashout(userId, betSlot) {
   }
 
   const grossPayout = Math.round(bet.stake * currentMultiplier * 100) / 100;
-  const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
+  const rawNetProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
+  const { netProfit } = await capProfitByLimit(userId, 'aviator', rawNetProfit);
   const netPayout = bet.stake + netProfit;
 
   // Atomic state protection to avoid double cashouts

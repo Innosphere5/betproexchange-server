@@ -5,6 +5,23 @@ const CasinoBet = require('../models/CasinoBet');
 const AviatorBet = require('../models/AviatorBet');
 const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
+const { resolveUserEffectiveLimits } = require('../services/limitService');
+
+// Get Current User's Effective Limits (Max Bet Sizes & Profit Limits)
+router.get('/limits', auth, async (req, res) => {
+  try {
+    const limits = await resolveUserEffectiveLimits(req.user.userId);
+    res.json({
+      success: true,
+      bettingAllowed: limits.bettingAllowed,
+      maxBetSizes: limits.effectiveMaxBetSizes,
+      profitLimits: limits.effectiveProfitLimits
+    });
+  } catch (err) {
+    console.error('Error fetching user limits:', err);
+    res.status(500).json({ error: 'Server error fetching limits' });
+  }
+});
 
 // Get User Statement (All transactions/bets)
 router.get('/statement', auth, async (req, res) => {

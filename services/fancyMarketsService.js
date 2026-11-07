@@ -517,14 +517,22 @@ class FancyMarketsService {
         }
       );
 
+      // Evaluate suspension engine logic on every update (holds, end-zone, staleness, quote validation)
+      try {
+        const suspensionEngine = require('./suspension/suspensionEngine.js');
+        await suspensionEngine.evaluateMatch(matchId);
+      } catch (e) {
+        console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);
+      }
+
       // Emit live updates via Socket.IO
       const targetIo = io || this.io;
       if (targetIo) {
         const matchIdStr = String(matchId);
         targetIo.emit('tied_match_market_update', { matchId: matchIdStr, tiedMatchMarket });
-        targetIo.emit('even_odd_market_update', { matchId: matchIdStr, evenOddMarkets });
-        targetIo.emit('fancy_market_update', { matchId: matchIdStr, fancyMarkets });
-        targetIo.emit('figure_market_update', { matchId: matchIdStr, figureMarkets });
+        targetIo.emit('even_odd_market_update', { matchId: matchIdStr, evenOddMarkets: match.evenOddMarkets });
+        targetIo.emit('fancy_market_update', { matchId: matchIdStr, fancyMarkets: match.fancyMarkets });
+        targetIo.emit('figure_market_update', { matchId: matchIdStr, figureMarkets: match.figureMarkets });
       }
     } catch (err) {
       console.error(`[FancyMarketsService] Error processing live markets for ${matchId}:`, err.message);

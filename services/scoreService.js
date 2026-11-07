@@ -97,6 +97,7 @@ const updateLiveScores = async (io) => {
         if (count > 0) return;
 
         // Fallback: Oddspapi /fixtures/live if no Sportmonks matches found
+        // IMPORTANT: Only process matches NOT recently updated by Sportmonks
         const response = await getData('fixtures/live');
 
         if (!response || !Array.isArray(response) || response.length === 0) {
@@ -132,6 +133,15 @@ const updateLiveScores = async (io) => {
                     lastUpdated: new Date()
                 });
                 console.log(`[ScoreService] Automatically added verified real LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB} (Toss Closed)`);
+            } else {
+                // Guard: Don't overwrite if Sportmonks updated this match within the last 30 seconds
+                const lastUp = matchInDb.score?.lastUpdated || matchInDb.lastUpdated;
+                if (lastUp && matchInDb.sportmonksFixtureId) {
+                    const ageMs = Date.now() - new Date(lastUp).getTime();
+                    if (ageMs < 30000) {
+                        continue; // Fresh Sportmonks data — skip OddsPapi fallback for this match
+                    }
+                }
             }
 
             const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});

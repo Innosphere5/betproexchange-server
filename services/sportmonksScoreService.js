@@ -339,10 +339,12 @@ class SportmonksScoreService {
   constructor() {
     this.memoryCache = new Map(); // matchId -> parsedScore
     this.isSyncing = false;
+    this.syncStartedAt = 0;       // Timestamp when sync started — for deadlock detection
     this.timer = null;
     this.io = null;
     this.pollIntervalLive = 1500;    // 1.5 seconds during active live in-play matches (ultra-fast sub-2s)
     this.pollIntervalIdle = 6000;    // 6 seconds when idle / waiting
+    this.SYNC_TIMEOUT_MS = 15000;    // Safety: auto-release mutex after 15s to prevent deadlock
   }
 
   /**
@@ -395,8 +397,17 @@ class SportmonksScoreService {
    * Fetch and sync all live scores from Sportmonks
    */
   async syncLiveScores(io = null) {
-    if (this.isSyncing) return 0;
+    // Deadlock-safe mutex: auto-release if previous sync has been stuck for >15s
+    if (this.isSyncing) {
+      const lockAge = Date.now() - this.syncStartedAt;
+      if (lockAge < this.SYNC_TIMEOUT_MS) {
+        return 0; // Normal concurrent call — skip
+      }
+      console.warn(`[SportmonksScoreService] ⚠️ Mutex deadlock detected! Lock held for ${lockAge}ms. Force-releasing...`);
+      this.isSyncing = false;
+    }
     this.isSyncing = true;
+    this.syncStartedAt = Date.now();
     if (io) this.io = io;
 
     try {

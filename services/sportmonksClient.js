@@ -237,7 +237,7 @@ class SportmonksClient {
    */
   async getFixtureById(fixtureId, customIncludes = null) {
     const include = customIncludes || 'runs,balls,scoreboards,localteam,visitorteam,batting.batsman,bowling.bowler,tosswon,league';
-    return this.request(`fixtures/${fixtureId}`, { include }, 2000);
+    return this.request(`fixtures/${fixtureId}`, { include }, 0); // No cache for live targeted polls — must always be fresh
   }
 
   /**

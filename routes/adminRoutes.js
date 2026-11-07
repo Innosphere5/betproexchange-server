@@ -10,6 +10,7 @@ const CasinoBet = require('../models/CasinoBet');
 const AviatorBet = require('../models/AviatorBet');
 const TeenPattiBet = require('../models/TeenPattiBet');
 const AviatorXBet = require('../models/AviatorXBet');
+const UserProfitLimit = require('../models/UserProfitLimit');
 const auth = require('../middleware/auth');
 const { generateFinalSheet } = require('../services/finalSheetEngine');
 const {
@@ -20,6 +21,13 @@ const {
   getViewerNetShare
 } = require('../services/hierarchyHelper');
 const { settleMatch } = require('../services/settlementService');
+const {
+  DEFAULT_MAX_BET_SIZES,
+  DEFAULT_PROFIT_LIMITS,
+  resolveUserEffectiveLimits,
+  applyLimitsToDownline,
+  syncUserProfitLimitRecord
+} = require('../services/limitService');
 
 // Helper to reliably find a user from JWT req.user payload across username casing or ID
 const findUserFromReq = async (reqUser) => {
@@ -228,11 +236,22 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       });
     }
 
+    // Inherit bounded max bet sizes and profit limits from parent
+    if (parent.maxBetSizes) {
+      newUser.maxBetSizes = { ...DEFAULT_MAX_BET_SIZES, ...parent.maxBetSizes };
+    }
+    if (parent.profitLimits) {
+      newUser.profitLimits = { ...DEFAULT_PROFIT_LIMITS, ...parent.profitLimits };
+    }
+
     // Save user and batch insert transactions concurrently
     await Promise.all([
       newUser.save(),
       txsToInsert.length > 0 ? Transaction.insertMany(txsToInsert) : Promise.resolve()
     ]);
+
+    // Synchronize profit limit table record
+    await syncUserProfitLimitRecord(newUser, parent, parent.username);
 
     res.json({ 
       success: true, 
@@ -757,13 +776,40 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
 });
 
 
-// Update Downline User Detail (Share, Password, etc.)
+// Update Downline User Detail (Share, Password, Max Bet Sizes, Profit Limits, etc.)
 router.post('/update-user', auth, isAuthorized, async (req, res) => {
   try {
-    const { targetUsername, share, newPassword, allowSettlement } = req.body;
-    const parent = await User.findOne({ username: req.user.userId });
+    const { 
+      targetUsername, 
+      share, 
+      newPassword, 
+      allowSettlement,
+      isActive,
+      status,
+      bettingAllowed,
+      phone,
+      reference,
+      notes,
+      commission,
+      maxBetSizes,
+      profitLimits,
+      applyToChildren
+    } = req.body;
+    const parent = await findUserFromReq(req.user);
+    if (!parent) return res.status(404).json({ error: 'Parent user not found' });
     
-    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    let target = null;
+    if (req.user.role === 'superadmin') {
+      target = await findUserByKey(targetUsername);
+    } else {
+      target = await User.findOne({ username: targetUsername, parentId: parent._id });
+      if (!target) {
+        const allowed = await getAllDescendantUsernames(parent);
+        if (allowed.includes(targetUsername)) {
+          target = await findUserByKey(targetUsername);
+        }
+      }
+    }
     if (!target) return res.status(404).json({ error: 'User not found in downline' });
 
     // Restriction: Master can only edit Bettors
@@ -791,11 +837,253 @@ router.post('/update-user', auth, isAuthorized, async (req, res) => {
       target.allowSettlement = Boolean(allowSettlement);
     }
 
+    // Status / Active toggle
+    if (isActive !== undefined) {
+      target.status = isActive ? 'active' : 'inactive';
+    } else if (status !== undefined && ['active', 'inactive'].includes(status)) {
+      target.status = status;
+    }
+
+    // Betting Allowed toggle
+    if (bettingAllowed !== undefined) {
+      target.bettingAllowed = Boolean(bettingAllowed);
+    }
+
+    // Metadata fields (Image 1)
+    if (phone !== undefined) target.phone = String(phone);
+    if (reference !== undefined) target.reference = String(reference);
+    if (notes !== undefined) target.notes = String(notes);
+    if (commission !== undefined) {
+      const c = parseFloat(commission);
+      if (!isNaN(c) && c >= 0) target.commission = c;
+    }
+
+    // Update Max Bet Sizes with parent bounds enforcement
+    if (maxBetSizes && typeof maxBetSizes === 'object') {
+      if (!target.maxBetSizes) target.maxBetSizes = { ...DEFAULT_MAX_BET_SIZES };
+      for (const [k, v] of Object.entries(maxBetSizes)) {
+        const numVal = parseFloat(v);
+        if (!isNaN(numVal) && numVal >= 0) {
+          const parentCap = (req.user.role === 'superadmin') ? Infinity : (parent.maxBetSizes?.[k] || DEFAULT_MAX_BET_SIZES[k] || Infinity);
+          target.maxBetSizes[k] = Math.min(numVal, parentCap);
+        }
+      }
+      target.markModified('maxBetSizes');
+    }
+
+    // Update Profit Limits with parent bounds enforcement
+    if (profitLimits && typeof profitLimits === 'object') {
+      if (!target.profitLimits) target.profitLimits = { ...DEFAULT_PROFIT_LIMITS };
+      for (const [k, v] of Object.entries(profitLimits)) {
+        if (k === 'isEnabled') {
+          target.profitLimits.isEnabled = Boolean(v);
+        } else {
+          const numVal = parseFloat(v);
+          if (!isNaN(numVal) && numVal >= 0) {
+            const parentCap = (req.user.role === 'superadmin') ? Infinity : (parent.profitLimits?.[k] || DEFAULT_PROFIT_LIMITS[k] || Infinity);
+            target.profitLimits[k] = Math.min(numVal, parentCap);
+          }
+        }
+      }
+      target.markModified('profitLimits');
+    }
+
     await target.save();
-    res.json({ success: true, user: { username: target.username, share: target.share, role: target.role, allowSettlement: target.allowSettlement } });
+
+    // Synchronize dedicated UserProfitLimit table
+    await syncUserProfitLimitRecord(target, parent, parent.username);
+
+    // If applyToChildren is true, cascade limits to all child accounts in downline
+    let downlineCount = 0;
+    if (applyToChildren) {
+      const resApply = await applyLimitsToDownline(target._id, {
+        maxBetSizes: target.maxBetSizes,
+        profitLimits: target.profitLimits,
+        updatedBy: parent.username
+      });
+      downlineCount = resApply.count;
+    }
+
+    res.json({ 
+      success: true, 
+      user: { 
+        username: target.username, 
+        share: target.share, 
+        role: target.role, 
+        status: target.status,
+        bettingAllowed: target.bettingAllowed,
+        allowSettlement: target.allowSettlement,
+        phone: target.phone,
+        reference: target.reference,
+        notes: target.notes,
+        commission: target.commission,
+        maxBetSizes: target.maxBetSizes,
+        profitLimits: target.profitLimits
+      },
+      downlineUpdated: downlineCount
+    });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: 'Server error updating user' });
+  }
+});
+
+// Get User Detail and Effective Limits for Edit Client Modal
+router.get('/user-limits/:username', auth, isAuthorized, async (req, res) => {
+  try {
+    const parent = await findUserFromReq(req.user);
+    if (!parent) return res.status(404).json({ error: 'Parent user not found' });
+
+    const target = await findUserByKey(req.params.username);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+
+    const effective = await resolveUserEffectiveLimits(target);
+
+    res.json({
+      success: true,
+      user: {
+        _id: target._id,
+        clientId: target.clientId || (target._id ? target._id.toString().substring(0, 7) : '7547995'),
+        username: target.username,
+        role: target.role,
+        status: target.status,
+        bettingAllowed: target.bettingAllowed !== false,
+        phone: target.phone || '',
+        reference: target.reference || '',
+        notes: target.notes || '',
+        commission: target.commission || 2.0,
+        userDomain: target.userDomain || '1 (betproexch.com)',
+        allowSettlement: target.allowSettlement,
+        share: target.share || 0,
+        walletBalance: target.walletBalance || 0,
+        credit: target.credit || 0,
+        maxBetSizes: target.maxBetSizes || DEFAULT_MAX_BET_SIZES,
+        profitLimits: target.profitLimits || DEFAULT_PROFIT_LIMITS
+      },
+      effectiveMaxBetSizes: effective.effectiveMaxBetSizes,
+      effectiveProfitLimits: effective.effectiveProfitLimits,
+      parentMaxBetSizes: parent.maxBetSizes || DEFAULT_MAX_BET_SIZES,
+      parentProfitLimits: parent.profitLimits || DEFAULT_PROFIT_LIMITS
+    });
+  } catch (err) {
+    console.error('Error fetching user limits:', err);
+    res.status(500).json({ error: 'Server error fetching user limits' });
+  }
+});
+
+// Table of Child Profit Limits for Parent Management
+router.get('/profit-limits-table', auth, isAuthorized, async (req, res) => {
+  try {
+    const parent = await findUserFromReq(req.user);
+    if (!parent) return res.status(404).json({ error: 'Parent user not found' });
+
+    const children = await User.find({ parentId: parent._id })
+      .select('_id username role walletBalance credit status bettingAllowed maxBetSizes profitLimits createdAt')
+      .lean();
+
+    const childIds = children.map(c => c._id);
+    const counts = childIds.length > 0 ? await User.aggregate([
+      { $match: { parentId: { $in: childIds } } },
+      { $group: { _id: "$parentId", count: { $sum: 1 } } }
+    ]) : [];
+    const countMap = {};
+    counts.forEach(c => countMap[c._id.toString()] = c.count);
+
+    const profitLimitRecords = await UserProfitLimit.find({ parentId: parent._id }).lean();
+    const profitLimitMap = {};
+    profitLimitRecords.forEach(r => profitLimitMap[r.username] = r);
+
+    const rows = children.map(u => {
+      const plRecord = profitLimitMap[u.username];
+      const pl = u.profitLimits || plRecord || DEFAULT_PROFIT_LIMITS;
+      const clientPL = Math.round(((u.walletBalance || 0) - (u.credit || 0)) * 100) / 100;
+
+      return {
+        _id: u._id,
+        username: u.username,
+        role: u.role,
+        walletBalance: u.walletBalance || 0,
+        credit: u.credit || 0,
+        clientPL,
+        downlineCount: countMap[u._id.toString()] || 0,
+        status: u.status,
+        bettingAllowed: u.bettingAllowed !== false,
+        profitLimits: {
+          isEnabled: pl.isEnabled !== false,
+          maxProfit: pl.maxProfit ?? DEFAULT_PROFIT_LIMITS.maxProfit,
+          cricket: pl.cricket ?? DEFAULT_PROFIT_LIMITS.cricket,
+          casino: pl.casino ?? DEFAULT_PROFIT_LIMITS.casino,
+          aviator: pl.aviator ?? DEFAULT_PROFIT_LIMITS.aviator,
+          aviatorX: pl.aviatorX ?? DEFAULT_PROFIT_LIMITS.aviatorX,
+          teenpatti: pl.teenpatti ?? DEFAULT_PROFIT_LIMITS.teenpatti,
+          soccer: pl.soccer ?? DEFAULT_PROFIT_LIMITS.soccer,
+          tennis: pl.tennis ?? DEFAULT_PROFIT_LIMITS.tennis,
+          fancy: pl.fancy ?? DEFAULT_PROFIT_LIMITS.fancy,
+          bookmaker: pl.bookmaker ?? DEFAULT_PROFIT_LIMITS.bookmaker,
+          dailyProfitCap: pl.dailyProfitCap ?? DEFAULT_PROFIT_LIMITS.dailyProfitCap
+        },
+        maxBetSizes: u.maxBetSizes || DEFAULT_MAX_BET_SIZES
+      };
+    });
+
+    res.json({
+      success: true,
+      users: rows,
+      parentProfitLimits: parent.profitLimits || DEFAULT_PROFIT_LIMITS,
+      parentMaxBetSizes: parent.maxBetSizes || DEFAULT_MAX_BET_SIZES
+    });
+  } catch (err) {
+    console.error('Error fetching profit limits table:', err);
+    res.status(500).json({ error: 'Server error fetching profit limits table' });
+  }
+});
+
+// Update Profit Limits for a Child User (From Profit Limits Table)
+router.post('/update-profit-limits', auth, isAuthorized, async (req, res) => {
+  try {
+    const { targetUsername, profitLimits, applyToChildren } = req.body;
+    const parent = await findUserFromReq(req.user);
+    if (!parent) return res.status(404).json({ error: 'Parent not found' });
+
+    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    if (!target) return res.status(404).json({ error: 'User not found in downline' });
+
+    if (!target.profitLimits) target.profitLimits = { ...DEFAULT_PROFIT_LIMITS };
+
+    for (const [k, v] of Object.entries(profitLimits || {})) {
+      if (k === 'isEnabled') {
+        target.profitLimits.isEnabled = Boolean(v);
+      } else {
+        const numVal = parseFloat(v);
+        if (!isNaN(numVal) && numVal >= 0) {
+          const parentCap = (req.user.role === 'superadmin') ? Infinity : (parent.profitLimits?.[k] || DEFAULT_PROFIT_LIMITS[k] || Infinity);
+          target.profitLimits[k] = Math.min(numVal, parentCap);
+        }
+      }
+    }
+
+    target.markModified('profitLimits');
+    await target.save();
+
+    await syncUserProfitLimitRecord(target, parent, parent.username);
+
+    let downlineCount = 0;
+    if (applyToChildren) {
+      const resApply = await applyLimitsToDownline(target._id, {
+        profitLimits: target.profitLimits,
+        updatedBy: parent.username
+      });
+      downlineCount = resApply.count;
+    }
+
+    res.json({
+      success: true,
+      profitLimits: target.profitLimits,
+      downlineUpdated: downlineCount
+    });
+  } catch (err) {
+    console.error('Error updating profit limits:', err);
+    res.status(500).json({ error: 'Server error updating profit limits' });
   }
 });
 
@@ -803,9 +1091,21 @@ router.post('/update-user', auth, isAuthorized, async (req, res) => {
 router.post('/toggle-status', auth, isAuthorized, async (req, res) => {
   try {
     const { targetUsername, status } = req.body;
-    const parent = await User.findOne({ username: req.user.userId });
+    const parent = await findUserFromReq(req.user);
+    if (!parent) return res.status(404).json({ error: 'Parent user not found' });
     
-    const target = await User.findOne({ username: targetUsername, parentId: parent._id });
+    let target = null;
+    if (req.user.role === 'superadmin') {
+      target = await findUserByKey(targetUsername);
+    } else {
+      target = await User.findOne({ username: targetUsername, parentId: parent._id });
+      if (!target) {
+        const allowed = await getAllDescendantUsernames(parent);
+        if (allowed.includes(targetUsername)) {
+          target = await findUserByKey(targetUsername);
+        }
+      }
+    }
     if (!target) return res.status(404).json({ error: 'User not found in downline' });
 
     if (!['active', 'inactive'].includes(status)) {
@@ -3343,5 +3643,25 @@ router.post('/fancy-market/:matchId/status', auth, async (req, res) => {
   }
 });
 
+// Trader Manual Kill Switch / Clear for any Market (Section 3 MANUAL code)
+router.post('/market/:matchId/manual-hold', auth, async (req, res) => {
+  try {
+    const { matchId } = req.params;
+    const { name, isHeld } = req.body;
+    if (!name || typeof isHeld !== 'boolean') {
+      return res.status(400).json({ error: 'name and boolean isHeld required' });
+    }
+
+    const suspensionEngine = require('../services/suspension/suspensionEngine.js');
+    const updatedSections = await suspensionEngine.setManualHold(matchId, name, isHeld);
+
+    res.json({ success: true, updatedSections });
+  } catch (err) {
+    console.error('[Admin] Manual hold toggle error:', err);
+    res.status(500).json({ error: 'Failed to toggle manual hold' });
+  }
+});
+
 module.exports = router;
+
 

@@ -2,6 +2,7 @@ const CasinoRound = require('../models/CasinoRound');
 const CasinoBet = require('../models/CasinoBet');
 const User = require('../models/User');
 const { distributeCasinoPL } = require('./hierarchyService');
+const { capProfitByLimit } = require('./limitService');
 
 let io = null;
 let currentRound = null;
@@ -250,7 +251,8 @@ async function declareResult() {
         if (bet.choice === winResult) {
           bet.status = 'WIN';
           const profit = bet.amount * ((bet.odds || 2.0) - 1);
-          const netProfit = profit * 0.98;
+          const rawNetProfit = profit * 0.98;
+          const { netProfit } = await capProfitByLimit(bet.userId, 'casino', rawNetProfit);
           const netPayout = bet.amount + netProfit;
 
           // Atomic wallet balance update
