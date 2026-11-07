@@ -21,15 +21,76 @@ const { initTeenPattiManager } = require('./services/teenPattiManager');
 
 const app = express();
 const server = http.createServer(app);
+
+// Allowed production frontend origins
+const ALLOWED_ORIGINS = [
+  'https://www.betproexchange.site',
+  'https://betproexchange.site'
+];
+
+const isOriginAllowed = (origin) => {
+  // Allow requests with no origin (e.g. mobile apps, curl, server-to-server requests)
+  if (!origin) return true;
+  
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  
+  // Also check optional FRONTEND_URL environment variable if configured
+  if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL.replace(/\/+$/, '')) {
+    return true;
+  }
+
+  // In non-production environments, also allow localhost / 127.0.0.1 for local testing
+  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+    if (/^https?:\/\/localhost(:\d+)?$/.test(origin) || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
+      return true;
+    }
+  }
+
+  return false;
+};
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (isOriginAllowed(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, false);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-Requested-With',
+    'Accept',
+    'Origin'
+  ],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400,
+  optionsSuccessStatus: 204
+};
+
 const io = new Server(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: (origin, callback) => {
+      if (isOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(null, false);
+      }
+    },
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
 const PORT = process.env.PORT || 5000;
 app.set('io', io);
+
+// 1. CORS Configuration (MUST be registered before routes, body parser, and middleware)
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -41,12 +102,6 @@ const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
 
 app.use(compression());
-app.use(cors({
-  origin: true, // Reflects the origin of the request (safe for dev)
-  credentials: true,
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}));
 app.use(express.json({ limit: '1mb' }));
 app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
@@ -95,70 +150,98 @@ app.get(['/v4/scores', '/api/scores'], async (req, res) => {
 // MongoDB Connection Options
 mongoose.set('bufferCommands', true);
 
-mongoose.connect(process.env.MONGO_URI, {
-  autoIndex: false,
-  maxPoolSize: 20,
-  minPoolSize: 5,
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
-  heartbeatFrequencyMS: 10000,
-})
-  .then(async () => {
-    console.log('✅ MongoDB connected successfully');
+let dbConnectionPromise = null;
+const connectDB = () => {
+  if (mongoose.connection.readyState >= 1) return Promise.resolve();
+  if (dbConnectionPromise) return dbConnectionPromise;
+  if (!process.env.MONGO_URI) {
+    console.warn('⚠️ MONGO_URI not defined');
+    return Promise.resolve();
+  }
 
-    // Initialize Casino Round Manager with Socket.io
-    initRoundManager(io);
+  dbConnectionPromise = mongoose.connect(process.env.MONGO_URI, {
+    autoIndex: false,
+    maxPoolSize: 20,
+    minPoolSize: process.env.VERCEL ? 1 : 5,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    heartbeatFrequencyMS: 10000,
+  })
+    .then(async () => {
+      console.log('✅ MongoDB connected successfully');
 
-    // Initialize Aviator Manager with Socket.io
-    initAviatorManager(io);
+      // Initialize Casino Round Manager with Socket.io
+      initRoundManager(io);
 
-    // Initialize AviatorX Manager with Socket.io
-    initAviatorxManager(io);
+      // Initialize Aviator Manager with Socket.io
+      initAviatorManager(io);
 
-    // Initialize Teen Patti Manager with Socket.io
-    initTeenPattiManager(io);
+      // Initialize AviatorX Manager with Socket.io
+      initAviatorxManager(io);
 
-    // Initial fetch
-    const { fetchUpcomingMatches } = require('./services/matchService');
-    fetchUpcomingMatches(io);
+      // Initialize Teen Patti Manager with Socket.io
+      initTeenPattiManager(io);
 
-    // Start Cron Jobs (after DB connection)
-    const { initMatchFetchJob } = require('./jobs/matchFetch.job');
-    initMatchFetchJob(io);
-    const { initStatusJob } = require('./jobs/statusUpdate.job');
-    initStatusJob(io);
-    const { initLiveScoreJob } = require('./jobs/liveScoreJob');
-    initLiveScoreJob(io);
-    const { initScoreJob } = require('./jobs/scoreUpdate.job');
-    initScoreJob(io);
-    const { initSettlementJob } = require('./jobs/settlementJob');
-    initSettlementJob(io);
-    // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)
-    const oddsApiLiveService = require('./services/oddsApiLiveService');
-    oddsApiLiveService.init(io);
+      // Initial fetch
+      const { fetchUpcomingMatches } = require('./services/matchService');
+      fetchUpcomingMatches(io);
 
-    // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
-    const fancyMarketsService = require('./services/fancyMarketsService');
-    fancyMarketsService.init(io);
+      // Start Cron Jobs (after DB connection)
+      const { initMatchFetchJob } = require('./jobs/matchFetch.job');
+      initMatchFetchJob(io);
+      const { initStatusJob } = require('./jobs/statusUpdate.job');
+      initStatusJob(io);
+      const { initLiveScoreJob } = require('./jobs/liveScoreJob');
+      initLiveScoreJob(io);
+      const { initScoreJob } = require('./jobs/scoreUpdate.job');
+      initScoreJob(io);
+      const { initSettlementJob } = require('./jobs/settlementJob');
+      initSettlementJob(io);
 
-    // Initialize Suspension Engine (evaluated on stateSeq changes + 1-second timer)
-    const suspensionEngine = require('./services/suspension/suspensionEngine.js');
-    suspensionEngine.init(io);
+      // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)
+      const oddsApiLiveService = require('./services/oddsApiLiveService');
+      oddsApiLiveService.init(io);
 
-    // Initialize Toss Odds Engine (synthetic toss market)
-    const { initTossOddsEngine } = require('./services/tossOddsEngine');
-    initTossOddsEngine(io);
+      // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
+      const fancyMarketsService = require('./services/fancyMarketsService');
+      fancyMarketsService.init(io);
 
-    // START SERVER ONLY AFTER DB IS READY
-    server.listen(PORT, '0.0.0.0', () => {
-      console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
+      // Initialize Suspension Engine (evaluated on stateSeq changes + 1-second timer)
+      const suspensionEngine = require('./services/suspension/suspensionEngine.js');
+      suspensionEngine.init(io);
+
+      // Initialize Toss Odds Engine (synthetic toss market)
+      const { initTossOddsEngine } = require('./services/tossOddsEngine');
+      initTossOddsEngine(io);
+
+      // START SERVER ONLY AFTER DB IS READY (when running standalone)
+      if (!process.env.VERCEL && require.main === module) {
+        server.listen(PORT, '0.0.0.0', () => {
+          console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
+        });
+      }
+    })
+    .catch(err => {
+      console.error('❌ MongoDB Connection/Init Error:');
+      console.error(err.stack);
+      dbConnectionPromise = null;
     });
 
-  })
-  .catch(err => {
-    console.error('❌ MongoDB Connection/Init Error:');
-    console.error(err.stack);
-  });
+  return dbConnectionPromise;
+};
+
+// Initiate DB connection
+connectDB();
+
+// Middleware to ensure DB connection is ready on serverless function invocations
+app.use(async (req, res, next) => {
+  if (mongoose.connection.readyState === 0 && process.env.MONGO_URI) {
+    try {
+      await connectDB();
+    } catch {}
+  }
+  next();
+});
 
 app.get('/', (req, res) => {
   res.send('server working');
@@ -529,6 +612,13 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   console.error('SERVER ERROR:', err);
 
+  const reqOrigin = req.headers?.origin;
+  if (reqOrigin && isOriginAllowed(reqOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+
   // Handle specific body-parser errors
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({ error: 'Invalid JSON payload' });
@@ -542,17 +632,21 @@ app.use((err, req, res, next) => {
 
 // Capture uncaught exceptions to prevent silent crashes
 process.on('uncaughtException', (err) => {
-  console.error('💥 UNCAUGHT EXCEPTION! Shutting down...');
-  console.error(err.name, err.message);
-  console.error(err.stack);
-  process.exit(1);
+  console.error('💥 UNCAUGHT EXCEPTION:', err);
+  if (!process.env.VERCEL) {
+    process.exit(1);
+  }
 });
 
 process.on('unhandledRejection', (err) => {
-  console.error('💥 UNHANDLED REJECTION! Shutting down...');
-  console.error(err.name, err.message);
-  console.error(err.stack);
-  process.exit(1);
+  console.error('💥 UNHANDLED REJECTION:', err);
+  if (!process.env.VERCEL) {
+    process.exit(1);
+  }
 });
+
+module.exports = app;
+module.exports.app = app;
+module.exports.server = server;
 
 
