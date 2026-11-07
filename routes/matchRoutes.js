@@ -465,7 +465,7 @@ router.get('/:id/bets', async (req, res) => {
         const isAdmin = Boolean(viewerUser && ['superadmin', 'admin', 'master', 'supermaster'].includes(viewerUser.role));
 
         // 2. Query bets for this match (both active and settled to reflect true positions)
-        let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED', 'unmatched', 'won', 'lost', 'WIN', 'LOSE'] } };
+        let betQuery = { matchId: { $in: matchIdList }, status: { $in: ['pending', 'MATCHED', 'matched', 'unmatched', 'won', 'lost', 'WIN', 'LOSE', 'OPEN', 'open'] } };
         let allowedUsernames = null;
 
         if (isAdmin && viewerUser) {
@@ -532,7 +532,7 @@ router.get('/:id/bets', async (req, res) => {
                 createdAt: b.createdAt
             };
 
-            if (['pending', 'unmatched'].includes(String(b.status).toLowerCase())) {
+            if (['pending', 'unmatched', 'open'].includes(String(b.status).toLowerCase())) {
                 openBets.push(formattedBet);
             } else {
                 matchedBets.push(formattedBet);

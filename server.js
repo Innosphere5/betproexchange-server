@@ -167,6 +167,8 @@ const connectDB = () => {
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
     heartbeatFrequencyMS: 10000,
+    tls: true,
+    tlsAllowInvalidCertificates: true,
   })
     .then(async () => {
       console.log('✅ MongoDB connected successfully');
@@ -216,16 +218,20 @@ const connectDB = () => {
       initTossOddsEngine(io);
 
       // START SERVER ONLY AFTER DB IS READY (when running standalone)
-      if (!process.env.VERCEL && require.main === module) {
+      if (!process.env.VERCEL && require.main === module && !server.listening) {
         server.listen(PORT, '0.0.0.0', () => {
           console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
         });
       }
     })
     .catch(err => {
-      console.error('❌ MongoDB Connection/Init Error:');
-      console.error(err.stack);
+      console.error('❌ MongoDB Connection/Init Error:', err.message);
       dbConnectionPromise = null;
+      if (!process.env.VERCEL && require.main === module && !server.listening) {
+        server.listen(PORT, '0.0.0.0', () => {
+          console.log(`⚠️ Backend server running on port ${PORT} (Database reconnecting...)`);
+        });
+      }
     });
 
   return dbConnectionPromise;

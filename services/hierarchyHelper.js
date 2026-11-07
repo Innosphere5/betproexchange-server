@@ -84,18 +84,32 @@ async function getAllDescendantUsernames(user) {
  */
 async function getAncestorChain(user, userMap = null) {
   const chain = [];
+  const visited = new Set();
   let current = user;
 
+  if (current && (current._id || current.id)) {
+    visited.add((current._id || current.id).toString());
+  }
+
   while (current && current.parentId) {
+    const parentIdStr = current.parentId.toString();
+    if (visited.has(parentIdStr)) {
+      break;
+    }
+    visited.add(parentIdStr);
+
     let parent;
-    if (userMap && userMap[current.parentId.toString()]) {
-      parent = userMap[current.parentId.toString()];
-    } else {
+    if (userMap && userMap[parentIdStr]) {
+      parent = userMap[parentIdStr];
+    } else if (mongoose.Types.ObjectId.isValid(current.parentId)) {
       parent = await User.findById(current.parentId).lean();
+    } else {
+      parent = await User.findOne({ username: current.parentId }).lean();
     }
     if (!parent) break;
     chain.push(parent);
     current = parent;
+    if (chain.length > 25) break;
   }
 
   return chain;
