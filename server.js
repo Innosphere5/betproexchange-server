@@ -289,6 +289,7 @@ function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
   const teamBName = String(matchInDb.teamB || '').trim();
   const isTeamA = matchesTeamName(normRunner, teamAName);
   const isTeamB = matchesTeamName(normRunner, teamBName);
+  const isDraw = normRunner === 'the draw' || normRunner === 'draw' || normRunner === 'x';
 
   // 2. Bookmaker Market
   if (mType === 'bookmaker') {
@@ -322,6 +323,21 @@ function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
         if (matchInDb.layOddsB) {
           list.push(Number(matchInDb.layOddsB));
           list.push(Number((matchInDb.layOddsB >= 2 ? matchInDb.layOddsB + 0.02 : matchInDb.layOddsB + 0.02).toFixed(2)));
+        }
+        return list;
+      }
+    } else if (isDraw) {
+      if (type === 'back') {
+        const list = [];
+        if (matchInDb.bookmakerBackDraw) list.push(Number(matchInDb.bookmakerBackDraw));
+        if (matchInDb.backOddsDraw) list.push(Number(matchInDb.backOddsDraw));
+        return list;
+      } else {
+        const list = [];
+        if (matchInDb.bookmakerLayDraw) list.push(Number(matchInDb.bookmakerLayDraw));
+        if (matchInDb.layOddsDraw) {
+          list.push(Number(matchInDb.layOddsDraw));
+          list.push(Number((matchInDb.layOddsDraw > (matchInDb.backOddsDraw || 0) ? matchInDb.layOddsDraw + 0.01 : (matchInDb.backOddsDraw || 0) + 0.02).toFixed(2)));
         }
         return list;
       }
@@ -393,6 +409,9 @@ function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
     return val ? [Number(val)] : [];
   } else if (isTeamB) {
     const val = type === 'back' ? matchInDb.backOddsB : matchInDb.layOddsB;
+    return val ? [Number(val)] : [];
+  } else if (isDraw) {
+    const val = type === 'back' ? matchInDb.backOddsDraw : matchInDb.layOddsDraw;
     return val ? [Number(val)] : [];
   }
 

@@ -5,6 +5,7 @@ const {
   shouldIncludeFixture,
   selectDisplayableFixtures,
   getCricketPriority,
+  getMatchFormat,
   isInternationalFixture,
   isVirtualOrSimulated,
 } = require("./fixtureFilter");
@@ -53,10 +54,10 @@ function extractMatchOdds(oddsResponse) {
     byMarket[mId].push(q);
   }
 
-  // Find Match Odds market (market with 2 outcomes, prioritizing mainLine)
+  // Find Match Odds market (market with 2 or 3 outcomes, prioritizing mainLine)
   let winnerMarket = null;
   for (const [mId, grp] of Object.entries(byMarket)) {
-    if (grp.length === 2 && grp.some((q) => q.mainLine === true)) {
+    if ((grp.length === 2 || grp.length === 3) && grp.some((q) => q.mainLine === true)) {
       winnerMarket = grp;
       break;
     }
@@ -64,7 +65,7 @@ function extractMatchOdds(oddsResponse) {
 
   if (!winnerMarket) {
     for (const [mId, grp] of Object.entries(byMarket)) {
-      if (grp.length === 2) {
+      if (grp.length === 2 || grp.length === 3) {
         winnerMarket = grp;
         break;
       }
@@ -73,12 +74,29 @@ function extractMatchOdds(oddsResponse) {
 
   if (!winnerMarket || winnerMarket.length < 2) return null;
 
-  winnerMarket.sort(
-    (a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0),
-  );
+  let homeQ = null;
+  let awayQ = null;
+  let drawQ = null;
 
-  const homeQ = winnerMarket[0];
-  const awayQ = winnerMarket[1];
+  if (winnerMarket.length === 3) {
+    drawQ = winnerMarket.find(q => {
+      const name = String(q.outcomeName || q.name || q.label || '').trim().toLowerCase();
+      return q.outcomeId === 274 || name === 'x' || name === 'the draw' || name === 'draw' || name === 'tie';
+    });
+
+    const nonDraw = winnerMarket.filter(q => q !== drawQ);
+    nonDraw.sort((a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0));
+    homeQ = nonDraw[0];
+    awayQ = nonDraw[1];
+  } else {
+    winnerMarket.sort(
+      (a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0),
+    );
+    homeQ = winnerMarket[0];
+    awayQ = winnerMarket[1];
+  }
+
+  if (!homeQ || !awayQ) return null;
 
   let backOddsA = null,
     layOddsA = null,
@@ -88,6 +106,10 @@ function extractMatchOdds(oddsResponse) {
     layOddsB = null,
     depthBackB = "0",
     depthLayB = "0";
+  let backOddsDraw = null,
+    layOddsDraw = null,
+    depthBackDraw = "0",
+    depthLayDraw = "0";
 
   if (isExchange) {
     if (homeQ.meta) {
@@ -121,6 +143,24 @@ function extractMatchOdds(oddsResponse) {
       backOddsB = awayQ.price;
       layOddsB = Number((awayQ.price + 0.01).toFixed(2));
     }
+
+    if (drawQ) {
+      if (drawQ.meta) {
+        backOddsDraw = drawQ.meta.availableToBack?.[0]?.price || drawQ.price || null;
+        depthBackDraw = drawQ.meta.availableToBack?.[0]?.size
+          ? Math.round(drawQ.meta.availableToBack[0].size).toString()
+          : "0";
+        layOddsDraw =
+          drawQ.meta.availableToLay?.[0]?.price ||
+          (backOddsDraw ? Number((backOddsDraw + 0.02).toFixed(2)) : null);
+        depthLayDraw = drawQ.meta.availableToLay?.[0]?.size
+          ? Math.round(drawQ.meta.availableToLay[0].size).toString()
+          : "0";
+      } else {
+        backOddsDraw = drawQ.price;
+        layOddsDraw = Number((drawQ.price + 0.01).toFixed(2));
+      }
+    }
   } else {
     backOddsA = homeQ.price;
     layOddsA = Number((homeQ.price + 0.01).toFixed(2));
@@ -131,6 +171,24 @@ function extractMatchOdds(oddsResponse) {
     layOddsB = Number((awayQ.price + 0.01).toFixed(2));
     depthBackB = awayQ.limit ? Math.round(awayQ.limit).toString() : "500";
     depthLayB = "500";
+
+    if (drawQ) {
+      backOddsDraw = drawQ.price;
+      layOddsDraw = Number((drawQ.price + 0.01).toFixed(2));
+      depthBackDraw = drawQ.limit ? Math.round(drawQ.limit).toString() : "500";
+      depthLayDraw = "500";
+    }
+  }
+
+  const isTest = Boolean(drawQ || (oddsResponse?.tournament?.tournamentName && /\b(test|sheffield|ranji|first-class)\b/i.test(oddsResponse.tournament.tournamentName)));
+  if (isTest && (!backOddsDraw || backOddsDraw === 0) && backOddsA > 1 && backOddsB > 1) {
+    const probA = 1 / backOddsA;
+    const probB = 1 / backOddsB;
+    const probDraw = Math.max(0.01, 1.02 - (probA + probB));
+    backOddsDraw = Number((1 / probDraw).toFixed(2));
+    layOddsDraw = Number((backOddsDraw + 0.02).toFixed(2));
+    depthBackDraw = "100";
+    depthLayDraw = "100";
   }
 
   return {
@@ -143,6 +201,11 @@ function extractMatchOdds(oddsResponse) {
     layOddsB,
     depthBackB,
     depthLayB,
+    backOddsDraw,
+    layOddsDraw,
+    depthBackDraw,
+    depthLayDraw,
+    isTestMatch: isTest,
   };
 }
 
@@ -306,6 +369,11 @@ const fetchUpcomingMatches = async (io) => {
         layOddsB: odds ? odds.layOddsB : null,
         depthBackB: odds ? odds.depthBackB : "0",
         depthLayB: odds ? odds.depthLayB : "0",
+        backOddsDraw: odds ? odds.backOddsDraw : null,
+        layOddsDraw: odds ? odds.layOddsDraw : null,
+        depthBackDraw: odds ? odds.depthBackDraw : "0",
+        depthLayDraw: odds ? odds.depthLayDraw : "0",
+        isTestMatch: Boolean(odds?.isTestMatch || getMatchFormat(f) === 'TEST'),
         marketStatus: odds ? "OPEN" : "SUSPENDED",
         lastUpdated: new Date(),
       };
@@ -334,6 +402,7 @@ const fetchUpcomingMatches = async (io) => {
               startTime: m.startTime,
               status: m.status,
               sportKey: m.sportKey,
+              isTestMatch: Boolean(m.isTestMatch || existingMatch.isTestMatch),
               lastUpdated: m.lastUpdated,
             },
           },

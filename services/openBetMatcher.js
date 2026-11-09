@@ -27,6 +27,7 @@ function getActiveMarketOdds(matchInDb, runner, betType, marketType) {
   const teamBName = String(matchInDb.teamB || '').trim();
   const isTeamA = matchesTeamName(normRunner, teamAName);
   const isTeamB = matchesTeamName(normRunner, teamBName);
+  const isDraw = normRunner === 'the draw' || normRunner === 'draw' || normRunner === 'x';
 
   // 2. Bookmaker
   if (mType === 'bookmaker') {
@@ -36,6 +37,9 @@ function getActiveMarketOdds(matchInDb, runner, betType, marketType) {
     } else if (isTeamB) {
       if (type === 'back') return Number(matchInDb.bookmakerBackB || matchInDb.backOddsB || 0);
       return Number(matchInDb.bookmakerLayB || matchInDb.layOddsB || 0);
+    } else if (isDraw) {
+      if (type === 'back') return Number(matchInDb.bookmakerBackDraw || matchInDb.backOddsDraw || 0);
+      return Number(matchInDb.bookmakerLayDraw || matchInDb.layOddsDraw || 0);
     }
     return null;
   }
@@ -91,6 +95,8 @@ function getActiveMarketOdds(matchInDb, runner, betType, marketType) {
     return type === 'back' ? Number(matchInDb.backOddsA || 0) : Number(matchInDb.layOddsA || 0);
   } else if (isTeamB) {
     return type === 'back' ? Number(matchInDb.backOddsB || 0) : Number(matchInDb.layOddsB || 0);
+  } else if (isDraw) {
+    return type === 'back' ? Number(matchInDb.backOddsDraw || 0) : Number(matchInDb.layOddsDraw || 0);
   }
 
   return null;

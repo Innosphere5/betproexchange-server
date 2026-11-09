@@ -90,8 +90,16 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
                     runnerWon = normRunner.includes('no');
                 }
             } else {
-                runnerWon = (cleanRunner === cleanWinning) || 
-                            (cleanWinning && cleanRunner && (cleanRunner.includes(cleanWinning) || cleanWinning.includes(cleanRunner)));
+                const isDrawWinner = ['the draw', 'draw', 'x'].includes(cleanWinning);
+                const isDrawRunner = ['the draw', 'draw', 'x'].includes(cleanRunner);
+                if (isDrawWinner && isDrawRunner) {
+                    runnerWon = true;
+                } else if (isDrawWinner !== isDrawRunner && (isDrawWinner || isDrawRunner)) {
+                    runnerWon = false;
+                } else {
+                    runnerWon = (cleanRunner === cleanWinning) || 
+                                (cleanWinning && cleanRunner && (cleanRunner.includes(cleanWinning) || cleanWinning.includes(cleanRunner)));
+                }
             }
 
             const isWin = isBack ? runnerWon : !runnerWon;

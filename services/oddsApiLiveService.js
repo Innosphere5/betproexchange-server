@@ -83,7 +83,7 @@ class OddsApiLiveService {
         for (const mId of openBetMatchIds) {
           await checkAndMatchOpenBets(mId, this.io);
         }
-      } catch (e) {}
+      } catch (e) { }
     }, 2500);
 
     console.log("[OddsApiLive] 🚀 Initializing odds-api.io v3 integration...");
@@ -101,6 +101,8 @@ class OddsApiLiveService {
       console.error("[OddsApiLive] ❌ WebSocket creation failed:", err.message);
       this.isConnecting = false;
       this.scheduleReconnect();
+
+
       return;
     }
 
@@ -131,7 +133,7 @@ class OddsApiLiveService {
             console.error("[OddsApiLive] ❌ Message parse error:", err.message);
           }
         }
-      } catch (err) {}
+      } catch (err) { }
     });
 
     this.ws.on("close", (code) => {
@@ -271,7 +273,7 @@ class OddsApiLiveService {
                 await this.processOddsForEvent(odd);
               }
             }
-          } catch (err) {}
+          } catch (err) { }
         }
       }
 
@@ -301,11 +303,11 @@ class OddsApiLiveService {
                       await this.processOddsForEvent(odd);
                     }
                   }
-                } catch (err) {}
+                } catch (err) { }
               }
             }
           }
-        } catch (err) {}
+        } catch (err) { }
       }
       // Log any active DB matches that still couldn't be linked (not on this API)
       const linkedMatchIds = new Set(
@@ -370,11 +372,11 @@ class OddsApiLiveService {
             }
             recovered++;
           }
-        } catch (err) {}
+        } catch (err) { }
       }
       if (recovered > 0)
         console.log(`[OddsApiLive] 🔄 Recovered ${recovered} fixtures from DB`);
-    } catch (err) {}
+    } catch (err) { }
   }
 
   storeFixtureMetadata(fixture) {
@@ -432,11 +434,11 @@ class OddsApiLiveService {
         Match.findOneAndUpdate(
           { matchId },
           { oddsApiEventId: reissuedId, reissuedFixtureId: reissuedId, lastUpdated: new Date() }
-        ).catch(() => {});
+        ).catch(() => { });
         MarketOdds.findOneAndUpdate(
           { matchId },
           { oddsApiEventId: reissuedId, updatedAt: new Date() }
-        ).catch(() => {});
+        ).catch(() => { });
       }
     }
   }
@@ -683,6 +685,11 @@ class OddsApiLiveService {
       awayBackVol = "0",
       awayLay = 0,
       awayLayVol = "0";
+    let drawBack = 0,
+      drawBackVol = "0",
+      drawLay = 0,
+      drawLayVol = "0";
+    let drawOutcome = null;
     let usedBookie = "";
 
     const allowedKeys = Object.keys(normalizedOdds).filter((bkKey) => {
@@ -709,6 +716,7 @@ class OddsApiLiveService {
 
       let homeOutcome = null;
       let awayOutcome = null;
+      drawOutcome = null;
 
       if (Array.isArray(outcomes)) {
         // Standard REST array format: find h2h market
@@ -716,13 +724,19 @@ class OddsApiLiveService {
         if (h2h && h2h.outcomes && h2h.outcomes.length >= 2) {
           homeOutcome = h2h.outcomes[0];
           awayOutcome = h2h.outcomes[1];
+          if (h2h.outcomes.length >= 3) {
+            drawOutcome = h2h.outcomes.find(o => {
+              const n = String(o.name || o.label || '').trim().toLowerCase();
+              return o.outcomeId === 274 || n === 'x' || n === 'the draw' || n === 'draw' || n === 'tie';
+            }) || h2h.outcomes[2];
+          }
         }
       } else {
         const quoteList = Object.values(outcomes).filter(
           (q) => q && q.active !== false && q.price > 0,
         );
 
-        // Group by marketId to find h2h market (2 outcomes)
+        // Group by marketId to find h2h / match odds market (2 or 3 outcomes)
         const byMarket = {};
         for (const q of quoteList) {
           const mid = q.marketId ?? "default";
@@ -730,12 +744,12 @@ class OddsApiLiveService {
           byMarket[mid].push(q);
         }
 
-        // Prioritize market with mainLine === true or marketId 271 (standard h2h), or any 2-outcome market
+        // Prioritize market with mainLine === true or marketId 271 / 273 (standard h2h / 1x2), or 2 or 3 outcome market
         let winnerMarket = null;
         for (const [mId, grp] of Object.entries(byMarket)) {
           if (
-            grp.length === 2 &&
-            (grp.some((q) => q.mainLine === true) || mId === "271")
+            (grp.length === 2 || grp.length === 3) &&
+            (grp.some((q) => q.mainLine === true) || mId === "271" || mId === "273")
           ) {
             winnerMarket = grp;
             break;
@@ -743,7 +757,7 @@ class OddsApiLiveService {
         }
         if (!winnerMarket) {
           for (const [mId, grp] of Object.entries(byMarket)) {
-            if (grp.length === 2) {
+            if (grp.length === 2 || grp.length === 3) {
               winnerMarket = grp;
               break;
             }
@@ -751,9 +765,20 @@ class OddsApiLiveService {
         }
 
         if (winnerMarket) {
-          winnerMarket.sort((a, b) => (a.outcomeId || 0) - (b.outcomeId || 0));
-          homeOutcome = winnerMarket[0];
-          awayOutcome = winnerMarket[1];
+          if (winnerMarket.length === 3) {
+            drawOutcome = winnerMarket.find(q => {
+              const name = String(q.outcomeName || q.name || q.label || '').trim().toLowerCase();
+              return q.outcomeId === 274 || name === 'x' || name === 'the draw' || name === 'draw' || name === 'tie';
+            });
+            const nonDraw = winnerMarket.filter(q => q !== drawOutcome);
+            nonDraw.sort((a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0));
+            homeOutcome = nonDraw[0];
+            awayOutcome = nonDraw[1];
+          } else {
+            winnerMarket.sort((a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0));
+            homeOutcome = winnerMarket[0];
+            awayOutcome = winnerMarket[1];
+          }
         }
       }
 
@@ -819,10 +844,39 @@ class OddsApiLiveService {
           awayLayVol = "500";
         }
 
+        // Extract back/lay/size for draw (Test matches)
+        if (drawOutcome) {
+          if (isExchange && drawOutcome.meta) {
+            drawBack =
+              drawOutcome.meta.availableToBack?.[0]?.price ||
+              drawOutcome.price ||
+              0;
+            drawBackVol =
+              drawOutcome.meta.availableToBack?.[0]?.size !== undefined
+                ? Math.round(drawOutcome.meta.availableToBack[0].size).toString()
+                : "100";
+            drawLay =
+              drawOutcome.meta.availableToLay?.[0]?.price ||
+              Number((drawBack + 0.02).toFixed(2));
+            drawLayVol =
+              drawOutcome.meta.availableToLay?.[0]?.size !== undefined
+                ? Math.round(drawOutcome.meta.availableToLay[0].size).toString()
+                : "100";
+          } else {
+            drawBack = drawOutcome.price;
+            drawBackVol =
+              drawOutcome.limit !== undefined
+                ? Math.round(drawOutcome.limit).toString()
+                : "500";
+            drawLay = Number((drawBack + 0.01).toFixed(2));
+            drawLayVol = "500";
+          }
+        }
+
         bestHomePrice = homeOutcome.price;
         bestAwayPrice = awayOutcome.price;
 
-        // If we found a valid 2-way match odds market, we break out and use it
+        // If we found a valid match odds market, we break out and use it
         break;
       }
     }
@@ -830,24 +884,24 @@ class OddsApiLiveService {
     // If no exchange/bookmaker odds found, generate synthetic implied odds for LIVE matches
     if (bestHomePrice === 0 || bestAwayPrice === 0) {
       if (!metadata.isLive) return; // Only for live matches
-      
+
       // Try to derive implied odds from live scores
       try {
         const dbMatch = await Match.findOne({ matchId });
         if (!dbMatch || !dbMatch.score) return;
-        
+
         const p1Runs = parseInt(String(dbMatch.score.teamA_runs).split('/')[0], 10) || 0;
         const p2Runs = parseInt(String(dbMatch.score.teamB_runs).split('/')[0], 10) || 0;
         const target = dbMatch.score.target || 0;
         const innings = dbMatch.score.innings || 1;
         const battingTeam = dbMatch.score.battingTeam || 'teamA';
-        
+
         // Only generate if there are actual scores to work with
         if (p1Runs === 0 && p2Runs === 0) return;
-        
+
         let homeImpliedOdds = 1.50;
         let awayImpliedOdds = 3.00;
-        
+
         if (innings === 2 && target > 0) {
           // 2nd innings: calculate win probability from required run rate
           const chasingRuns = battingTeam === 'teamB' ? p2Runs : p1Runs;
@@ -859,7 +913,7 @@ class OddsApiLiveService {
           const estimatedBallsBowled = Math.min(Math.round((chasingRuns / avgRPO) * 6), maxBalls);
           const remainingBalls = Math.max(1, maxBalls - estimatedBallsBowled);
           const rrr = (remainingRuns / (remainingBalls / 6));
-          
+
           // Win probability for chasing team based on RRR vs average
           let chasingWinProb;
           if (remainingRuns <= 0) {
@@ -875,9 +929,9 @@ class OddsApiLiveService {
           } else {
             chasingWinProb = 0.05 + Math.random() * 0.05; // Nearly impossible
           }
-          
+
           const fieldingWinProb = 1 - chasingWinProb;
-          
+
           if (battingTeam === 'teamB') {
             // Team A batted first, Team B chasing
             homeImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
@@ -895,11 +949,11 @@ class OddsApiLiveService {
             awayImpliedOdds = p1Runs >= p2Runs ? 2.40 : 1.60;
           }
         }
-        
+
         // Clamp odds to reasonable range
         homeImpliedOdds = Math.max(1.01, Math.min(1000, homeImpliedOdds));
         awayImpliedOdds = Math.max(1.01, Math.min(1000, awayImpliedOdds));
-        
+
         bestHomePrice = homeImpliedOdds;
         bestAwayPrice = awayImpliedOdds;
         homeBack = homeImpliedOdds;
@@ -911,7 +965,7 @@ class OddsApiLiveService {
         awayBackVol = "100";
         awayLayVol = "100";
         usedBookie = "synthetic-implied";
-        
+
         console.log(`[OddsApiLive] 🧮 Generated synthetic odds for ${dbMatch.teamA} v ${dbMatch.teamB}: A(${homeBack}/${homeLay}) B(${awayBack}/${awayLay}) [Innings ${innings}, Target: ${target}]`);
       } catch (err) {
         console.warn(`[OddsApiLive] Could not generate synthetic odds for ${matchId}:`, err.message);
@@ -936,7 +990,7 @@ class OddsApiLiveService {
         }
         // Cache the swap decision so we don't hit the DB again for this match
         this.swapCache.set(matchId, needsSwap);
-      } catch (err) {}
+      } catch (err) { }
     }
 
     const teamABack = needsSwap ? awayBack : homeBack;
@@ -949,11 +1003,32 @@ class OddsApiLiveService {
     const depthBackB = needsSwap ? homeBackVol : awayBackVol;
     const depthLayB = needsSwap ? homeLayVol : awayLayVol;
 
+    const isTestMatch = Boolean(
+      drawOutcome ||
+      (drawBack > 0) ||
+      (metadata?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
+    );
+
+    // If Test match has no explicit Draw runner from Oddspapi (since Oddspapi maps market 271 as 2-way moneyline),
+    // derive the accurate exchange-implied Draw Back and Lay odds directly from Team A & Team B market rates:
+    if (isTestMatch && (!drawBack || drawBack === 0) && teamABack > 1 && teamBBack > 1) {
+      const probA = 1 / teamABack;
+      const probB = 1 / teamBBack;
+      const margin = 0.02; // standard 2% Betfair overround
+      const probDraw = Math.max(0.01, (1 + margin) - (probA + probB));
+      drawBack = Number((1 / probDraw).toFixed(2));
+      drawLay = Number((drawBack + 0.02).toFixed(2));
+      drawBackVol = "100";
+      drawLayVol = "100";
+    }
+
     // ─── Calculate Bookmaker Odds (BPExch-compatible tighter spread & fixed depth) ──
     const bmBackA = teamABack ? Number(teamABack.toFixed(2)) : null;
     const bmLayA = teamALay ? Number(Math.max(teamALay, (teamABack || 0) + 0.01).toFixed(2)) : (bmBackA ? Number((bmBackA + 0.02).toFixed(2)) : null);
     const bmBackB = teamBBack ? Number((teamBBack >= 2 ? teamBBack - 0.02 : teamBBack).toFixed(2)) : null;
     const bmLayB = teamBLay ? Number((teamBLay >= 2 ? teamBLay + 0.02 : teamBLay + 0.01).toFixed(2)) : (bmBackB ? Number((bmBackB + 0.02).toFixed(2)) : null);
+    const bmBackDraw = drawBack ? Number(drawBack.toFixed(2)) : null;
+    const bmLayDraw = drawLay ? Number(Math.max(drawLay, (drawBack || 0) + 0.01).toFixed(2)) : (bmBackDraw ? Number((bmBackDraw + 0.02).toFixed(2)) : null);
 
     const now = new Date();
     const oddsPayload = {
@@ -966,15 +1041,24 @@ class OddsApiLiveService {
       depthLayA,
       depthBackB,
       depthLayB,
+      backOddsDraw: drawBack || null,
+      layOddsDraw: drawLay || null,
+      depthBackDraw: drawBackVol || "0",
+      depthLayDraw: drawLayVol || "0",
       bookmakerBackA: bmBackA,
       bookmakerLayA: bmLayA,
       bookmakerBackB: bmBackB,
       bookmakerLayB: bmLayB,
+      bookmakerBackDraw: bmBackDraw,
+      bookmakerLayDraw: bmLayDraw,
       bookmakerDepthBackA: "100",
       bookmakerDepthLayA: "100",
       bookmakerDepthBackB: "100",
       bookmakerDepthLayB: "100",
+      bookmakerDepthBackDraw: "100",
+      bookmakerDepthLayDraw: "100",
       bookmakerMarketStatus: "OPEN",
+      isTestMatch,
       bookmaker: usedBookie,
       isLive: metadata.isLive,
       updatedAt: now,
@@ -986,7 +1070,9 @@ class OddsApiLiveService {
       cached.teamABack !== oddsPayload.teamABack ||
       cached.teamALay !== oddsPayload.teamALay ||
       cached.teamBBack !== oddsPayload.teamBBack ||
-      cached.teamBLay !== oddsPayload.teamBLay;
+      cached.teamBLay !== oddsPayload.teamBLay ||
+      cached.backOddsDraw !== oddsPayload.backOddsDraw ||
+      cached.layOddsDraw !== oddsPayload.layOddsDraw;
 
     if (!changed) return;
 
@@ -1008,46 +1094,69 @@ class OddsApiLiveService {
       // Emit matchId as BOTH number and string so the frontend
       // comparison works regardless of the type stored in cricketMatches.
       console.log(
-        `[OddsApiLive] 📡 Emitting odds update to UI for match ${matchId} (${dbTeamAName} v ${dbTeamBName}) | Bookmaker: ${usedBookie} | Odds: A(${teamABack}/${teamALay}) B(${teamBBack}/${teamBLay}) | BM: A(${bmBackA}/${bmLayA}) B(${bmBackB}/${bmLayB})`,
+        `[OddsApiLive] 📡 Emitting odds update to UI for match ${matchId} (${dbTeamAName} v ${dbTeamBName}) | Bookmaker: ${usedBookie} | Odds: A(${teamABack}/${teamALay}) B(${teamBBack}/${teamBLay})${drawBack ? ` Draw(${drawBack}/${drawLay})` : ''} | BM: A(${bmBackA}/${bmLayA}) B(${bmBackB}/${bmLayB})`,
       );
+
+      const runnersList = [
+        {
+          name: dbTeamAName,
+          back: teamABack,
+          lay: teamALay,
+          depthBack: depthBackA,
+          depthLay: depthLayA,
+        },
+        {
+          name: dbTeamBName,
+          back: teamBBack,
+          lay: teamBLay,
+          depthBack: depthBackB,
+          depthLay: depthLayB,
+        },
+      ];
+      if (isTestMatch || drawBack > 0) {
+        runnersList.push({
+          name: "The Draw",
+          back: drawBack || null,
+          lay: drawLay || null,
+          depthBack: drawBackVol || "0",
+          depthLay: drawLayVol || "0",
+        });
+      }
+
+      const bmRunnersList = [
+        {
+          name: dbTeamAName,
+          back: bmBackA,
+          lay: bmLayA,
+          depthBack: "100",
+          depthLay: "100",
+        },
+        {
+          name: dbTeamBName,
+          back: bmBackB,
+          lay: bmLayB,
+          depthBack: "100",
+          depthLay: "100",
+        },
+      ];
+      if (isTestMatch || bmBackDraw) {
+        bmRunnersList.push({
+          name: "The Draw",
+          back: bmBackDraw,
+          lay: bmLayDraw,
+          depthBack: "100",
+          depthLay: "100",
+        });
+      }
+
       this.io.emit("market_odds_update", {
         matchId: String(matchId), // string for frontend Map lookup
         matchIdNum: Number(matchId), // number for legacy listeners
         updatedAt: now,
         marketStatus: "OPEN",
-        runners: [
-          {
-            name: dbTeamAName,
-            back: teamABack,
-            lay: teamALay,
-            depthBack: depthBackA,
-            depthLay: depthLayA,
-          },
-          {
-            name: dbTeamBName,
-            back: teamBBack,
-            lay: teamBLay,
-            depthBack: depthBackB,
-            depthLay: depthLayB,
-          },
-        ],
+        runners: runnersList,
         bookmakerMarketStatus: "OPEN",
-        bookmakerRunners: [
-          {
-            name: dbTeamAName,
-            back: bmBackA,
-            lay: bmLayA,
-            depthBack: "100",
-            depthLay: "100",
-          },
-          {
-            name: dbTeamBName,
-            back: bmBackB,
-            lay: bmLayB,
-            depthBack: "100",
-            depthLay: "100",
-          },
-        ],
+        bookmakerRunners: bmRunnersList,
       });
 
       // Seamlessly trigger real-time Tied Match, Fancy 2, Figure, and Even-Odd markets update
@@ -1061,8 +1170,8 @@ class OddsApiLiveService {
       // Match any open bets whose requested odds rate matches or is satisfied by new market rate
       try {
         const { checkAndMatchOpenBets } = require('./openBetMatcher');
-        checkAndMatchOpenBets(matchId, this.io).catch(() => {});
-      } catch (err) {}
+        checkAndMatchOpenBets(matchId, this.io).catch(() => { });
+      } catch (err) { }
     }
 
     this.writeQueue.set(matchId, {
@@ -1173,18 +1282,18 @@ class OddsApiLiveService {
               teamB_runs: teamB_score,
               teamA_wickets: parsedScore.teamA_wickets,
               teamB_wickets: parsedScore.teamB_wickets,
-              overs:      parsedScore.overs,
-              wickets:    parsedScore.wickets,
-              target:     parsedScore.target,
-              runRate:    parsedScore.runRate,
+              overs: parsedScore.overs,
+              wickets: parsedScore.wickets,
+              target: parsedScore.target,
+              runRate: parsedScore.runRate,
               reqRunRate: parsedScore.reqRunRate,
-              thisOver:   parsedScore.thisOver,
-              remRuns:    parsedScore.remRuns,
-              remBalls:   parsedScore.remBalls,
+              thisOver: parsedScore.thisOver,
+              remRuns: parsedScore.remRuns,
+              remBalls: parsedScore.remBalls,
               battingTeam: parsedScore.battingTeam,
               battingTeamName: parsedScore.battingTeamName,
-              innings:    parsedScore.innings,
-              periods:    parsedScore.periods,
+              innings: parsedScore.innings,
+              periods: parsedScore.periods,
               lastUpdated: new Date()
             },
             lastUpdated: new Date()
@@ -1194,25 +1303,25 @@ class OddsApiLiveService {
 
       if (this.io) {
         const scorePayload = {
-          matchId:    matchId,
-          score:      parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
-          overs:      parsedScore.overs,
-          wickets:    parsedScore.wickets,
+          matchId: matchId,
+          score: parsedScore.battingTeam === 'teamB' ? p2Total : p1Total,
+          overs: parsedScore.overs,
+          wickets: parsedScore.wickets,
           teamA_wickets: parsedScore.teamA_wickets,
           teamB_wickets: parsedScore.teamB_wickets,
-          status:     matchInDb.status,
+          status: matchInDb.status,
           teamA_runs: teamA_score,
           teamB_runs: teamB_score,
-          target:     parsedScore.target,
-          runRate:    parsedScore.runRate,
+          target: parsedScore.target,
+          runRate: parsedScore.runRate,
           reqRunRate: parsedScore.reqRunRate,
-          thisOver:   parsedScore.thisOver,
-          remRuns:    parsedScore.remRuns,
-          remBalls:   parsedScore.remBalls,
+          thisOver: parsedScore.thisOver,
+          remRuns: parsedScore.remRuns,
+          remBalls: parsedScore.remBalls,
           battingTeam: parsedScore.battingTeam,
           battingTeamName: parsedScore.battingTeamName,
-          innings:    parsedScore.innings,
-          periods:    parsedScore.periods
+          innings: parsedScore.innings,
+          periods: parsedScore.periods
         };
 
         this.io.emit('live_score_update', scorePayload);
@@ -1255,18 +1364,18 @@ class OddsApiLiveService {
       Match.findOneAndUpdate(
         { matchId },
         { oddsApiEventId: msg.reissuedFixtureId, reissuedFixtureId: msg.reissuedFixtureId, lastUpdated: new Date() }
-      ).catch(() => {});
+      ).catch(() => { });
       MarketOdds.findOneAndUpdate(
         { matchId },
         { oddsApiEventId: msg.reissuedFixtureId, updatedAt: new Date() }
-      ).catch(() => {});
+      ).catch(() => { });
     }
 
     // Real-time Match Completion detection & automated settlement
     const isFinished = Number(msg.statusId) === 2 ||
-                       String(msg.status || '').toLowerCase() === "finished" ||
-                       String(msg.status || '').toLowerCase() === "ended" ||
-                       String(msg.statusName || '').toLowerCase() === "finished";
+      String(msg.status || '').toLowerCase() === "finished" ||
+      String(msg.status || '').toLowerCase() === "ended" ||
+      String(msg.statusName || '').toLowerCase() === "finished";
     if (isFinished) {
       console.log(`[OddsApiLive] 🏆 Live event ${eventId} (match ${matchId}) status updated to Finished. Triggering settlement pipeline...`);
       const { processMatchResults } = require("./resultSettlementService");
@@ -1284,7 +1393,7 @@ class OddsApiLiveService {
         { matchId },
         { marketStatus: status, bookmakerMarketStatus: status, lastUpdated: new Date() },
       );
-    } catch (err) {}
+    } catch (err) { }
   }
 
   async flushWriteQueue() {
@@ -1346,15 +1455,24 @@ class OddsApiLiveService {
             depthLayA: update.depthLayA,
             depthBackB: update.depthBackB,
             depthLayB: update.depthLayB,
+            backOddsDraw: update.backOddsDraw,
+            layOddsDraw: update.layOddsDraw,
+            depthBackDraw: update.depthBackDraw,
+            depthLayDraw: update.depthLayDraw,
             bookmakerBackA: update.bookmakerBackA,
             bookmakerLayA: update.bookmakerLayA,
             bookmakerBackB: update.bookmakerBackB,
             bookmakerLayB: update.bookmakerLayB,
+            bookmakerBackDraw: update.bookmakerBackDraw,
+            bookmakerLayDraw: update.bookmakerLayDraw,
             bookmakerDepthBackA: update.bookmakerDepthBackA,
             bookmakerDepthLayA: update.bookmakerDepthLayA,
             bookmakerDepthBackB: update.bookmakerDepthBackB,
             bookmakerDepthLayB: update.bookmakerDepthLayB,
+            bookmakerDepthBackDraw: update.bookmakerDepthBackDraw || "100",
+            bookmakerDepthLayDraw: update.bookmakerDepthLayDraw || "100",
             bookmakerMarketStatus: update.bookmakerMarketStatus || "OPEN",
+            isTestMatch: Boolean(update.isTestMatch),
             marketStatus: "OPEN",
             lastUpdated: update.updatedAt,
           },
@@ -1460,7 +1578,7 @@ class OddsApiLiveService {
           console.log(
             `[OddsApiLive] 🔄 Found ${unlinkedLive.length} unlinked live match(es). Re-bootstrapping...`,
           );
-          this.bootstrapUpcomingFixtures().catch(() => {});
+          this.bootstrapUpcomingFixtures().catch(() => { });
         }
       }
 
@@ -1494,7 +1612,7 @@ class OddsApiLiveService {
           );
         }
       }
-    } catch (err) {}
+    } catch (err) { }
   }
 
   async pollUpcomingFixtures() {
@@ -1653,7 +1771,7 @@ class OddsApiLiveService {
       } catch (err) {
         console.warn("[OddsApiLive] Series propagation error:", err.message);
       }
-    } catch (err) {}
+    } catch (err) { }
   }
 
   async fetchOddsSnapshot() {
@@ -1678,7 +1796,7 @@ class OddsApiLiveService {
                   await this.processOddsForEvent(odd);
                 }
               }
-            } catch (err) {}
+            } catch (err) { }
           }
         }
       }

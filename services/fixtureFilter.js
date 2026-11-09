@@ -198,11 +198,12 @@ function isTargetBPExchFixture(fixture) {
   );
 
   const combined = `${tName} ${p1} ${p2} ${sport}`;
-  const isT10 = /\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl)\b/i.test(tName) || /\b(t10|ten10)\b/i.test(combined);
+  const isT10 = /\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl|max 60|max60)\b/i.test(tName) || /\b(t10|ten10)\b/i.test(combined);
+  const isTest = /\b(test|test match|test matches|test series|the ashes|border gavaskar|wtc|world test championship|sheffield shield|county championship|ranji trophy|first class|first-class|4-day|5-day)\b/i.test(tName) || /\b(test match|test series|the ashes|border gavaskar|world test championship)\b/i.test(combined);
 
   // 1. Strict blacklist check (domestic club filter is bypassed for official T10 tournaments)
   for (const pattern of DOMESTIC_BLACKLIST_PATTERNS) {
-    if (isT10 && pattern.source.includes('cricket club')) continue;
+    if (isT10 && (pattern.source.includes('cricket club') || pattern.source.includes('masters'))) continue;
     if (pattern.test(combined)) {
       return false;
     }
@@ -213,16 +214,21 @@ function isTargetBPExchFixture(fixture) {
     return true;
   }
 
-  // 3. Tier 1 Franchise Leagues check (IPL, PSL, BBL, etc.)
+  // 3. Test Match check (ICC World Test Championship, bilateral Test tours, Ashes, Sheffield Shield, etc.)
+  if (isTest) {
+    return true;
+  }
+
+  // 4. Tier 1 Franchise Leagues check (IPL, PSL, BBL, etc.)
   for (const league of TIER1_FRANCHISE_LEAGUES) {
     if (tName.includes(league)) {
       return true;
     }
   }
 
-  // 3. International Series / Tournaments
+  // 5. International Series / Tournaments
   const isInternationalSeries =
-    /\b(odi series|t20i series|t20 series|test series|world cup|asia cup|champions trophy|icc|international|bilateral|tri series|tour of)\b/i.test(
+    /\b(odi series|t20i series|t20 series|test series|test match|world cup|asia cup|champions trophy|icc|international|bilateral|tri series|tour of|the ashes|border gavaskar|world test championship|wtc)\b/i.test(
       tName,
     );
 
@@ -248,7 +254,7 @@ function isTargetBPExchFixture(fixture) {
 
   // If tournament is an official ICC tournament involving national teams
   if (
-    /\b(icc cricket world cup|icc men s t20 world cup|champions trophy|asia cup)\b/i.test(
+    /\b(icc cricket world cup|icc men s t20 world cup|champions trophy|asia cup|world test championship)\b/i.test(
       tName,
     ) &&
     p1IsNat &&
@@ -258,6 +264,28 @@ function isTargetBPExchFixture(fixture) {
   }
 
   return false;
+}
+
+function getMatchFormat(fixture) {
+  const tName = normalizeText(
+    fixture?.tournament?.tournamentName || fixture?.league || fixture?.tournament || "",
+  );
+  const p1 = normalizeText(
+    fixture?.participants?.participant1Name || fixture?.home_team || fixture?.teamA || "",
+  );
+  const p2 = normalizeText(
+    fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "",
+  );
+  const sport = normalizeText(
+    fixture?.sport?.sportName || fixture?.sport || fixture?.sportKey || "",
+  );
+  const combined = `${tName} ${p1} ${p2} ${sport}`;
+
+  if (/\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl|max 60|max60|abu dhabi t10|zim afro)\b/i.test(combined)) return 'T10';
+  if (/\b(test|test match|test matches|test series|the ashes|ashes|border gavaskar|wtc|world test championship|sheffield shield|county championship|ranji trophy|first class|first-class|4-day|5-day)\b/i.test(combined)) return 'TEST';
+  if (/\b(t20|t20i|twenty20|twenty-20|twenty 20|indian premier league|ipl|pakistan super league|psl|big bash|bbl|caribbean premier|cpl|the hundred|hundred|sa20|ilt20|major league cricket|mlc|womens premier league|wpl|vitality blast|blast|super smash|smash)\b/i.test(combined)) return 'T20';
+  if (/\b(odi|one day|one-day|cwc|world cup|champions trophy|asia cup|league 2)\b/i.test(combined)) return 'ODI';
+  return 'OTHER';
 }
 
 function isInternationalFixture(fixture) {
@@ -274,7 +302,7 @@ function isInternationalFixture(fixture) {
   return (
     isNationalTeam(p1) ||
     isNationalTeam(p2) ||
-    /\b(odi|t20i|test series|tri series|world cup|champions trophy|asia cup|icc)\b/i.test(tName)
+    /\b(odi|t20i|test|test match|test series|the ashes|border gavaskar|world test championship|wtc|tri series|world cup|champions trophy|asia cup|icc)\b/i.test(tName)
   );
 }
 
@@ -283,11 +311,15 @@ function isPakistanOrIndia(teamStr) {
   return cleaned === "pakistan" || cleaned === "india";
 }
 
-function getFormatBonus(tName) {
-  if (/\b(odi|one day|one-day)\b/i.test(tName)) return 300;
-  if (/\b(t20|t20i|twenty20)\b/i.test(tName)) return 250;
-  if (/\b(t10|ten10|t-10)\b/i.test(tName)) return 220;
-  if (/\b(test|test match)\b/i.test(tName)) return 200;
+function getFormatBonus(fixtureOrTName) {
+  const str = typeof fixtureOrTName === 'string' 
+    ? fixtureOrTName 
+    : `${fixtureOrTName?.tournament?.tournamentName || fixtureOrTName?.league || ''} ${fixtureOrTName?.teamA || ''} ${fixtureOrTName?.teamB || ''}`;
+  
+  if (/\b(test|test match|test matches|test series|the ashes|border gavaskar|wtc|world test championship)\b/i.test(str)) return 300;
+  if (/\b(odi|one day|one-day)\b/i.test(str)) return 300;
+  if (/\b(t20|t20i|twenty20)\b/i.test(str)) return 300;
+  if (/\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl)\b/i.test(str)) return 280;
   return 100;
 }
 
@@ -461,6 +493,8 @@ module.exports = {
   hasOddsMarket,
   selectDisplayableFixtures,
   getCricketPriority,
+  getMatchFormat,
+  getFormatBonus,
   isInternationalFixture,
   isPakistanOrIndia,
   isTargetBPExchFixture,

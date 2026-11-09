@@ -564,6 +564,14 @@ router.get('/:id/bets', async (req, res) => {
             adminExposure[`${teamB}_bm`] = 0;
         }
 
+        const isTestMatch = Boolean(match?.isTestMatch || match?.backOddsDraw != null || bets.some(b => ['the draw', 'draw', 'x'].includes(String(b.runner || '').trim().toLowerCase())));
+        if (isTestMatch) {
+            userExposure['The Draw'] = 0;
+            adminExposure['The Draw'] = 0;
+            userExposure['The Draw_bm'] = 0;
+            adminExposure['The Draw_bm'] = 0;
+        }
+
         const currentUsername = currentUser?.userId;
         const myBets = currentUsername ? bets.filter(b => b.userId === currentUsername) : [];
 
@@ -614,6 +622,9 @@ router.get('/:id/bets', async (req, res) => {
             // 1. Match Odds
             if (moBets.length > 0 && teamA && teamB) {
                 const outcomes = [teamA, teamB];
+                if (isTestMatch || moBets.some(b => ['the draw', 'draw', 'x'].includes(String(b.runner || '').trim().toLowerCase()))) {
+                    outcomes.push('The Draw');
+                }
                 const calcBets = [];
                 moBets.forEach(b => {
                     const st = getEffectiveStake(b);
@@ -621,7 +632,10 @@ router.get('/:id/bets', async (req, res) => {
                     try {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
-                        const matchedSel = outcomes.find(o => o.trim().toLowerCase() === (b.runner || '').trim().toLowerCase()) || b.runner;
+                        let runnerStr = (b.runner || '').trim().toLowerCase();
+                        let matchedSel = outcomes.find(o => o.trim().toLowerCase() === runnerStr);
+                        if (!matchedSel && ['the draw', 'draw', 'x'].includes(runnerStr)) matchedSel = 'The Draw';
+                        if (!matchedSel) matchedSel = b.runner;
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: matchedSel,
@@ -643,7 +657,11 @@ router.get('/:id/bets', async (req, res) => {
             if (bmBets.length > 0 && teamA && teamB) {
                 const keyA = `${teamA}_bm`;
                 const keyB = `${teamB}_bm`;
+                const keyDraw = 'The Draw_bm';
                 const outcomes = [keyA, keyB];
+                if (isTestMatch || bmBets.some(b => ['the draw', 'draw', 'x'].includes(String(b.runner || '').replace(/\s+bm$/i, '').trim().toLowerCase()))) {
+                    outcomes.push(keyDraw);
+                }
                 const calcBets = [];
                 bmBets.forEach(b => {
                     const st = getEffectiveStake(b);
@@ -652,8 +670,10 @@ router.get('/:id/bets', async (req, res) => {
                         let side = (b.type || 'back').toUpperCase();
                         if (isAdminPerspective) side = (side === 'BACK' ? 'LAY' : 'BACK');
                         let sel = b.runner;
-                        if (sel?.trim().toLowerCase() === teamA?.trim().toLowerCase()) sel = keyA;
-                        else if (sel?.trim().toLowerCase() === teamB?.trim().toLowerCase()) sel = keyB;
+                        let normSel = sel?.trim().toLowerCase();
+                        if (normSel === teamA?.trim().toLowerCase()) sel = keyA;
+                        else if (normSel === teamB?.trim().toLowerCase()) sel = keyB;
+                        else if (['the draw', 'draw', 'x', 'the draw_bm', 'draw_bm'].includes(normSel)) sel = keyDraw;
                         calcBets.push(oddsBet({
                             side: side === 'LAY' ? SIDE.LAY : SIDE.BACK,
                             selection: sel,
@@ -664,8 +684,9 @@ router.get('/:id/bets', async (req, res) => {
                 });
                 if (calcBets.length > 0) {
                     const book = oddsBook(calcBets, outcomes);
-                    expMap[keyA] = book.pl[keyA] || 0;
-                    expMap[keyB] = book.pl[keyB] || 0;
+                    outcomes.forEach(out => {
+                        expMap[out] = book.pl[out] || 0;
+                    });
                     if (book.exposure > 0) marketExposures.push(book.exposure);
                 }
             }
