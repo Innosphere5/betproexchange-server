@@ -98,6 +98,84 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 5000;
 app.set('io', io);
 
+// MongoDB Connection Options & Handler
+mongoose.set('bufferCommands', true);
+
+let dbConnectionPromise = null;
+const connectDB = () => {
+  if (mongoose.connection.readyState === 1) return Promise.resolve();
+  if (dbConnectionPromise) return dbConnectionPromise;
+  if (!process.env.MONGO_URI) {
+    console.warn('⚠️ MONGO_URI not defined');
+    return Promise.resolve();
+  }
+
+  dbConnectionPromise = mongoose.connect(process.env.MONGO_URI, {
+    autoIndex: false,
+    maxPoolSize: 100,
+    minPoolSize: process.env.VERCEL ? 1 : 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    heartbeatFrequencyMS: 10000,
+    tls: true,
+    tlsAllowInvalidCertificates: true,
+  })
+    .then(async () => {
+      console.log('✅ MongoDB connected successfully');
+
+      // Only run polling loops and background jobs when not in a serverless environment (e.g. Vercel)
+      if (!process.env.VERCEL) {
+        // Initial fetch
+        const { fetchUpcomingMatches } = require('./services/matchService');
+        fetchUpcomingMatches(io);
+
+        // Start Cron Jobs (after DB connection)
+        const { initMatchFetchJob } = require('./jobs/matchFetch.job');
+        initMatchFetchJob(io);
+        const { initStatusJob } = require('./jobs/statusUpdate.job');
+        initStatusJob(io);
+        const { initLiveScoreJob } = require('./jobs/liveScoreJob');
+        initLiveScoreJob(io);
+        const { initScoreJob } = require('./jobs/scoreUpdate.job');
+        initScoreJob(io);
+        const { initSettlementJob } = require('./jobs/settlementJob');
+        initSettlementJob(io);
+
+        // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)
+        const oddsApiLiveService = require('./services/oddsApiLiveService');
+        oddsApiLiveService.init(io);
+
+        // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
+        const fancyMarketsService = require('./services/fancyMarketsService');
+        fancyMarketsService.init(io);
+
+        // Initialize Suspension Engine (evaluated on stateSeq changes + 1-second timer)
+        const suspensionEngine = require('./services/suspension/suspensionEngine.js');
+        suspensionEngine.init(io);
+
+        // Initialize Toss Odds Engine (synthetic toss market)
+        const { initTossOddsEngine } = require('./services/tossOddsEngine');
+        initTossOddsEngine(io);
+      }
+    })
+    .catch(err => {
+      console.error('❌ MongoDB Connection/Init Error:', err.message);
+      dbConnectionPromise = null;
+      // Re-attempt connection after 5 seconds only when not in test suite
+      if (process.env.NODE_ENV !== 'test' && !process.env.npm_lifecycle_event?.includes('test')) {
+        setTimeout(connectDB, 5000);
+      }
+    });
+
+  return dbConnectionPromise;
+};
+
+// Start DB connection immediately in background if URI is present and not testing
+const isTestingEnv = Boolean(process.env.npm_lifecycle_event?.includes('test') || process.env.NODE_ENV === 'test');
+if (!isTestingEnv && process.env.MONGO_URI && mongoose.connection.readyState === 0) {
+  connectDB().catch(err => console.error('Initial DB connection attempt:', err.message));
+}
+
 // 1. CORS Configuration (MUST be registered before routes, body parser, and middleware)
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
@@ -113,6 +191,25 @@ const auth = require('./middleware/auth');
 
 app.use(compression());
 app.use(express.json({ limit: '1mb' }));
+
+// ⚡ Database Connection Middleware: Ensures DB connection is ready before ANY route handler executes
+// Essential for serverless platforms like Vercel where execution starts without server.listen
+app.use(async (req, res, next) => {
+  // Never block OPTIONS preflight requests or non-DB public health endpoints
+  if (req.method === 'OPTIONS' || req.path === '/') {
+    return next();
+  }
+
+  const isTesting = Boolean(process.env.npm_lifecycle_event?.includes('test') || process.env.NODE_ENV === 'test');
+  if (!isTesting && mongoose.connection.readyState !== 1 && process.env.MONGO_URI) {
+    try {
+      await connectDB();
+    } catch (err) {
+      console.error('❌ DB connection error in middleware:', err.message);
+    }
+  }
+  next();
+});
 
 // ⚡ PERF: HTTP Cache-Control middleware
 // Adds sensible caching headers so browsers and Vercel edge cache don't
@@ -177,75 +274,6 @@ app.get(['/v4/scores', '/api/scores'], async (req, res) => {
   }
 });
 
-// MongoDB Connection Options
-mongoose.set('bufferCommands', true);
-
-let dbConnectionPromise = null;
-const connectDB = () => {
-  if (mongoose.connection.readyState >= 1) return Promise.resolve();
-  if (dbConnectionPromise) return dbConnectionPromise;
-  if (!process.env.MONGO_URI) {
-    console.warn('⚠️ MONGO_URI not defined');
-    return Promise.resolve();
-  }
-
-  dbConnectionPromise = mongoose.connect(process.env.MONGO_URI, {
-    autoIndex: false,
-    maxPoolSize: 100,
-    minPoolSize: process.env.VERCEL ? 1 : 10,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-    heartbeatFrequencyMS: 10000,
-    tls: true,
-    tlsAllowInvalidCertificates: true,
-  })
-    .then(async () => {
-      console.log('✅ MongoDB connected successfully');
-
-      // Initial fetch
-      const { fetchUpcomingMatches } = require('./services/matchService');
-      fetchUpcomingMatches(io);
-
-      // Start Cron Jobs (after DB connection)
-      const { initMatchFetchJob } = require('./jobs/matchFetch.job');
-      initMatchFetchJob(io);
-      const { initStatusJob } = require('./jobs/statusUpdate.job');
-      initStatusJob(io);
-      const { initLiveScoreJob } = require('./jobs/liveScoreJob');
-      initLiveScoreJob(io);
-      const { initScoreJob } = require('./jobs/scoreUpdate.job');
-      initScoreJob(io);
-      const { initSettlementJob } = require('./jobs/settlementJob');
-      initSettlementJob(io);
-
-      // Initialize odds-api.io v3 Real-Time Odds (WebSocket + REST recovery)
-      const oddsApiLiveService = require('./services/oddsApiLiveService');
-      oddsApiLiveService.init(io);
-
-      // Initialize Fancy, Figure, Even-Odd, and Tied Match markets real-time engine
-      const fancyMarketsService = require('./services/fancyMarketsService');
-      fancyMarketsService.init(io);
-
-      // Initialize Suspension Engine (evaluated on stateSeq changes + 1-second timer)
-      const suspensionEngine = require('./services/suspension/suspensionEngine.js');
-      suspensionEngine.init(io);
-
-      // Initialize Toss Odds Engine (synthetic toss market)
-      const { initTossOddsEngine } = require('./services/tossOddsEngine');
-      initTossOddsEngine(io);
-    })
-    .catch(err => {
-      console.error('❌ MongoDB Connection/Init Error:', err.message);
-      dbConnectionPromise = null;
-      // Re-attempt connection after 5 seconds only when not in test suite
-      if (process.env.NODE_ENV !== 'test' && !process.env.npm_lifecycle_event?.includes('test')) {
-        setTimeout(connectDB, 5000);
-      }
-    });
-
-  return dbConnectionPromise;
-};
-
 // When running standalone (node server.js), initialize game loops and start listening immediately
 if (require.main === module) {
   initRoundManager(io);
@@ -261,16 +289,6 @@ if (require.main === module) {
 
   connectDB();
 }
-
-// Middleware to ensure DB connection is ready on serverless function invocations
-app.use(async (req, res, next) => {
-  if (mongoose.connection.readyState === 0 && process.env.MONGO_URI) {
-    try {
-      await connectDB();
-    } catch {}
-  }
-  next();
-});
 
 app.get('/', (req, res) => {
   res.send('server working');

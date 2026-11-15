@@ -5,12 +5,17 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
 
+const JWT_SECRET = process.env.JWT_SECRET || 'a7df1cecb1c78b4b7bab8261102f22ab98715c8877cccacc392786588d189e15';
+
 // Register User
 router.post('/register', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
 
-    const normalizedUsername = username.toLowerCase();
+    const normalizedUsername = String(username).toLowerCase().trim();
     let user = await User.findOne({ username: normalizedUsername });
     if (user) return res.status(400).json({ error: 'User already exists' });
 
@@ -25,11 +30,11 @@ router.post('/register', async (req, res) => {
     await user.save();
 
     const payload = { userId: user.username, role: user.role };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
     res.json({ token, user: { username: user.username, balance: user.walletBalance, role: user.role } });
   } catch (err) {
-    console.error(err);
+    console.error('Registration error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -37,10 +42,14 @@ router.post('/register', async (req, res) => {
 // Login User
 router.post('/login', async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required' });
+    }
 
-    // Case-insensitive lookup for SuperAdmin accounts like MD97FS, MD202FS
-    const user = await User.findOne({ username: { $regex: new RegExp(`^${username.trim()}$`, 'i') } });
+    // Case-insensitive lookup with regex-escaping for SuperAdmin accounts like MD97FS, MD202FS, Adnan
+    const safeUsername = String(username).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const user = await User.findOne({ username: { $regex: new RegExp(`^${safeUsername}$`, 'i') } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
 
     if (user.status === 'inactive') {
@@ -51,11 +60,11 @@ router.post('/login', async (req, res) => {
     if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
 
     const payload = { userId: user.username, role: user.role };
-    const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
     res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings, role: user.role, share: user.share || 0 } });
   } catch (err) {
-    console.error(err);
+    console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -73,7 +82,10 @@ router.get('/me', auth, async (req, res) => {
 // Change Password
 router.post('/change-password', auth, async (req, res) => {
   try {
-    const { oldPassword, newPassword } = req.body;
+    const { oldPassword, newPassword } = req.body || {};
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({ error: 'Old and new passwords are required' });
+    }
     const user = await User.findOne({ username: req.user.userId });
 
     const isMatch = await bcrypt.compare(oldPassword, user.password);
@@ -92,13 +104,13 @@ router.post('/change-password', auth, async (req, res) => {
 // Save Settings
 router.post('/settings', auth, async (req, res) => {
   try {
-    const { settings } = req.body;
+    const { settings } = req.body || {};
     const user = await User.findOneAndUpdate(
       { username: req.user.userId },
       { $set: { settings: settings } },
       { new: true }
     );
-    res.json({ success: true, settings: user.settings });
+    res.json({ success: true, settings: user?.settings });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
   }

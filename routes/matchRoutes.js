@@ -451,7 +451,7 @@ router.get('/:id/bets', async (req, res) => {
         if (authHeader) {
             try {
                 const token = authHeader.replace('Bearer ', '').trim();
-                currentUser = jwt.verify(token, process.env.JWT_SECRET);
+                currentUser = jwt.verify(token, process.env.JWT_SECRET || 'a7df1cecb1c78b4b7bab8261102f22ab98715c8877cccacc392786588d189e15');
             } catch (e) {
                 // Token invalid or expired, continue as guest
             }
