@@ -112,3 +112,4 @@ describe('🔐 Auth Login Hardening & Error Handling Suite', () => {
     assert.equal(data.error, 'Username and password are required');
   });
 });
+

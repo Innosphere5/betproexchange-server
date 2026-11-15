@@ -180,6 +180,23 @@ if (!isTestingEnv && process.env.MONGO_URI && mongoose.connection.readyState ===
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
+// ⚡ Direct Socket.IO Engine Middleware: Handles /socket.io polling requests directly in Express
+// Essential for serverless platforms like Vercel where requests flow into the Express app directly
+app.use((req, res, next) => {
+  if (req.path.startsWith('/socket.io')) {
+    if (!req.connection) req.connection = req.socket || {};
+    if (!req.socket) req.socket = req.connection;
+    return io.engine.handleRequest(req, res);
+  }
+  next();
+});
+
+// Initialize game loops and managers immediately with io so event listeners are always active
+initRoundManager(io);
+initAviatorManager(io);
+initAviatorxManager(io);
+initTeenPattiManager(io);
+
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -274,13 +291,8 @@ app.get(['/v4/scores', '/api/scores'], async (req, res) => {
   }
 });
 
-// When running standalone (node server.js), initialize game loops and start listening immediately
+// When running standalone (node server.js), start listening immediately
 if (require.main === module) {
-  initRoundManager(io);
-  initAviatorManager(io);
-  initAviatorxManager(io);
-  initTeenPattiManager(io);
-
   if (!process.env.VERCEL && !server.listening) {
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);

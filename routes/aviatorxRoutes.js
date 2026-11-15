@@ -70,6 +70,17 @@ router.get('/active-bets', auth, async (req, res) => {
   }
 });
 
+// Get current live state of AviatorX (instant sync fallback)
+router.get('/state', (req, res) => {
+  try {
+    const state = aviatorxManager.getCurrentState();
+    res.json(state);
+  } catch (err) {
+    console.error('[API AVIATORX] Get state failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Fetch historical rounds for the verifier/recent strip
 router.get('/history', async (req, res) => {
   try {

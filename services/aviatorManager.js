@@ -686,6 +686,30 @@ async function cashout(userId, betSlot) {
   };
 }
 
+function getCurrentState() {
+  const now = Date.now();
+  let elapsedMs = 0;
+  let multiplier = 1.00;
+  
+  if (phase === 'FLYING' && takeoffTime) {
+    elapsedMs = now - takeoffTime;
+    multiplier = getMultiplierAt(elapsedMs);
+  }
+  
+  return {
+    roundId: currentRound ? currentRound.roundId : '',
+    phase,
+    elapsedMs,
+    multiplier,
+    timer: roundTimer,
+    serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
+    serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
+    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
+    history,
+    serverTimestamp: now
+  };
+}
+
 function getCurrentRound() {
   return currentRound;
 }
@@ -695,6 +719,7 @@ module.exports = {
   placeBet,
   cashout,
   getCurrentRound,
+  getCurrentState,
   getMultiplierAt,
   getMsForMultiplier,
   generateProvablyFairRound

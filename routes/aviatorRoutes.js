@@ -61,6 +61,17 @@ router.get('/active-bets', auth, async (req, res) => {
   }
 });
 
+// Get current live state of Aviator (instant sync fallback)
+router.get('/state', (req, res) => {
+  try {
+    const state = aviatorManager.getCurrentState();
+    res.json(state);
+  } catch (err) {
+    console.error('[API AVIATOR] Get state failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Fetch historical rounds for the strip/fair verifier
 router.get('/history', async (req, res) => {
   try {
