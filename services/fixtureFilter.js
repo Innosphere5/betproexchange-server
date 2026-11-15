@@ -52,15 +52,28 @@ const TIER1_FRANCHISE_LEAGUES = [
   "psl",
   "big bash league",
   "bbl",
+  // Women's Big Bash League (WBBL) — same coverage as men's BBL
+  "women's big bash league",
+  "womens big bash league",
+  "wbbl",
   "caribbean premier league",
   "cpl",
+  // Women's Caribbean Premier League
+  "women's caribbean premier league",
+  "wcpl",
   "the hundred",
+  // Women's The Hundred
+  "women's hundred",
   "sa20",
   "ilt20",
   "major league cricket",
   "mlc",
   "womens premier league",
   "wpl",
+  // Women's PSL
+  "women's psl",
+  "wpsl",
+  // Women's IPL / Women's Premier League already above
   "t20 south africa cup",
   "south africa cup",
   "csa",
@@ -283,7 +296,7 @@ function getMatchFormat(fixture) {
 
   if (/\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl|max 60|max60|abu dhabi t10|zim afro)\b/i.test(combined)) return 'T10';
   if (/\b(test|test match|test matches|test series|the ashes|ashes|border gavaskar|wtc|world test championship|sheffield shield|county championship|ranji trophy|first class|first-class|4-day|5-day)\b/i.test(combined)) return 'TEST';
-  if (/\b(t20|t20i|twenty20|twenty-20|twenty 20|indian premier league|ipl|pakistan super league|psl|big bash|bbl|caribbean premier|cpl|the hundred|hundred|sa20|ilt20|major league cricket|mlc|womens premier league|wpl|vitality blast|blast|super smash|smash)\b/i.test(combined)) return 'T20';
+  if (/\b(t20|t20i|twenty20|twenty-20|twenty 20|indian premier league|ipl|pakistan super league|psl|big bash|bbl|wbbl|womens big bash|caribbean premier|cpl|wcpl|the hundred|hundred|sa20|ilt20|major league cricket|mlc|womens premier league|wpl|wpsl|vitality blast|blast|super smash|smash)\b/i.test(combined)) return 'T20';
   if (/\b(odi|one day|one-day|cwc|world cup|champions trophy|asia cup|league 2)\b/i.test(combined)) return 'ODI';
   return 'OTHER';
 }

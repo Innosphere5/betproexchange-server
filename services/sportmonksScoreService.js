@@ -1,14 +1,17 @@
 const Match = require('../models/Match');
 const sportmonksClient = require('./sportmonksClient');
+const poolClient = require('./sportmonksPoolClient');
+const redisCache = require('./upstashRedisCache');
 
 /**
- * Normalizes team names for fuzzy matching between odds providers and Sportmonks
+ * Normalizes team names for fuzzy matching between odds providers and Sportmonks.
+ * Strips gender suffixes (W, Women) so "Perth Scorchers W" matches "Perth Scorchers".
  */
 const normalizeTeamName = (name) => {
   if (!name) return '';
   let n = name.toLowerCase().trim();
   n = n.replace(/\bwomen\b/g, '');
-  n = n.replace(/\bw\b/g, '');
+  n = n.replace(/\bw\b/g, '');  // strips trailing "W" gender suffix
   n = n.replace(/\bteam\b/g, '');
   n = n.replace(/\bcricket\b/g, '');
   n = n.replace(/\bnational\b/g, '');
@@ -23,7 +26,17 @@ const normalizeTeamName = (name) => {
     chennai: 'csk', delhicapitals: 'dc', delhi: 'dc',
     rajasthanroyals: 'rr', rajasthan: 'rr', gujarattitans: 'gt',
     gujarat: 'gt', kolkataknightriders: 'kkr', kolkata: 'kkr',
-    punjabkings: 'pbks', kingsxi: 'pbks', punjab: 'pbks'
+    punjabkings: 'pbks', kingsxi: 'pbks', punjab: 'pbks',
+    // WBBL team aliases — Perth Scorchers W → perthscorchers
+    perthscorchers: 'perthscorchers',
+    sydneythunder: 'sydneythunder',
+    sydneysixers: 'sydneysixers',
+    melbournereneg: 'melbournerenegades',
+    melbournerenegades: 'melbournerenegades',
+    melbournestars: 'melbournestars',
+    brisbanefire: 'brisbanefire',
+    hobarthurricanes: 'hobarthurricanes',
+    adelaidestrikers: 'adelaidestrikers'
   };
 
   for (const [key, value] of Object.entries(aliases)) {
@@ -366,7 +379,7 @@ function parseSportmonksFixture(fixture, matchInDb = null) {
 
 class SportmonksScoreService {
   constructor() {
-    this.memoryCache = new Map(); // matchId -> parsedScore
+    this.memoryCache = new Map(); // matchId -> parsedScore (in-process, sub-ms)
     this.isSyncing = false;
     this.syncStartedAt = 0;       // Timestamp when sync started — for deadlock detection
     this.timer = null;
@@ -374,10 +387,51 @@ class SportmonksScoreService {
     this.pollIntervalLive = 1500;    // 1.5 seconds during active live in-play matches (ultra-fast sub-2s)
     this.pollIntervalIdle = 6000;    // 6 seconds when idle / waiting
     this.SYNC_TIMEOUT_MS = 15000;    // Safety: auto-release mutex after 15s to prevent deadlock
+
+    // DB write debounce — batch MongoDB writes to reduce Atlas latency on the hot path.
+    // Scores are served instantly from Redis/memory; DB is updated every 5s max per match.
+    this.dbWritePending = new Map();  // matchId -> { payload, timer }
+    this.DB_WRITE_DEBOUNCE_MS = 5000; // Debounce DB writes to every 5s max per match
   }
 
   /**
-   * Find matching database fixture for a Sportmonks fixture
+   * Schedule a debounced MongoDB write.
+   * Collapses rapid consecutive writes into one write per 5s per match.
+   */
+  _scheduledDbWrite(matchId, payload) {
+    const existing = this.dbWritePending.get(matchId);
+    if (existing) {
+      // Update the payload but don't reset the timer — let the existing timer fire
+      existing.payload = { ...existing.payload, ...payload };
+      return;
+    }
+    const timer = setTimeout(async () => {
+      this.dbWritePending.delete(matchId);
+      try {
+        await Match.updateOne({ matchId }, { $set: payload });
+      } catch (err) {
+        console.error(`[Sportmonks] DB write error for ${matchId}:`, err.message);
+      }
+    }, this.DB_WRITE_DEBOUNCE_MS);
+    this.dbWritePending.set(matchId, { payload, timer });
+  }
+
+  /**
+   * Force-flush a pending DB write immediately (used on match completion).
+   */
+  async _flushDbWrite(matchId, payload) {
+    const existing = this.dbWritePending.get(matchId);
+    if (existing) {
+      clearTimeout(existing.timer);
+      this.dbWritePending.delete(matchId);
+    }
+    await Match.updateOne({ matchId }, { $set: payload });
+  }
+
+  /**
+   * Find matching database fixture for a Sportmonks fixture.
+   * Uses multi-stage matching: ID → sportmonksFixtureId → team name fuzzy match.
+   * Enhanced: also checks recently-completed matches so WBBL results settle correctly.
    */
   async findMatchInDb(fixture) {
     const fixtureIdNum = fixture.id;
@@ -395,25 +449,37 @@ class SportmonksScoreService {
     });
     if (match) return match;
 
-    // 2. Team name matching against active or upcoming matches
+    // 2. Team name fuzzy matching — covers live, upcoming, AND recently completed (last 3h)
     const normHome = normalizeTeamName(fixture.localteam?.name);
     const normAway = normalizeTeamName(fixture.visitorteam?.name);
 
     if (normHome && normAway) {
-      const candidates = await Match.find({ status: { $in: ['live', 'upcoming'] } });
+      const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      const candidates = await Match.find({
+        $or: [
+          { status: { $in: ['live', 'upcoming'] } },
+          { status: 'completed', lastUpdated: { $gte: threeHoursAgo } }
+        ]
+      });
+
       for (const cand of candidates) {
         const candA = normalizeTeamName(cand.teamA);
         const candB = normalizeTeamName(cand.teamB);
 
-        const matchFound = (candA === normHome && candB === normAway) ||
-                           (candA === normAway && candB === normHome) ||
-                           (candA.includes(normHome) && candB.includes(normAway)) ||
-                           (candA.includes(normAway) && candB.includes(normHome));
+        // Exact normalized match OR substring match (handles "Perth Scorchers" ↔ "Perth Scorchers W")
+        const homeMatchesA = candA === normHome || candA.includes(normHome) || normHome.includes(candA);
+        const awayMatchesB = candB === normAway || candB.includes(normAway) || normAway.includes(candB);
+        const homeMatchesB = candB === normHome || candB.includes(normHome) || normHome.includes(candB);
+        const awayMatchesA = candA === normAway || candA.includes(normAway) || normAway.includes(candA);
+
+        const matchFound = (homeMatchesA && awayMatchesB) || (homeMatchesB && awayMatchesA);
 
         if (matchFound) {
-          cand.sportmonksFixtureId = fixtureIdNum;
-          await Match.updateOne({ matchId: cand.matchId }, { $set: { sportmonksFixtureId: fixtureIdNum } });
-          console.log(`[Sportmonks] 🔗 Linked match ${cand.teamA} v ${cand.teamB} (${cand.matchId}) -> Sportmonks ${fixtureIdNum}`);
+          if (!cand.sportmonksFixtureId) {
+            await Match.updateOne({ matchId: cand.matchId }, { $set: { sportmonksFixtureId: fixtureIdNum } });
+            cand.sportmonksFixtureId = fixtureIdNum;
+            console.log(`[Sportmonks] 🔗 Linked ${cand.teamA} v ${cand.teamB} (DB matchId: ${cand.matchId}) → Sportmonks ${fixtureIdNum}`);
+          }
           return cand;
         }
       }
@@ -424,6 +490,10 @@ class SportmonksScoreService {
 
   /**
    * Fetch and sync all live scores from Sportmonks
+   *
+   * Upgrade: Uses pool client for multi-key rotation and Upstash Redis for
+   * sub-ms score cache reads. MongoDB writes are debounced to 5s intervals
+   * on the hot path — scores broadcast via Socket.IO immediately from memory.
    */
   async syncLiveScores(io = null) {
     // Deadlock-safe mutex: auto-release if previous sync has been stuck for >15s
@@ -441,30 +511,126 @@ class SportmonksScoreService {
 
     try {
       let liveFixtures = [];
+      const liveIds = new Set(); // dedup by fixture ID
+
+      const addFixtures = (arr) => {
+        if (!Array.isArray(arr)) return;
+        for (const f of arr) {
+          if (f && f.id && !liveIds.has(f.id)) {
+            liveIds.add(f.id);
+            liveFixtures.push(f);
+          }
+        }
+      };
+
       try {
-        const res = await sportmonksClient.getLiveScores();
-        if (Array.isArray(res)) liveFixtures = res;
+        // ── Primary: Check Redis cache (500ms TTL) ──────────────────────────
+        const cached = await redisCache.get('bpx:livescores:all');
+        if (cached && Array.isArray(cached)) {
+          addFixtures(cached);
+        } else {
+          // ── Fetch both /livescores and /livescores/inplay in parallel ───────
+          // /livescores sometimes omits women's leagues on trial plans.
+          // /livescores/inplay may return a broader set.
+          const [mainRes, inplayRes] = await Promise.allSettled([
+            poolClient.getLiveScores(),
+            poolClient.getInplayFixtures()
+          ]);
+
+          if (mainRes.status === 'fulfilled') addFixtures(mainRes.value);
+          if (inplayRes.status === 'fulfilled') addFixtures(inplayRes.value);
+
+          if (liveFixtures.length > 0) {
+            await redisCache.set('bpx:livescores:all', liveFixtures, 500);
+          }
+        }
       } catch (err) {
         console.warn('[SportmonksScoreService] ⚠️ Live scores fetch failed:', err.message);
       }
 
-      // Targeted recovery: also poll any DB matches marked 'live'
+      // ── Targeted recovery + proactive WBBL link-and-fetch ──────────────────
+      // For every DB match marked 'live':
+      //   a) If it already has a sportmonksFixtureId → fetch it directly (may not be in /livescores)
+      //   b) If NO sportmonksFixtureId → try to find it in Sportmonks via today's date search,
+      //      then link it. This is how WBBL matches get linked on first encounter.
       const liveDbMatches = await Match.find({ status: 'live' });
+
+      // Today's date in YYYY-MM-DD (Sportmonks uses UTC)
+      const todayStr = new Date().toISOString().slice(0, 10);
+
+      // Cache today's fixture list (fetched once per sync cycle, 10s TTL)
+      let todayFixtures = null;
+      const getTodayFixtures = async () => {
+        if (todayFixtures !== null) return todayFixtures;
+        try {
+          const cacheKey = `bpx:sportmonks:today:${todayStr}`;
+          const cached = await redisCache.get(cacheKey);
+          if (cached) { todayFixtures = cached; return todayFixtures; }
+          const res = await poolClient.getFixturesByDate(todayStr);
+          todayFixtures = Array.isArray(res) ? res : [];
+          if (todayFixtures.length > 0) {
+            await redisCache.set(cacheKey, todayFixtures, 10000); // 10s cache
+            console.log(`[Sportmonks] 📅 Today's fixtures: ${todayFixtures.length} found`);
+          }
+        } catch (e) {
+          todayFixtures = [];
+        }
+        return todayFixtures;
+      };
+
       for (const dbM of liveDbMatches) {
         let fId = dbM.sportmonksFixtureId;
+
+        // ── Case A: No Sportmonks ID → try to discover via date-based search ──
         if (!fId) {
-          const cand = await this.findMatchInDb({ id: Number(dbM.matchId) || 0, localteam: { name: dbM.teamA }, visitorteam: { name: dbM.teamB } });
-          fId = cand?.sportmonksFixtureId;
-        }
-        if (fId) {
-          const alreadyFetched = liveFixtures.some(f => f.id === fId);
-          if (!alreadyFetched) {
-            try {
-              const single = await sportmonksClient.getFixtureById(fId);
-              if (single && single.id) liveFixtures.push(single);
-            } catch (singleErr) {
-              // silent on single fixture poll error
+          try {
+            const todayList = await getTodayFixtures();
+            const normA = normalizeTeamName(dbM.teamA);
+            const normB = normalizeTeamName(dbM.teamB);
+
+            for (const f of todayList) {
+              if (!f || !f.id) continue;
+              const fNormHome = normalizeTeamName(f.localteam?.name || '');
+              const fNormAway = normalizeTeamName(f.visitorteam?.name || '');
+              const matched = (fNormHome === normA && fNormAway === normB) ||
+                              (fNormHome === normB && fNormAway === normA) ||
+                              (normA && fNormHome.includes(normA) && normB && fNormAway.includes(normB)) ||
+                              (normA && fNormAway.includes(normA) && normB && fNormHome.includes(normB));
+              if (matched) {
+                fId = f.id;
+                // Persist the link so future polls use Case B (direct fetch)
+                await Match.updateOne(
+                  { matchId: dbM.matchId },
+                  { $set: { sportmonksFixtureId: fId } }
+                );
+                console.log(`[Sportmonks] 🔗 Auto-linked ${dbM.teamA} v ${dbM.teamB} → Sportmonks fixture ${fId}`);
+                // Add to live fixtures if detailed data present (runs, balls)
+                if (f.runs) addFixtures([f]);
+                break;
+              }
             }
+          } catch (e) {
+            // silent — discovery is best-effort
+          }
+        }
+
+        // ── Case B: Has Sportmonks ID but not in /livescores response ──────────
+        if (fId && !liveIds.has(fId)) {
+          try {
+            const fixtureKey = `bpx:fixture:${fId}`;
+            let single = await redisCache.get(fixtureKey);
+            if (!single) {
+              single = await poolClient.getFixtureById(fId);
+              if (single && single.id) {
+                await redisCache.set(fixtureKey, single, 1000);
+              }
+            }
+            if (single && single.id) {
+              addFixtures([single]);
+              console.log(`[Sportmonks] ✅ Targeted fetch: ${dbM.teamA} v ${dbM.teamB} (Sportmonks ${fId})`);
+            }
+          } catch (singleErr) {
+            // silent on single fixture poll error
           }
         }
       }
@@ -501,8 +667,8 @@ class SportmonksScoreService {
 
         const matchDbId = matchInDb ? matchInDb.matchId : String(fixture.id);
 
-        // Cache previous state to check for changes
-        const prevCached = this.memoryCache.get(matchDbId);
+        // ── Change detection: check in-memory first, then Redis fallback ──
+        const prevCached = this.memoryCache.get(matchDbId) || await redisCache.getScore(matchDbId);
         const hasScoreChanged = !prevCached ||
           prevCached.teamA_runs !== parsed.teamA_runs ||
           prevCached.teamB_runs !== parsed.teamB_runs ||
@@ -580,9 +746,25 @@ class SportmonksScoreService {
             updatePayload.tossLayB = null;
           }
 
-          await Match.updateOne({ matchId: matchDbId }, { $set: updatePayload });
+          // ── Cache Update (instant, before DB write) ──
+          // 1. In-memory cache (sub-ms) — primary for change detection next cycle
           this.memoryCache.set(matchDbId, parsed);
           this.memoryCache.set(String(fixture.id), parsed);
+          // 2. Upstash Redis (5ms) — survives restarts, shared across instances
+          const redisTTL = isCompleted ? 30000 : 2000; // 2s for live, 30s for completed
+          await redisCache.setScore(matchDbId, parsed, redisTTL);
+          if (String(fixture.id) !== matchDbId) {
+            await redisCache.setScore(String(fixture.id), parsed, redisTTL);
+          }
+
+          // ── DB Write (debounced 5s, non-blocking on hot path) ──
+          if (isCompleted) {
+            // Completed: flush immediately (no debounce — settlement depends on DB state)
+            await this._flushDbWrite(matchDbId, updatePayload);
+          } else {
+            // Live: debounce writes to max once per 5s — reduces Atlas write pressure
+            this._scheduledDbWrite(matchDbId, updatePayload);
+          }
 
           if (isCompleted) {
             const { settleMatch } = require('./settlementService');

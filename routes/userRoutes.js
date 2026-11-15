@@ -1,11 +1,30 @@
 const express = require('express');
 const router = express.Router();
+const User = require('../models/User');
 const Bet = require('../models/Bet');
 const CasinoBet = require('../models/CasinoBet');
 const AviatorBet = require('../models/AviatorBet');
 const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
 const { resolveUserEffectiveLimits } = require('../services/limitService');
+
+// Get Current User's Wallet Balance & Credit
+router.get('/wallet', auth, async (req, res) => {
+  try {
+    const user = await User.findOne({ username: req.user.userId }).select('walletBalance credit username role').lean();
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    res.json({
+      success: true,
+      balance: user.walletBalance || 0,
+      credit: user.credit || 0
+    });
+  } catch (err) {
+    console.error('Error fetching user wallet:', err);
+    res.status(500).json({ error: 'Server error fetching wallet' });
+  }
+});
 
 // Get Current User's Effective Limits (Max Bet Sizes & Profit Limits)
 router.get('/limits', auth, async (req, res) => {
@@ -26,11 +45,13 @@ router.get('/limits', auth, async (req, res) => {
 // Get User Statement (All transactions/bets)
 router.get('/statement', auth, async (req, res) => {
   try {
-    const cricketBets = await Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    const casinoBets = await CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    const aviatorBets = await AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-
-    const transactions = await Transaction.find({ userId: req.user.userId }).sort({ createdAt: -1 });
+    // ⚡ PERF: parallel queries + .lean() (plain objects, 2-3x faster) + .limit(500) (cap payload)
+    const [cricketBets, casinoBets, aviatorBets, transactions] = await Promise.all([
+      Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(500).lean(),
+      CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(500).lean(),
+      AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(500).lean(),
+      Transaction.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(500).lean()
+    ]);
     
     // Combine and format for statement
     const statement = [
@@ -116,9 +137,12 @@ router.get('/statement', auth, async (req, res) => {
 // Get User Results (Only settled bets)
 router.get('/results', auth, async (req, res) => {
   try {
-    const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
-    const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 });
-    const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } }).sort({ createdAt: -1 });
+    // ⚡ PERF: parallel queries + .lean() + .limit(300)
+    const [cricketBets, casinoBets, aviatorBets] = await Promise.all([
+      Bet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 }).limit(300).lean(),
+      CasinoBet.find({ userId: req.user.userId, status: { $in: ['won', 'lost', 'WIN', 'LOSE'] } }).sort({ createdAt: -1 }).limit(300).lean(),
+      AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } }).sort({ createdAt: -1 }).limit(300).lean()
+    ]);
 
     res.json({ cricket: cricketBets, casino: casinoBets, aviator: aviatorBets });
   } catch (err) {
@@ -133,9 +157,9 @@ router.get('/profit-loss', auth, async (req, res) => {
       return res.status(403).json({ error: 'Access denied. Client P/L is only available for master, admin, and superadmin accounts.' });
     }
 
-    const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
-    const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } });
-    const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } });
+    const cricketBets = await Bet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } }).lean();
+    const casinoBets = await CasinoBet.find({ userId: req.user.userId, status: { $in: ['WIN', 'LOSE'] } }).lean();
+    const aviatorBets = await AviatorBet.find({ userId: req.user.userId, status: { $in: ['WON', 'LOST'] } }).lean();
 
     let cricketPL = 0;
     cricketBets.forEach(b => {
@@ -182,13 +206,16 @@ router.get('/profit-loss', auth, async (req, res) => {
 // Get User Bets (Active & Settled)
 router.get('/bets', auth, async (req, res) => {
   try {
-    const cricketBets = await Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    const casinoBets = await CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
-    const aviatorBets = await AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 });
+    // ⚡ PERF: parallel queries + .lean() (no Mongoose hydration overhead) + .limit(200)
+    const [cricketBets, casinoBets, aviatorBets] = await Promise.all([
+      Bet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(200).lean(),
+      CasinoBet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(200).lean(),
+      AviatorBet.find({ userId: req.user.userId }).sort({ createdAt: -1 }).limit(200).lean()
+    ]);
 
     const combinedBets = [
         ...cricketBets.map(b => ({
-            ...b.toObject(),
+            ...b,
             sport: 'Cricket',
             event: b.matchName,
             selection: b.runner,
@@ -196,16 +223,16 @@ router.get('/bets', auth, async (req, res) => {
             updated: b.updatedAt || b.createdAt
         })),
         ...casinoBets.map(b => ({
-            ...b.toObject(),
+            ...b,
             sport: 'Casino',
             event: `Casino Round ${b.roundId}`,
             selection: b.choice,
             stake: b.amount,
             placed: b.createdAt,
-            updated: b.createdAt // Casino bets are usually settled instantly or per round
+            updated: b.createdAt
         })),
         ...aviatorBets.map(b => ({
-            ...b.toObject(),
+            ...b,
             sport: 'Aviator',
             event: `Aviator Round ${b.roundId}`,
             selection: `Slot ${b.betSlot} (Cashed: ${b.cashoutMultiplier ? b.cashoutMultiplier + 'x' : 'N/A'})`,
@@ -222,7 +249,6 @@ router.get('/bets', auth, async (req, res) => {
   }
 });
 
-const User = require('../models/User');
 const { getAllDescendants, getAllDescendantUsernames } = require('../services/hierarchyHelper');
 
 // Get Account Ledger Endpoint

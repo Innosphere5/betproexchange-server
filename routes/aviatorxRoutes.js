@@ -11,11 +11,12 @@ router.post('/bet', auth, async (req, res) => {
     const { betSlot, stake, autoCashoutMultiplier } = req.body;
     const userId = req.user.userId;
 
-    if (![1, 2].includes(betSlot)) {
+    const numSlot = Number(betSlot);
+    if (![1, 2].includes(numSlot)) {
       return res.status(400).json({ error: 'Invalid bet slot (must be 1 or 2)' });
     }
 
-    const result = await aviatorxManager.placeBet(userId, betSlot, stake, autoCashoutMultiplier);
+    const result = await aviatorxManager.placeBet(userId, numSlot, stake, autoCashoutMultiplier);
     res.json(result);
   } catch (err) {
     console.error('[API AVIATORX] Bet failed:', err.message);
@@ -29,11 +30,12 @@ router.post('/cashout', auth, async (req, res) => {
     const { betSlot } = req.body;
     const userId = req.user.userId;
 
-    if (![1, 2].includes(betSlot)) {
+    const numSlot = Number(betSlot);
+    if (![1, 2].includes(numSlot)) {
       return res.status(400).json({ error: 'Invalid bet slot (must be 1 or 2)' });
     }
 
-    const result = await aviatorxManager.cashout(userId, betSlot);
+    const result = await aviatorxManager.cashout(userId, numSlot);
     res.json(result);
   } catch (err) {
     console.error('[API AVIATORX] Cashout failed:', err.message);
@@ -49,6 +51,13 @@ router.get('/active-bets', auth, async (req, res) => {
       return res.json([]);
     }
 
+    // 1. Check in-memory bets first (zero-latency and always up-to-date)
+    const memBets = aviatorxManager.getActiveBets(req.user.userId);
+    if (memBets && memBets.length > 0) {
+      return res.json(memBets);
+    }
+
+    // 2. Fallback to database
     const bets = await AviatorXBet.find({
       userId: req.user.userId,
       roundId: currentRound.roundId

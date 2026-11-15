@@ -471,7 +471,8 @@ const fetchUpcomingMatches = async (io) => {
     );
 
     if (io) {
-      const allMatches = await Match.find().sort({ startTime: 1 });
+      // ⚡ PERF: .lean() returns plain JS objects — no Mongoose hydration, faster emit
+      const allMatches = await Match.find().sort({ startTime: 1 }).lean();
       io.emit("matches_updated", allMatches);
     }
   } catch (error) {

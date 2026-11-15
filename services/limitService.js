@@ -2,6 +2,32 @@ const User = require('../models/User');
 const UserProfitLimit = require('../models/UserProfitLimit');
 const hierarchyHelper = require('./hierarchyHelper');
 
+// Fast 30-second TTL cache for resolved hierarchical limits to eliminate DB stampedes
+const limitsCache = new Map();
+const LIMITS_CACHE_TTL = 30000;
+
+function getCachedLimits(key) {
+  const cached = limitsCache.get(key);
+  if (cached && (Date.now() - cached.ts) < LIMITS_CACHE_TTL) {
+    return cached.data;
+  }
+  return null;
+}
+
+function setCachedLimits(key, data) {
+  limitsCache.set(key, { ts: Date.now(), data });
+  // Clean up cache size if too large
+  if (limitsCache.size > 2000) {
+    const oldestKey = limitsCache.keys().next().value;
+    limitsCache.delete(oldestKey);
+  }
+}
+
+function invalidateLimitCache(key) {
+  if (key) limitsCache.delete(key);
+  else limitsCache.clear();
+}
+
 const DEFAULT_MAX_BET_SIZES = {
   cricket: 5000000,
   soccer: 1000000,
@@ -87,6 +113,12 @@ function getCategoryDisplayName(cat) {
  * them by all parent/ancestor limits up the hierarchy chain.
  */
 async function resolveUserEffectiveLimits(userOrKey) {
+  const cacheKey = typeof userOrKey === 'string' ? userOrKey.toLowerCase().trim() : (userOrKey?.username?.toLowerCase() || null);
+  if (cacheKey) {
+    const cached = getCachedLimits(cacheKey);
+    if (cached) return cached;
+  }
+
   let user = null;
   if (typeof userOrKey === 'string' || userOrKey instanceof String) {
     user = await hierarchyHelper.findUserByKey(userOrKey);
@@ -149,12 +181,18 @@ async function resolveUserEffectiveLimits(userOrKey) {
     }
   }
 
-  return {
+  const result = {
     user,
     bettingAllowed: chainBettingAllowed,
     effectiveMaxBetSizes: effectiveMax,
     effectiveProfitLimits: effectiveProfit
   };
+
+  if (cacheKey) {
+    setCachedLimits(cacheKey, result);
+  }
+
+  return result;
 }
 
 /**
@@ -338,6 +376,7 @@ module.exports = {
   validateBetLimit,
   capProfitByLimit,
   applyLimitsToDownline,
-  syncUserProfitLimitRecord
+  syncUserProfitLimitRecord,
+  invalidateLimitCache
 };
 

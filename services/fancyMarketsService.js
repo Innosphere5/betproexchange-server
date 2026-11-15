@@ -3,6 +3,9 @@ const Match = require('../models/Match');
 class FancyMarketsService {
   constructor() {
     this.io = null;
+    this.matchCache = new Map();
+    this.lastDbUpdateTime = new Map();
+    this.lastSuspensionTime = new Map();
   }
 
   /**
@@ -248,38 +251,79 @@ class FancyMarketsService {
     const shortA = this.getShortTeamCode(teamA);
     const shortB = this.getShortTeamCode(teamB);
 
-    // Look for real over-run quotes in Oddspapi (market types: '10-overs', '20-overs', 'teamtotals', etc.)
-    const overQuotes = {};
+    // ── Collect over-run and wicket market quotes from all bookmakers ───────
+    // Parse any "N Over Run" or "N-overs" style market, capturing the over number.
+    // Also capture wkt fall markets (Fall of 1st/2nd/3rd Wkt, 3rd Wkt Lost To X Balls).
+    const overQuotes  = {};  // keyed by over number (string): e.g. '6', '10', '15', '20'
+    const wktQuotes   = {};  // keyed by wicket number (string): e.g. '1', '2', '3'
+    const overLineRe  = /(\d+)[_\s-]?over/i;
+    const wktRe       = /(\d+)(?:st|nd|rd|th)?\s*wkt/i;
+
     if (normalizedOdds) {
-      for (const [bk, outcomes] of Object.entries(normalizedOdds)) {
+      for (const [, outcomes] of Object.entries(normalizedOdds)) {
         if (!outcomes || typeof outcomes !== 'object') continue;
         const quotes = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
         for (const q of quotes) {
           if (!q || !q.marketType) continue;
-          const mt = String(q.marketType).toLowerCase();
-          if ((mt.includes('10-over') || mt.includes('10_over')) && q.price > 0 && q.active !== false) {
-            overQuotes['10'] = q;
+          const mt   = String(q.marketType);
+          const name = String(q.name || q.marketType || '');
+          const isActive = q.price > 0 && q.active !== false && q.status !== 'SUSPENDED';
+
+          // Over-run market
+          const overMatch = overLineRe.exec(mt) || overLineRe.exec(name);
+          if (overMatch) {
+            const n = String(parseInt(overMatch[1], 10));
+            if (!overQuotes[n] && isActive) {
+              overQuotes[n] = q;
+            }
           }
-          if ((mt.includes('20-over') || mt.includes('20_over')) && q.price > 0 && q.active !== false) {
-            overQuotes['20'] = q;
+
+          // Wicket fall market
+          const wktMatch = wktRe.exec(mt) || wktRe.exec(name);
+          if (wktMatch) {
+            const n = String(parseInt(wktMatch[1], 10));
+            if (!wktQuotes[n] && isActive) {
+              wktQuotes[n] = q;
+            }
           }
         }
       }
     }
 
-    const q10 = overQuotes['10'];
-    const q20 = overQuotes['20'];
+    // Helper to build a fancy row from an over quote (or suspended placeholder)
+    const makeOverRow = (label, overN) => {
+      const q = overQuotes[String(overN)];
+      return {
+        name: label,
+        backPrice: q ? Number(q.handicap || q.price) : null,
+        backVol:   q ? this.formatVolume(q.limit) : '100',
+        layPrice:  q ? Number((q.handicap || q.price) - 1) : null,
+        layVol:    q ? this.formatVolume(q.limit) : '100',
+        status:    q ? 'OPEN' : 'SUSPENDED',
+        maxBet:    2000000
+      };
+    };
+
+    // Helper to build a wkt-fall row
+    const makeWktRow = (label, wktN) => {
+      const q = wktQuotes[String(wktN)];
+      return {
+        name: label,
+        backPrice: q ? Number(q.handicap || q.price) : null,
+        backVol:   q ? this.formatVolume(q.limit) : '100',
+        layPrice:  q ? Number((q.handicap || q.price) + 1) : null,
+        layVol:    q ? this.formatVolume(q.limit) : '100',
+        status:    q ? 'OPEN' : 'SUSPENDED',
+        maxBet:    2000000
+      };
+    };
 
     return [
-      {
-        name: `10 Over Run ${shortA}`,
-        backPrice: q10 ? Number(q10.handicap || q10.price) : null,
-        backVol: q10 ? this.formatVolume(q10.limit) : '100',
-        layPrice: q10 ? Number((q10.handicap || q10.price) - 1) : null,
-        layVol: q10 ? this.formatVolume(q10.limit) : '100',
-        status: q10 ? 'OPEN' : 'SUSPENDED',
-        maxBet: 2000000
-      },
+      makeOverRow(`6 Over Run ${shortA}`,    6),
+      makeOverRow(`7 Over Run ${shortA}`,    7),
+      makeOverRow(`8 Over Run ${shortA}`,    8),
+      makeOverRow(`10 Over Run ${shortA}`,   10),
+      makeOverRow(`15 Over Run ${shortA}`,   15),
       {
         name: `11 Over Run Only ${shortA}`,
         backPrice: null,
@@ -289,51 +333,12 @@ class FancyMarketsService {
         status: 'SUSPENDED',
         maxBet: 2000000
       },
-      {
-        name: `20 Over Run ${shortA}`,
-        backPrice: q20 ? Number(q20.handicap || q20.price) : null,
-        backVol: q20 ? this.formatVolume(q20.limit) : '100',
-        layPrice: q20 ? Number((q20.handicap || q20.price) - 1) : null,
-        layVol: q20 ? this.formatVolume(q20.limit) : '100',
-        status: q20 ? 'OPEN' : 'SUSPENDED',
-        maxBet: 2000000
-      },
-      {
-        name: `Fall of 1st Wkt ${shortA}`,
-        backPrice: null,
-        backVol: '100',
-        layPrice: null,
-        layVol: '100',
-        status: 'SUSPENDED',
-        maxBet: 2000000
-      },
-      {
-        name: `Fall of 2nd Wkt ${shortA}`,
-        backPrice: null,
-        backVol: '100',
-        layPrice: null,
-        layVol: '100',
-        status: 'SUSPENDED',
-        maxBet: 2000000
-      },
-      {
-        name: `10 Over Run ${shortB}`,
-        backPrice: null,
-        backVol: '100',
-        layPrice: null,
-        layVol: '100',
-        status: 'SUSPENDED',
-        maxBet: 2000000
-      },
-      {
-        name: `Fall of 1st Wkt ${shortB}`,
-        backPrice: null,
-        backVol: '100',
-        layPrice: null,
-        layVol: '100',
-        status: 'SUSPENDED',
-        maxBet: 2000000
-      }
+      makeOverRow(`20 Over Run ${shortA}`,   20),
+      makeWktRow(`Fall of 1st Wkt ${shortA}`, 1),
+      makeWktRow(`Fall of 2nd Wkt ${shortA}`, 2),
+      makeWktRow(`Fall of 3rd Wkt ${shortA}`, 3),
+      makeOverRow(`10 Over Run ${shortB}`,   10),
+      makeWktRow(`Fall of 1st Wkt ${shortB}`, 1)
     ];
   }
 
@@ -477,11 +482,21 @@ class FancyMarketsService {
   /**
    * Real-Time Pipeline processor called whenever live odds arrive from Oddspapi.
    * Extracts Tied Match (from market 276 / 273), Even/Odd, Fancy, and Figure markets,
-   * updates the database, and emits WebSocket events to the frontend.
+   * throttles DB writes & suspension evaluation, and emits WebSocket events to the frontend.
    */
   async processLiveMarkets({ matchId, normalizedOdds, io = null, isLive = true }) {
     try {
-      const match = await Match.findOne({ matchId });
+      const now = Date.now();
+      let match = null;
+      const cached = this.matchCache.get(matchId);
+      if (cached && (now - cached.timestamp < 15000)) {
+        match = cached.match;
+      } else {
+        match = await Match.findOne({ matchId });
+        if (match) {
+          this.matchCache.set(matchId, { match, timestamp: now });
+        }
+      }
       if (!match) return;
 
       const isActuallyLive = isLive || match.status === 'live' || match.inplay === true;
@@ -499,33 +514,42 @@ class FancyMarketsService {
       // 4. Extract Figure markets
       const figureMarkets = this.extractFigureMarkets(normalizedOdds, match);
 
-      // Update match document in MongoDB
+      // Update match document in cache/memory
       match.tiedMatchMarket = tiedMatchMarket;
       match.evenOddMarkets = evenOddMarkets;
       match.fancyMarkets = fancyMarkets;
       match.figureMarkets = figureMarkets;
 
-      await Match.updateOne(
-        { matchId },
-        {
-          $set: {
-            tiedMatchMarket,
-            evenOddMarkets,
-            fancyMarkets,
-            figureMarkets
+      // Throttle DB write to at most once per 3 seconds per match
+      const lastDbUpdate = this.lastDbUpdateTime.get(matchId) || 0;
+      if (now - lastDbUpdate >= 3000) {
+        this.lastDbUpdateTime.set(matchId, now);
+        Match.updateOne(
+          { matchId },
+          {
+            $set: {
+              tiedMatchMarket,
+              evenOddMarkets,
+              fancyMarkets,
+              figureMarkets
+            }
           }
-        }
-      );
-
-      // Evaluate suspension engine logic on every update (holds, end-zone, staleness, quote validation)
-      try {
-        const suspensionEngine = require('./suspension/suspensionEngine.js');
-        await suspensionEngine.evaluateMatch(matchId);
-      } catch (e) {
-        console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);
+        ).catch(e => console.warn(`[FancyMarketsService] DB update warning for ${matchId}:`, e.message));
       }
 
-      // Emit live updates via Socket.IO
+      // Throttle suspension evaluation to at most once per 3 seconds per match
+      const lastSuspension = this.lastSuspensionTime.get(matchId) || 0;
+      if (now - lastSuspension >= 3000) {
+        this.lastSuspensionTime.set(matchId, now);
+        try {
+          const suspensionEngine = require('./suspension/suspensionEngine.js');
+          suspensionEngine.evaluateMatch(matchId).catch(() => {});
+        } catch (e) {
+          console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);
+        }
+      }
+
+      // Emit live updates via Socket.IO immediately
       const targetIo = io || this.io;
       if (targetIo) {
         const matchIdStr = String(matchId);

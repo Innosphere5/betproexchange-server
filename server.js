@@ -15,7 +15,7 @@ const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { validateBetLimit } = require('./services/limitService');
 const { checkAndMatchOpenBets, expireAndRefundOpenBets, cancelUserOpenBet } = require('./services/openBetMatcher');
-const { initRoundManager, getCurrentRound } = require('./services/roundManager');
+const { initRoundManager, getCurrentRound, placeBet: placeCasinoBet } = require('./services/roundManager');
 const { initAviatorManager } = require('./services/aviatorManager');
 const { initAviatorxManager } = require('./services/aviatorxManager');
 const { initTeenPattiManager } = require('./services/teenPattiManager');
@@ -40,11 +40,13 @@ const isOriginAllowed = (origin) => {
     return true;
   }
 
-  // In non-production environments, also allow localhost / 127.0.0.1 for local testing
-  if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-    if (/^https?:\/\/localhost(:\d+)?$/.test(origin) || /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin)) {
-      return true;
-    }
+  // Always allow localhost / 127.0.0.1 / private LAN IPs (10.x, 192.168.x, 172.x) for local testing and dev
+  if (
+    /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
+    /^https?:\/\/127\.0\.0\.1(:\d+)?$/.test(origin) ||
+    /^https?:\/\/(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/.test(origin)
+  ) {
+    return true;
   }
 
   return false;
@@ -83,7 +85,14 @@ const io = new Server(server, {
     },
     methods: ["GET", "POST"],
     credentials: true
-  }
+  },
+  // Support both WebSocket and polling transports
+  transports: ['polling', 'websocket'],
+  // ─── Keep-alive / heartbeat tuning ───────────────────────────────────────
+  pingInterval: 10000,
+  pingTimeout: 20000,
+  upgradeTimeout: 10000,
+  maxHttpBufferSize: 1e6
 });
 
 const PORT = process.env.PORT || 5000;
@@ -104,6 +113,26 @@ const auth = require('./middleware/auth');
 
 app.use(compression());
 app.use(express.json({ limit: '1mb' }));
+
+// ⚡ PERF: HTTP Cache-Control middleware
+// Adds sensible caching headers so browsers and Vercel edge cache don't
+// refetch the same data on every render / route change.
+// Rules:
+//   - Auth-sensitive routes → no-store (never cache)
+//   - Static / rarely-changing routes → short public cache (5s)
+app.use((req, res, next) => {
+  const noStore = ['/api/auth', '/api/user', '/api/admin', '/socket.io'];
+  const isPrivate = noStore.some(prefix => req.path.startsWith(prefix));
+  if (isPrivate) {
+    // Private data & socket polling — do not cache at any layer
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  } else if (req.method === 'GET') {
+    // Public GET routes (match list, odds, scores) — short 5s cache at CDN edge
+    res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=10');
+  }
+  next();
+});
+
 app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
@@ -162,8 +191,8 @@ const connectDB = () => {
 
   dbConnectionPromise = mongoose.connect(process.env.MONGO_URI, {
     autoIndex: false,
-    maxPoolSize: 20,
-    minPoolSize: process.env.VERCEL ? 1 : 5,
+    maxPoolSize: 100,
+    minPoolSize: process.env.VERCEL ? 1 : 10,
     serverSelectionTimeoutMS: 5000,
     socketTimeoutMS: 45000,
     heartbeatFrequencyMS: 10000,
@@ -172,18 +201,6 @@ const connectDB = () => {
   })
     .then(async () => {
       console.log('✅ MongoDB connected successfully');
-
-      // Initialize Casino Round Manager with Socket.io
-      initRoundManager(io);
-
-      // Initialize Aviator Manager with Socket.io
-      initAviatorManager(io);
-
-      // Initialize AviatorX Manager with Socket.io
-      initAviatorxManager(io);
-
-      // Initialize Teen Patti Manager with Socket.io
-      initTeenPattiManager(io);
 
       // Initial fetch
       const { fetchUpcomingMatches } = require('./services/matchService');
@@ -216,29 +233,34 @@ const connectDB = () => {
       // Initialize Toss Odds Engine (synthetic toss market)
       const { initTossOddsEngine } = require('./services/tossOddsEngine');
       initTossOddsEngine(io);
-
-      // START SERVER ONLY AFTER DB IS READY (when running standalone)
-      if (!process.env.VERCEL && require.main === module && !server.listening) {
-        server.listen(PORT, '0.0.0.0', () => {
-          console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
-        });
-      }
     })
     .catch(err => {
       console.error('❌ MongoDB Connection/Init Error:', err.message);
       dbConnectionPromise = null;
-      if (!process.env.VERCEL && require.main === module && !server.listening) {
-        server.listen(PORT, '0.0.0.0', () => {
-          console.log(`⚠️ Backend server running on port ${PORT} (Database reconnecting...)`);
-        });
+      // Re-attempt connection after 5 seconds only when not in test suite
+      if (process.env.NODE_ENV !== 'test' && !process.env.npm_lifecycle_event?.includes('test')) {
+        setTimeout(connectDB, 5000);
       }
     });
 
   return dbConnectionPromise;
 };
 
-// Initiate DB connection
-connectDB();
+// When running standalone (node server.js), initialize game loops and start listening immediately
+if (require.main === module) {
+  initRoundManager(io);
+  initAviatorManager(io);
+  initAviatorxManager(io);
+  initTeenPattiManager(io);
+
+  if (!process.env.VERCEL && !server.listening) {
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`✅ Backend server running on port ${PORT} (All Interfaces)`);
+    });
+  }
+
+  connectDB();
+}
 
 // Middleware to ensure DB connection is ready on serverless function invocations
 app.use(async (req, res, next) => {
@@ -252,6 +274,23 @@ app.use(async (req, res, next) => {
 
 app.get('/', (req, res) => {
   res.send('server working');
+});
+
+// API Key Pool + Redis Cache Health Endpoint (admin/monitoring use)
+app.get('/api/pool-status', (req, res) => {
+  try {
+    const poolClient = require('./services/sportmonksPoolClient');
+    const redisCache = require('./services/upstashRedisCache');
+    res.json({
+      ok: true,
+      pool: poolClient.getStatus(),
+      cache: redisCache.getStats(),
+      uptime: Math.floor(process.uptime()) + 's',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
 });
 
 // Wallet Endpoint
@@ -611,45 +650,23 @@ app.post('/api/user/bets/:betId/cancel', auth, async (req, res) => {
 app.post('/api/casino/bet', auth, async (req, res) => {
   try {
     const { choice, amount } = req.body;
-    const currentRound = getCurrentRound();
-
-    if (!currentRound || currentRound.status !== 'BETTING_OPEN') {
-      return res.status(400).json({ error: 'Betting is currently closed' });
-    }
-
-    if (!amount || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Invalid stake amount' });
-    }
-
-    // Validate hierarchical max bet size and profit limit for Casino
-    const casinoOdds = 2.0;
-    const potentialProfit = amount * (casinoOdds - 1.0);
-    await validateBetLimit(req.user.userId, 'casino', amount, potentialProfit);
-
-    // Atomic update to deduct wallet
-    const user = await User.findOneAndUpdate(
-      { username: req.user.userId, walletBalance: { $gte: amount } },
-      { $inc: { walletBalance: -amount } },
-      { new: true }
-    );
-
-    if (!user) return res.status(400).json({ error: 'Insufficient balance' });
-
-    // Record the casino bet
-    const newBet = new CasinoBet({
-      userId: req.user.userId,
-      roundId: currentRound.roundId,
-      choice,
-      amount,
-      odds: 2.0, // Default for Solitaire/TeenPatti styles
-      status: 'PENDING'
-    });
-    await newBet.save();
-
-    res.json({ success: true, balance: user.walletBalance, roundId: currentRound.roundId });
+    const result = await placeCasinoBet(req.user.userId, choice, amount);
+    res.json(result);
   } catch (err) {
-    console.error("Casino Bet Error:", err);
-    res.status(500).json({ error: 'Casino bet failed' });
+    console.error("Casino Bet Error:", err.message);
+    res.status(400).json({ error: err.message || 'Casino bet failed' });
+  }
+});
+
+// Casino Active Bets for Reconnect Flow
+app.get('/api/casino/active-bets', auth, async (req, res) => {
+  try {
+    const currentRound = getCurrentRound();
+    if (!currentRound) return res.json([]);
+    const bets = await CasinoBet.find({ userId: req.user.userId, roundId: currentRound.roundId });
+    res.json(bets);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch active casino bets' });
   }
 });
 

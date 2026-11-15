@@ -259,13 +259,118 @@ function getOrInitializeMatchState(matchId, liveData, existingScore = {}) {
 }
 
 /**
- * Advance ball and score stats dynamically based on verified events.
- * 
- * IMPORTANT: oddspapi v5 only provides total runs (no overs, wickets, or ball-by-ball).
- * We estimate overs from runs using the format's average run rate, which produces
- * realistic CRR/RRR values instead of the old broken ball-delta counting.
+ * Extract actual overs bowled and wickets fallen from OddsPapi fancy market handicap lines.
+ *
+ * OddsPapi publishes Betfair "N Over Run" handicap markets (e.g. "1st Innings 6 Overs Line: 34").
+ *
+ * Betfair market lifecycle for "N Over Run":
+ *   OPEN     → that over is currently being played (overs complete = N-1, playing over N)
+ *   SUSPENDED→ over N is done and settled  (overs complete >= N)
+ *
+ * So the best signal for current overs is:
+ *   1. LOWEST OPEN near-current market → overs in progress = N, complete = N-1
+ *   2. HIGHEST SUSPENDED over market   → overs complete >= that N (secondary confirmation)
+ *
+ * We use: overs_complete = lowestOpenN - 1  (conservative, never overcounts)
+ * If no OPEN market detected, fall back to: overs_complete = highestSuspendedN
+ *
+ * Wickets: "Fall of Nth Wkt" markets:
+ *   SUSPENDED → wicket N has fallen
+ *   OPEN      → wicket N has not yet fallen
+ * → Highest SUSPENDED wkt market = wickets fallen so far.
+ *
+ * @param {object} normalizedOdds - keyed by bookie, values are arrays/objects of market quotes
+ * @param {number} maxOvers       - format max overs (20 for T20)
+ * @returns {{ actualOvers: number|null, actualWickets: number|null }}
  */
-function advanceCricketState(state, liveData) {
+function extractOddsHint(normalizedOdds, maxOvers) {
+    if (!normalizedOdds || typeof normalizedOdds !== 'object') {
+        return { actualOvers: null, actualWickets: null };
+    }
+
+    let lowestOpenOverN   = null; // smallest N-over market currently OPEN  → playing over N (complete = N-1)
+    let highestSuspOverN  = null; // largest  N-over market SUSPENDED/settled → overs complete >= N
+    let highestSuspWktN   = null; // highest "Fall of Nth Wkt" that is SUSPENDED (= wicket fallen)
+
+    // Over-line regex: "1st Innings 6 Overs Line", "6 Over Run ST-W", "6_overs", "6-overs"
+    const overLineRe = /(\d+)[_\s-]?over/i;
+    // Wkt regex: "Fall of 2nd Wkt", "2nd Wkt Lost", "Fall of 2 Wkt", "3rd Wkt Lost To X Balls"
+    const wktRe      = /(\d+)(?:st|nd|rd|th)?\s*wkt/i;
+
+    for (const [, outcomes] of Object.entries(normalizedOdds)) {
+        if (!outcomes) continue;
+        const quotes = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
+        for (const q of quotes) {
+            if (!q || !q.marketType) continue;
+            const mt   = String(q.marketType);
+            const name = String(q.name || q.marketType || '');
+
+            // ── Over-run line detection ───────────────────────────────────────────
+            const overMatch = overLineRe.exec(mt) || overLineRe.exec(name);
+            if (overMatch) {
+                const n = parseInt(overMatch[1], 10);
+                if (!isNaN(n) && n >= 1 && n <= maxOvers) {
+                    const isSusp = q.status === 'SUSPENDED' || q.active === false || (q.price <= 0 && q.handicap <= 0);
+                    if (isSusp) {
+                        // Suspended = this over milestone has been settled (overs_done >= N)
+                        if (highestSuspOverN === null || n > highestSuspOverN) highestSuspOverN = n;
+                    } else {
+                        // Open = this over is in play now (overs_done = N-1, playing over N)
+                        if (lowestOpenOverN === null || n < lowestOpenOverN) lowestOpenOverN = n;
+                    }
+                }
+            }
+
+            // ── Wicket market detection ───────────────────────────────────────────
+            const wktMatch = wktRe.exec(mt) || wktRe.exec(name);
+            if (wktMatch) {
+                const n = parseInt(wktMatch[1], 10);
+                if (!isNaN(n) && n >= 1 && n <= 10) {
+                    // Market SUSPENDED/settled → wicket N has already fallen
+                    const isSusp = q.status === 'SUSPENDED' || q.active === false || q.price <= 0;
+                    if (isSusp) {
+                        if (highestSuspWktN === null || n > highestSuspWktN) highestSuspWktN = n;
+                    }
+                }
+            }
+        }
+    }
+
+    // Derive actual overs complete:
+    //   Primary: lowest-OPEN market → playing over N → overs_done = N - 1
+    //   Secondary: highest-SUSPENDED over market → overs_done >= that N
+    let actualOvers = null;
+    if (lowestOpenOverN !== null) {
+        // Playing over lowestOpenOverN → (lowestOpenOverN - 1) complete
+        actualOvers = lowestOpenOverN - 1;
+        // Confirm with suspended signal if available
+        if (highestSuspOverN !== null && highestSuspOverN > actualOvers) {
+            actualOvers = highestSuspOverN;
+        }
+    } else if (highestSuspOverN !== null) {
+        actualOvers = highestSuspOverN;
+    }
+
+    return {
+        actualOvers,
+        actualWickets: highestSuspWktN
+    };
+}
+
+/**
+ * Advance ball and score stats dynamically based on verified events.
+ *
+ * @param {object} state    - match state from getOrInitializeMatchState
+ * @param {object} liveData - raw OddsPapi fixture payload
+ * @param {object} [oddsHint] - optional hints extracted from /fixtures/odds markets:
+ *   { actualOvers: number|null, actualWickets: number|null }
+ *   When present, actualOvers overrides the run-rate estimation for overs.
+ *   actualWickets overrides the state wicket counter when API provides none.
+ *
+ * IMPORTANT: oddspapi v5 /fixtures/live provides total runs ONLY (no overs, wickets, ball-by-ball).
+ * This function estimates overs from runs / avgRunRate as a last resort when no odds hint is present.
+ */
+function advanceCricketState(state, liveData, oddsHint = {}) {
     const scoresBreakdown = normalizeScoresBreakdown(liveData?.scores || {});
     state.scoresBreakdown = scoresBreakdown;
 
@@ -340,27 +445,62 @@ function advanceCricketState(state, liveData) {
         state.thisOver = ['0', '1', '0', '1'];
     }
 
-    // ─── Estimate overs from runs using format average run rate ───
-    // Since oddspapi provides NO overs/balls data, we estimate based on:
-    // runs / avgRunRate = approximate overs bowled
-    const activeRuns = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
-    const avgRPO = state.format.avgRunRate || 5.5; // runs per over for format
-    const maxOvers = state.format.maxOvers || 50;
-    
-    let estimatedOversFloat = 0;
-    if (activeRuns > 0) {
-        // Estimate overs: runs / average_run_rate, capped at format max
-        estimatedOversFloat = Math.min(activeRuns / avgRPO, maxOvers);
-        // Round to nearest 0.1 (cricket notation)
-        estimatedOversFloat = Math.round(estimatedOversFloat * 10) / 10;
+    // ─── Apply wickets from oddsHint (Betfair "Fall of Nth Wkt" markets) ───────
+    // OddsPapi /fixtures/live never sends wicket data. When /fixtures/odds markets
+    // tell us a "Fall of Nth Wkt" is SUSPENDED (settled), we know at least N wickets fell.
+    if (oddsHint.actualWickets != null && oddsHint.actualWickets > 0) {
+        if (state.battingTeam === 'teamB' && oddsHint.actualWickets > (state.p2Wickets || 0)) {
+            state.p2Wickets = oddsHint.actualWickets;
+            state.lastActiveWickets = oddsHint.actualWickets;
+        } else if (state.battingTeam === 'teamA' && oddsHint.actualWickets > (state.p1Wickets || 0)) {
+            state.p1Wickets = oddsHint.actualWickets;
+            state.lastActiveWickets = oddsHint.actualWickets;
+        }
     }
-    
-    // Convert float to cricket overs notation (e.g., 37.5 means 37 overs 5 balls)
-    const estimatedOversWhole = Math.floor(estimatedOversFloat);
-    const estimatedBallsFrac = Math.round((estimatedOversFloat - estimatedOversWhole) * 6);
-    const estimatedBalls = Math.min(estimatedBallsFrac, 5); // max 5 balls in an over
-    const overs = `${estimatedOversWhole}.${estimatedBalls}`;
-    const oversFloat = estimatedOversWhole + (estimatedBalls / 6);
+
+    // ─── Overs: use odds-market hint when available, else estimate from runs ───
+    // Priority 1: actualOvers from "N Over Run" market lines (most accurate for OddsPapi-only matches)
+    // Priority 2: estimate from runs / avgRunRate (last resort)
+    const activeRuns = state.battingTeam === 'teamA' ? state.p1Runs : state.p2Runs;
+    const maxOvers = state.format.maxOvers || 50;
+
+    let estimatedOversWhole, estimatedBalls;
+
+    if (oddsHint.actualOvers != null && oddsHint.actualOvers >= 0) {
+        // ── Odds-market path ──────────────────────────────────────────────────
+        // actualOvers = highest completed-over market that is OPEN.
+        // The batting team is IN that over (or just finished it), so we display
+        // "N.0" unless we can infer balls bowled this over from run delta.
+        const knownOversDone = Math.min(oddsHint.actualOvers, maxOvers);
+
+        // Estimate balls bowled within the current incomplete over using runs
+        // scored since the last over-boundary (conservative: 1 ball per run delta up to 5)
+        const runsThisOver = state.thisOver.reduce((acc, b) => {
+            if (b === 'W') return acc;
+            return acc + (parseInt(b, 10) || 0);
+        }, 0);
+        const ballsThisOver = Math.min(state.thisOver.length, 5);
+
+        estimatedOversWhole = knownOversDone;
+        estimatedBalls      = ballsThisOver;
+
+        // Store for next cycle change detection
+        state.oddsHintOvers = knownOversDone;
+    } else {
+        // ── Fallback: estimate from runs / avgRunRate ─────────────────────────
+        const avgRPO = state.format.avgRunRate || 5.5;
+        let estimatedOversFloat = 0;
+        if (activeRuns > 0) {
+            estimatedOversFloat = Math.min(activeRuns / avgRPO, maxOvers);
+            estimatedOversFloat = Math.round(estimatedOversFloat * 10) / 10;
+        }
+        estimatedOversWhole = Math.floor(estimatedOversFloat);
+        estimatedBalls      = Math.min(Math.round((estimatedOversFloat - estimatedOversWhole) * 6), 5);
+    }
+
+    // ── Build overs string and totals ─────────────────────────────────────────
+    const overs           = `${estimatedOversWhole}.${estimatedBalls}`;
+    const oversFloat      = estimatedOversWhole + (estimatedBalls / 6);
     const totalBallsBowled = estimatedOversWhole * 6 + estimatedBalls;
 
     const runRate = oversFloat > 0 ? (activeRuns / oversFloat).toFixed(2) : '0.00';
@@ -375,12 +515,15 @@ function advanceCricketState(state, liveData) {
         reqRunRate = remBalls > 0 ? ((remRuns / (remBalls / 6))).toFixed(2) : '0.00';
     }
 
+    // Recompute activeWickets after potential oddsHint update
+    const finalActiveWickets = state.battingTeam === 'teamA' ? state.p1Wickets : state.p2Wickets;
+
     const teamA_runs = `${state.p1Runs}/${state.p1Wickets}`;
     const teamB_runs = `${state.p2Runs}/${state.p2Wickets}`;
 
     const participant1Name = liveData?.participants?.participant1Name || 'Team 1';
     const participant2Name = liveData?.participants?.participant2Name || 'Team 2';
-    const battingTeamName = state.battingTeam === 'teamA' ? participant1Name : participant2Name;
+    const battingTeamName  = state.battingTeam === 'teamA' ? participant1Name : participant2Name;
 
     return {
         teamA_runs,
@@ -388,7 +531,7 @@ function advanceCricketState(state, liveData) {
         teamA_wickets: state.p1Wickets,
         teamB_wickets: state.p2Wickets,
         overs,
-        wickets: activeWickets,
+        wickets: finalActiveWickets,
         target: state.target,
         runRate,
         reqRunRate,
@@ -400,7 +543,9 @@ function advanceCricketState(state, liveData) {
         innings: state.innings,
         ballsBowled: totalBallsBowled,
         totalBalls: state.format.totalBalls,
-        scoresBreakdown: state.scoresBreakdown
+        scoresBreakdown: state.scoresBreakdown,
+        // flag indicating whether overs came from odds market data (more accurate) or were estimated
+        oversSource: oddsHint.actualOvers != null ? 'odds-market' : 'estimated'
     };
 }
 
@@ -409,5 +554,6 @@ module.exports = {
     normalizeScoresBreakdown,
     getOrInitializeMatchState,
     advanceCricketState,
+    extractOddsHint,
     liveMatchState
 };

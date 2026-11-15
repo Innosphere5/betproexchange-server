@@ -1,6 +1,6 @@
 const Match = require('../models/Match');
-const { getData } = require('./apiManager');
-const { getOrInitializeMatchState, advanceCricketState } = require('./cricketEngine');
+const { getData, getFixtureOdds } = require('./apiManager');
+const { getOrInitializeMatchState, advanceCricketState, extractOddsHint } = require('./cricketEngine');
 const { sportmonksScoreService, parseSportmonksFixture } = require('./sportmonksScoreService');
 
 const normalizeScoreValue = (value, fallback = 0) => {
@@ -18,8 +18,13 @@ const normalizeScoreText = (value, fallback = '0.0') => {
  * 
  * Computes realistic and comprehensive cricket live score metrics
  * (overs, CRR, RRR, target, ball-by-ball thisOver, remaining runs/balls).
+ *
+ * @param {object} liveData               - raw OddsPapi fixture payload
+ * @param {object} [existingMatchOrScore] - existing DB match or score for state restoration
+ * @param {object} [oddsHint]             - optional { actualOvers, actualWickets } from /fixtures/odds
+ *                                          When present, actualOvers overrides run-rate estimation.
  */
-const extractLiveScorePayload = (liveData, existingMatchOrScore = {}) => {
+const extractLiveScorePayload = (liveData, existingMatchOrScore = {}, oddsHint = {}) => {
     if (!liveData) {
         return {
             teamA_runs: "0/0",
@@ -62,7 +67,7 @@ const extractLiveScorePayload = (liveData, existingMatchOrScore = {}) => {
     }
 
     const state = getOrInitializeMatchState(matchId, liveData, existingScore);
-    const computed = advanceCricketState(state, liveData);
+    const computed = advanceCricketState(state, liveData, oddsHint);
 
     return {
         teamA_runs: computed.teamA_runs,
@@ -93,20 +98,85 @@ const extractLiveScorePayload = (liveData, existingMatchOrScore = {}) => {
  */
 const updateLiveScores = async (io) => {
     try {
-        // Run Sportmonks live scores sync (non-blocking)
+        // Run Sportmonks live scores sync (non-blocking) — primary real-time engine
         await sportmonksScoreService.syncLiveScores(io).catch(() => 0);
 
-        // OddsPapi /fixtures/live fallback & supplementary sync
-        // IMPORTANT: Matches recently updated (<30s) by Sportmonks are preserved via the age guard below
+        // OddsPapi /fixtures/live — global live feed (may exclude some leagues like WBBL)
         const response = await getData('fixtures/live');
+        const globalLiveIds = new Set((Array.isArray(response) ? response : []).map(m => String(m.fixtureId)));
 
-        if (!response || !Array.isArray(response) || response.length === 0) {
+        // ── Per-match targeted fetch for live DB matches not in /fixtures/live ──
+        // This is critical for WBBL and other leagues OddsPapi excludes from the global list.
+        // We query each live match's fixture ID directly — bypasses the global list omission.
+        const liveDbMatchesForDirectFetch = await Match.find({
+            status: 'live',
+            matchId: { $nin: Array.from(globalLiveIds) }, // only ones missing from global list
+            sportmonksFixtureId: { $exists: false }       // and not covered by Sportmonks
+        }).select('matchId teamA teamB score lastUpdated').lean();
+
+        const extraFixtures = [];
+        for (const dbM of liveDbMatchesForDirectFetch) {
+            try {
+                // Direct OddsPapi fixture lookup by match ID
+                const directRes = await getData('fixtures', {
+                    params: { fixtureIds: dbM.matchId },
+                    cacheKeySuffix: `direct_${dbM.matchId}`
+                });
+                if (Array.isArray(directRes) && directRes.length > 0) {
+                    const fixture = directRes[0];
+
+                    // ── Also fetch /fixtures/odds to extract actual overs + wickets ──
+                    // OddsPapi fancy markets ("N Over Run" handicap lines, "Fall of Nth Wkt")
+                    // provide far more accurate overs/wickets than run-rate estimation.
+                    try {
+                        const oddsRaw = await getFixtureOdds(dbM.matchId);
+                        if (oddsRaw) {
+                            // normalizedOdds: keyed by bookie → array of quote objects
+                            const normalizedOdds = {};
+                            if (Array.isArray(oddsRaw)) {
+                                for (const q of oddsRaw) {
+                                    const bk = q.bookmakerName || q.bookmaker || 'unknown';
+                                    if (!normalizedOdds[bk]) normalizedOdds[bk] = [];
+                                    normalizedOdds[bk].push(q);
+                                }
+                            } else if (typeof oddsRaw === 'object') {
+                                Object.assign(normalizedOdds, oddsRaw);
+                            }
+                            const format = require('./cricketEngine').detectFormat(
+                                dbM.league || fixture.tournament?.tournamentName || ''
+                            );
+                            fixture._oddsHint = extractOddsHint(normalizedOdds, format.maxOvers);
+                            if (fixture._oddsHint.actualOvers != null || fixture._oddsHint.actualWickets != null) {
+                                console.log(`[ScoreService] ⚡ OddsHint for ${dbM.teamA} v ${dbM.teamB}: overs=${fixture._oddsHint.actualOvers} wkts=${fixture._oddsHint.actualWickets}`);
+                            }
+                        }
+                    } catch (oddsErr) {
+                        // silent — odds fetch is best-effort; score still updates without hint
+                    }
+
+                    extraFixtures.push(fixture);
+                    console.log(`[ScoreService] ✅ Direct fixture lookup hit for ${dbM.teamA} v ${dbM.teamB} (${dbM.matchId})`);
+                }
+            } catch (fetchErr) {
+                // silent — direct fetch is best-effort
+            }
+        }
+
+        // Merge global + direct-fetched fixtures, deduplicating by fixtureId
+        const allFixtures = [...(Array.isArray(response) ? response : [])];
+        for (const f of extraFixtures) {
+            if (!globalLiveIds.has(String(f.fixtureId))) {
+                allFixtures.push(f);
+            }
+        }
+
+        if (!allFixtures || allFixtures.length === 0) {
             return;
         }
 
         let updatedCount = 0;
 
-        for (const liveData of response) {
+        for (const liveData of allFixtures) {
             const matchId = liveData.fixtureId;
             let matchInDb = await Match.findOne({ matchId });
 
@@ -144,7 +214,7 @@ const updateLiveScores = async (io) => {
                 }
             }
 
-            const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {});
+            const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {}, liveData._oddsHint || {});
             const teamA_score = parsedScore.teamA_runs;
             const teamB_score = parsedScore.teamB_runs;
 
@@ -230,6 +300,8 @@ const updateLiveScores = async (io) => {
                         battingTeamName: parsedScore.battingTeamName,
                         innings:    parsedScore.innings,
                         periods:    parsedScore.periods,
+                        // Track whether overs came from real odds market data or were estimated
+                        oversSource: parsedScore.oversSource || 'estimated',
                         lastUpdated: new Date()
                     },
                     lastUpdated: new Date()
@@ -281,7 +353,8 @@ const updateLiveScores = async (io) => {
                             winner: winner,
                             score: updatePayload.score
                         });
-                        Match.find().sort({ startTime: 1 }).then(all => io.emit('matches_updated', all)).catch(() => {});
+                        // ⚡ PERF: .lean() avoids Mongoose document hydration overhead for broadcast
+                        Match.find().sort({ startTime: 1 }).lean().then(all => io.emit('matches_updated', all)).catch(() => {});
                     }
                 }
 

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const TeenPattiHand = require('../models/TeenPattiHand');
 const TeenPattiBet = require('../models/TeenPattiBet');
 const User = require('../models/User');
+const mongoose = require('mongoose');
 const { distributeCasinoPL } = require('./hierarchyService');
 const { validateBetLimit, capProfitByLimit } = require('./limitService');
 
@@ -9,10 +10,10 @@ const { validateBetLimit, capProfitByLimit } = require('./limitService');
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 const ROUND_SETTINGS = {
-  DEALING_DURATION: 5,   // 5 seconds dealing phase
-  BETTING_DURATION: 20,  // 20 seconds betting window
-  SUSPENSE_DURATION: 3,  // 3 seconds betting closed suspense
-  RESULT_DURATION: 10,   // 10 seconds result display (to allow progressive reveal animation)
+  DEALING_DURATION: 3,   // 3 seconds dealing phase to A & B
+  BETTING_DURATION: 8,   // 8 seconds betting window (5-8s requested by user)
+  SUSPENSE_DURATION: 4,  // 4 seconds progressive card reveal suspense (3-4s requested by user)
+  RESULT_DURATION: 4,    // 4 seconds result display & celebration
   BACK_LAY_ODDS: 1.98,   // Exchange standard back/lay odds
 };
 
@@ -118,9 +119,9 @@ function broadcastState() {
   let sanitizedCards = null;
   let sanitizedHandNames = null;
 
-  if (currentRound.status === 'RESULT_DECLARED') {
+  if (currentRound.status === 'RESULT_DECLARED' || currentRound.status === 'BETTING_CLOSED') {
     sanitizedCards = currentRound.cards;
-    sanitizedHandNames = currentRound.handNames;
+    sanitizedHandNames = currentRound.status === 'RESULT_DECLARED' ? currentRound.handNames : null;
   } else {
     sanitizedCards = {
       A: [null, null, null],
@@ -148,9 +149,16 @@ async function loadHistory() {
     const pastRounds = await TeenPattiHand.find({ status: 'RESULT_DECLARED' })
       .sort({ startTime: -1 })
       .limit(15);
-    history = pastRounds.map(r => r.result).reverse();
+    if (pastRounds && pastRounds.length > 0) {
+      history = pastRounds.map(r => r.result).reverse();
+    } else if (history.length === 0) {
+      history = ['A', 'B', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A'];
+    }
   } catch (err) {
-    console.error('[TEENPATTI] Error loading history:', err);
+    console.warn('[TEENPATTI] Error loading history (using fallback):', err.message);
+    if (history.length === 0) {
+      history = ['A', 'B', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A'];
+    }
   }
 }
 
@@ -158,14 +166,19 @@ function initTeenPattiManager(socketIo) {
   io = socketIo;
   loadHistory();
 
+  // On boot, start in IDLE state. Engine runs ONLY when players are present and ready!
+  phase = 'IDLE';
+
   io.on('connection', (socket) => {
-    socket.on('join_teenpatti', () => {
+    const handlePlayerReady = () => {
       socket.join('teenpatti');
       activePlayers.add(socket.id);
-      console.log(`[TEENPATTI] Socket ${socket.id} joined. Total: ${activePlayers.size}`);
+      console.log(`[TEENPATTI] Socket ${socket.id} joined/ready. Total: ${activePlayers.size}`);
 
-      // Immediately sync state
-      if (currentRound) {
+      // Auto start game loop if game is idle or paused
+      if (phase === 'IDLE' || phase === 'INIT' || !timerInterval) {
+        startNewRound();
+      } else if (currentRound) {
         let sanitizedCards = null;
         let sanitizedHandNames = null;
 
@@ -190,22 +203,34 @@ function initTeenPattiManager(socketIo) {
           history
         });
       }
+    };
 
-      // Auto start game loop if first player
-      if (activePlayers.size === 1 && phase === 'INIT') {
-        startNewRound();
-      }
-    });
+    socket.on('join_teenpatti', handlePlayerReady);
+    socket.on('teenpatti_ready', handlePlayerReady);
 
-    socket.on('leave_teenpatti', () => {
+    const handlePlayerLeave = () => {
       socket.leave('teenpatti');
       activePlayers.delete(socket.id);
       console.log(`[TEENPATTI] Socket ${socket.id} left. Total: ${activePlayers.size}`);
-    });
 
-    socket.on('disconnect', () => {
-      activePlayers.delete(socket.id);
-    });
+      // If no players remain and game is currently in BETTING phase with no bets placed, pause to IDLE
+      if (activePlayers.size === 0 && phase === 'OPEN') {
+        TeenPattiBet.countDocuments({ roundId: currentRound?.roundId, status: 'PENDING' })
+          .then(count => {
+            if (count === 0 && activePlayers.size === 0 && phase === 'OPEN') {
+              console.log('[TEENPATTI] All players left with no bets. Pausing engine to IDLE.');
+              clearInterval(timerInterval);
+              phase = 'IDLE';
+              currentRound = null;
+              broadcastState();
+            }
+          })
+          .catch(() => {});
+      }
+    };
+
+    socket.on('leave_teenpatti', handlePlayerLeave);
+    socket.on('disconnect', handlePlayerLeave);
   });
 }
 
@@ -213,13 +238,6 @@ function initTeenPattiManager(socketIo) {
 // GAME LOOP FLOW
 // ═══════════════════════════════════════════════════════════════════════════
 async function startNewRound() {
-  if (activePlayers.size === 0) {
-    console.log('[TEENPATTI] No active players. Pausing engine loop...');
-    phase = 'INIT';
-    currentRound = null;
-    return;
-  }
-
   try {
     clearInterval(timerInterval);
 
@@ -233,14 +251,25 @@ async function startNewRound() {
     } while (rankA.score === rankB.score);
 
     const roundId = `TP-${Date.now()}`;
-    currentRound = new TeenPattiHand({
+    currentRound = {
       roundId,
       status: 'DEALING',
       result: 'PENDING',
       cards: { A: cardsA, B: cardsB },
       handNames: { A: rankA.type, B: rankB.type }
-    });
-    await currentRound.save();
+    };
+
+    TeenPattiHand.create({
+      roundId,
+      status: 'DEALING',
+      result: 'PENDING',
+      cards: { A: cardsA, B: cardsB },
+      handNames: { A: rankA.type, B: rankB.type }
+    }).then(doc => {
+      if (currentRound && currentRound.roundId === roundId) {
+        currentRound._id = doc._id;
+      }
+    }).catch(e => console.warn('[TEENPATTI] DB save warning:', e.message));
 
     roundTimer = ROUND_SETTINGS.DEALING_DURATION || 5;
     phase = 'DEALING';
@@ -272,8 +301,8 @@ async function startNewRound() {
             phase = 'OPEN';
             roundTimer = ROUND_SETTINGS.BETTING_DURATION;
             currentRound.status = 'BETTING_OPEN';
-            if (currentRound._id) {
-              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_OPEN' } });
+            if (currentRound._id && mongoose.connection.readyState === 1) {
+              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_OPEN' } }).catch(e => console.warn('[TEENPATTI] DB update warning:', e.message));
             }
             broadcastState();
           } else if (phase === 'OPEN') {
@@ -281,16 +310,17 @@ async function startNewRound() {
             phase = 'CLOSED';
             roundTimer = ROUND_SETTINGS.SUSPENSE_DURATION;
             currentRound.status = 'BETTING_CLOSED';
-            if (currentRound._id) {
-              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_CLOSED' } });
+            if (currentRound._id && mongoose.connection.readyState === 1) {
+              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_CLOSED' } }).catch(e => console.warn('[TEENPATTI] DB update warning:', e.message));
             }
             
             const sanitizedClosedRound = {
               roundId: currentRound.roundId,
               status: currentRound.status,
               result: 'PENDING',
-              cards: { A: [null, null, null], B: [null, null, null] },
-              handNames: null
+              cards: currentRound.cards,
+              handNames: null,
+              timer: roundTimer
             };
             io.to('teenpatti').emit('teenpatti_betting_closed', sanitizedClosedRound);
             broadcastState();
@@ -306,6 +336,7 @@ async function startNewRound() {
         }
       }
     }, 1000);
+    if (timerInterval.unref) timerInterval.unref();
 
   } catch (err) {
     console.error('[TEENPATTI] Error starting new round:', err);
@@ -329,8 +360,8 @@ async function declareResult() {
 
     currentRound.result = result;
     currentRound.status = 'RESULT_DECLARED';
-    if (currentRound._id) {
-      await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { result, status: 'RESULT_DECLARED' } });
+    if (currentRound._id && mongoose.connection.readyState === 1) {
+      await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { result, status: 'RESULT_DECLARED' } }).catch(e => console.warn('[TEENPATTI] DB result update warning:', e.message));
     }
 
     console.log(`[TEENPATTI] Round result: ${result} (A: ${rankA.type} vs B: ${rankB.type})`);
@@ -345,14 +376,28 @@ async function declareResult() {
     // Settle bets
     await settleBets(result, rankA, rankB);
 
-    // Start next round after result display duration
+    // Start next round after result display duration only if players are active!
     setTimeout(() => {
-      startNewRound();
+      if (activePlayers.size > 0) {
+        startNewRound();
+      } else {
+        console.log('[TEENPATTI] No active players. Pausing engine to IDLE.');
+        phase = 'IDLE';
+        currentRound = null;
+        clearInterval(timerInterval);
+        broadcastState();
+      }
     }, ROUND_SETTINGS.RESULT_DURATION * 1000);
 
   } catch (err) {
     console.error('[TEENPATTI] Error declaring result:', err);
-    setTimeout(startNewRound, 5000);
+    if (activePlayers.size > 0) {
+      setTimeout(startNewRound, 5000);
+    } else {
+      phase = 'IDLE';
+      currentRound = null;
+      broadcastState();
+    }
   }
 }
 
@@ -360,6 +405,7 @@ async function declareResult() {
 // SETTLEMENT LOGIC
 // ═══════════════════════════════════════════════════════════════════════════
 async function settleBets(winningChoice, rankA, rankB) {
+  if (mongoose.connection.readyState !== 1) return;
   try {
     const bets = await TeenPattiBet.find({ roundId: currentRound.roundId, status: 'PENDING' });
     if (bets.length === 0) return;
@@ -447,7 +493,9 @@ async function settleBets(winningChoice, rankA, rankB) {
 // API HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════
 async function placeBet(userId, betType, amount) {
-  if (!currentRound || phase !== 'OPEN') {
+  if (phase === 'IDLE' || phase === 'INIT') {
+    await startNewRound();
+  } else if (!currentRound || phase !== 'OPEN') {
     throw new Error('Betting is currently closed');
   }
 

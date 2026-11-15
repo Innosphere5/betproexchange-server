@@ -10,7 +10,7 @@ const cache = new Map();
 
 const CACHE_TTL_MS = {
   fixtures:    15 * 1000,     // 15 seconds — fast fixture & result sync
-  livescores:   5 * 1000,     // 5 seconds — real-time live scores
+  livescores:   1 * 1000,     // 1 second — squeeze every update out of the source
   tournaments: 3600 * 1000,   // 1 hour — tournament list
   markets:     24 * 3600 * 1000, // 24 hours — markets metadata
 };

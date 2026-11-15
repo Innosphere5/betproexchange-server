@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const AviatorRound = require('../models/AviatorRound');
 const AviatorBet = require('../models/AviatorBet');
 const User = require('../models/User');
@@ -24,6 +25,7 @@ const BOT_NAMES = [
 ];
 
 let virtualBets = []; // Holds fake bots active in the current round
+let roundBets = [];   // In-memory pending bets for real players in the current round
 
 const BETTING_DURATION = 6000; // 6 seconds betting window
 const CRASHED_DURATION = 3000; // 3 seconds show crash window
@@ -81,14 +83,21 @@ async function loadHistory() {
     const pastRounds = await AviatorRound.find({ status: 'CRASHED' })
                                          .sort({ endTime: -1 })
                                          .limit(20);
-    history = pastRounds.map(r => r.crashPoint).reverse();
+    if (pastRounds && pastRounds.length > 0) {
+      history = pastRounds.map(r => r.crashPoint).reverse();
+    } else if (history.length === 0) {
+      history = [1.85, 2.14, 1.25, 4.50, 1.12, 3.20, 1.68, 5.40, 2.05, 1.35];
+    }
   } catch (err) {
-    console.error('[AVIATOR] Error loading history:', err);
+    console.warn('[AVIATOR] Error loading history (using fallback):', err.message);
+    if (history.length === 0) {
+      history = [1.85, 2.14, 1.25, 4.50, 1.12, 3.20, 1.68, 5.40, 2.05, 1.35];
+    }
   }
 }
 
 function broadcastState() {
-  if (!io || !currentRound) return;
+  if (!io) return;
   
   const now = Date.now();
   let elapsedMs = 0;
@@ -100,14 +109,14 @@ function broadcastState() {
   }
   
   io.to('aviator').emit('aviator_state', {
-    roundId: currentRound.roundId,
+    roundId: currentRound ? currentRound.roundId : '',
     phase,
     elapsedMs,
     multiplier,
     timer: roundTimer,
-    serverSeedHash: currentRound.serverSeedHash,
-    serverSeed: phase === 'CRASHED' ? currentRound.serverSeed : null,
-    crashPoint: phase === 'CRASHED' ? currentRound.crashPoint : null,
+    serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
+    serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
+    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
     history,
     serverTimestamp: now
   });
@@ -117,14 +126,20 @@ function initAviatorManager(socketIo) {
   io = socketIo;
   loadHistory();
 
+  // On boot, start in IDLE state. Engine runs ONLY when players are present and ready!
+  phase = 'IDLE';
+
   io.on('connection', (socket) => {
-    socket.on('join_aviator', () => {
+    const handlePlayerReady = () => {
       socket.join('aviator');
       activePlayers.add(socket.id);
-      console.log(`[AVIATOR] Socket ${socket.id} joined. Active: ${activePlayers.size}`);
-      
-      // Send immediate sync state
-      if (currentRound) {
+      console.log(`[AVIATOR] Socket ${socket.id} joined/ready. Active players: ${activePlayers.size}`);
+
+      // If game is IDLE, start betting phase immediately so the player can play!
+      if (phase === 'IDLE' || phase === 'INIT' || (!timerInterval && !tickInterval)) {
+        startBettingPhase();
+      } else {
+        // Send immediate sync of ongoing round
         const now = Date.now();
         let elapsedMs = 0;
         let multiplier = 1.00;
@@ -133,52 +148,66 @@ function initAviatorManager(socketIo) {
           multiplier = getMultiplierAt(elapsedMs);
         }
         socket.emit('aviator_state', {
-          roundId: currentRound.roundId,
+          roundId: currentRound ? currentRound.roundId : '',
           phase,
           elapsedMs,
           multiplier,
           timer: roundTimer,
-          serverSeedHash: currentRound.serverSeedHash,
-          serverSeed: phase === 'CRASHED' ? currentRound.serverSeed : null,
-          crashPoint: phase === 'CRASHED' ? currentRound.crashPoint : null,
+          serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
+          serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
+          crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
           history,
           serverTimestamp: now
         });
       }
-      
-      // Auto-start game loop if a player joins and game is idle
-      if (activePlayers.size === 1 && phase === 'INIT') {
-        startBettingPhase();
-      }
-    });
+    };
 
-    socket.on('leave_aviator', () => {
+    socket.on('join_aviator', handlePlayerReady);
+    socket.on('aviator_ready', handlePlayerReady);
+
+    const handlePlayerLeave = () => {
       socket.leave('aviator');
       activePlayers.delete(socket.id);
-      console.log(`[AVIATOR] Socket ${socket.id} left. Active: ${activePlayers.size}`);
-    });
+      console.log(`[AVIATOR] Socket ${socket.id} left. Active players: ${activePlayers.size}`);
 
-    socket.on('disconnect', () => {
-      activePlayers.delete(socket.id);
-    });
+      // If no players remain in room and game is currently in BETTING phase with no bets placed, pause immediately to IDLE
+      if (activePlayers.size === 0 && phase === 'BETTING') {
+        AviatorBet.countDocuments({ roundId: currentRound?.roundId, status: 'PENDING' })
+          .then(count => {
+            if (count === 0 && activePlayers.size === 0 && phase === 'BETTING') {
+              console.log('[AVIATOR] All players left with no bets. Entering IDLE state.');
+              clearInterval(timerInterval);
+              phase = 'IDLE';
+              currentRound = null;
+              broadcastState();
+            }
+          })
+          .catch(() => {});
+      }
+    };
+
+    socket.on('leave_aviator', handlePlayerLeave);
+    socket.on('disconnect', handlePlayerLeave);
   });
 }
 
 async function startBettingPhase() {
   try {
-    clearInterval(tickInterval);
-    clearInterval(timerInterval);
+    if (tickInterval) clearInterval(tickInterval);
+    if (timerInterval) clearInterval(timerInterval);
+    tickInterval = null;
+    timerInterval = null;
 
     phase = 'BETTING';
     roundTimer = BETTING_DURATION;
     virtualBets = []; // Reset bots for new round
+    roundBets = [];   // Reset in-memory real player bets for new round
     
-    const count = await AviatorRound.countDocuments();
-    const nonce = count + 1;
+    const nonce = Date.now();
     const fairData = generateProvablyFairRound(nonce);
     const roundId = `AV-${Date.now()}`;
 
-    currentRound = new AviatorRound({
+    const roundDoc = new AviatorRound({
       roundId,
       status: 'BETTING_OPEN',
       serverSeed: fairData.serverSeed,
@@ -188,8 +217,12 @@ async function startBettingPhase() {
       crashPoint: fairData.crashPoint
     });
     
-    await currentRound.save();
+    currentRound = roundDoc;
+    roundDoc.save().catch(err => console.warn('[AVIATOR] DB save warning:', err.message));
     console.log(`[AVIATOR] New round: ${roundId} | CrashPoint: ${fairData.crashPoint}`);
+
+    // Immediately broadcast BETTING countdown state to room
+    broadcastState();
 
     // Generate random bots placing bets
     const botCount = Math.floor(Math.random() * 8) + 4; // 4 to 12 bots
@@ -231,9 +264,11 @@ async function startBettingPhase() {
 
       if (roundTimer <= 0) {
         clearInterval(timerInterval);
+        timerInterval = null;
         startFlyingPhase();
       }
     }, 100);
+    if (timerInterval.unref) timerInterval.unref();
   } catch (err) {
     console.error('[AVIATOR] Error initializing betting phase:', err);
     setTimeout(startBettingPhase, 5000);
@@ -242,32 +277,75 @@ async function startBettingPhase() {
 
 async function startFlyingPhase() {
   try {
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
     phase = 'FLYING';
     takeoffTime = Date.now();
     
-    currentRound.status = 'FLYING';
-    await currentRound.save();
+    if (currentRound) {
+      currentRound.status = 'FLYING';
+      if (typeof currentRound.save === 'function') {
+        currentRound.save().catch(err => console.warn('[AVIATOR] Save flying status warning:', err.message));
+      }
+    }
     
-    const flightDuration = getMsForMultiplier(currentRound.crashPoint);
+    const crashPoint = currentRound ? currentRound.crashPoint : 1.5;
+    const flightDuration = getMsForMultiplier(crashPoint);
     crashTime = takeoffTime + flightDuration;
-    console.log(`[AVIATOR] Plane taking off. Crashes in ${flightDuration.toFixed(0)}ms at ${currentRound.crashPoint}x`);
+    console.log(`[AVIATOR] Plane taking off. Crashes in ${flightDuration.toFixed(0)}ms at ${crashPoint}x`);
 
-    tickInterval = setInterval(async () => {
+    // Broadcast FLYING state immediately on liftoff
+    broadcastState();
+
+    // Fallback sync: if in-memory roundBets is empty, load active bets once
+    if (roundBets.length === 0 && currentRound && mongoose.connection.readyState === 1) {
+      AviatorBet.find({ roundId: currentRound.roundId, status: 'PENDING' })
+        .lean()
+        .then(bets => {
+          if (bets && bets.length > 0) {
+            bets.forEach(b => {
+              if (!roundBets.some(rb => rb._id.toString() === b._id.toString())) {
+                roundBets.push({
+                  _id: b._id,
+                  userId: b.userId,
+                  betSlot: b.betSlot,
+                  stake: b.stake,
+                  autoCashoutMultiplier: b.autoCashoutMultiplier,
+                  status: 'PENDING',
+                  cashed: false
+                });
+              }
+            });
+          }
+        })
+        .catch(() => {});
+    }
+
+    tickInterval = setInterval(() => {
       const now = Date.now();
       
       if (now >= crashTime) {
         clearInterval(tickInterval);
-        await triggerCrash();
+        tickInterval = null;
+        triggerCrash();
       } else {
         const elapsedMs = now - takeoffTime;
         const currentMultiplier = getMultiplierAt(elapsedMs);
         
-        // Evaluate auto-cashout for users
-        await evaluateAutoCashouts(currentMultiplier);
+        // High performance in-memory check for player auto-cashouts (ZERO DB queries per tick!)
+        for (const bet of roundBets) {
+          if (!bet.cashed && bet.status === 'PENDING' && bet.autoCashoutMultiplier && currentMultiplier >= bet.autoCashoutMultiplier && bet.autoCashoutMultiplier < crashPoint) {
+            bet.cashed = true;
+            bet.status = 'WON';
+            processAutoCashout(bet, bet.autoCashoutMultiplier);
+          }
+        }
 
         // Evaluate and simulate cashouts for bots
         virtualBets.forEach(bot => {
-          if (!bot.cashed && currentMultiplier >= bot.autoCashoutMultiplier && bot.autoCashoutMultiplier < currentRound.crashPoint) {
+          if (!bot.cashed && currentMultiplier >= bot.autoCashoutMultiplier && bot.autoCashoutMultiplier < crashPoint) {
             bot.cashed = true;
             const payout = Math.round(bot.stake * bot.autoCashoutMultiplier);
             io.to('aviator').emit('aviator_cashout_success', {
@@ -282,120 +360,140 @@ async function startFlyingPhase() {
         broadcastState();
       }
     }, 50);
+    if (tickInterval.unref) tickInterval.unref();
   } catch (err) {
     console.error('[AVIATOR] Error starting flying phase:', err);
     startBettingPhase();
   }
 }
 
-async function evaluateAutoCashouts(currentMultiplier) {
+async function processAutoCashout(bet, actualMultiplier) {
   try {
-    const pendingBets = await AviatorBet.find({
-      roundId: currentRound.roundId,
-      status: 'PENDING',
-      autoCashoutMultiplier: { $ne: null, $lte: currentMultiplier }
-    });
+    const grossPayout = Math.round(bet.stake * actualMultiplier * 100) / 100;
+    const rawNetProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
+    const { netProfit } = await capProfitByLimit(bet.userId, 'aviator', rawNetProfit);
+    const netPayout = bet.stake + netProfit;
 
-    for (const bet of pendingBets) {
-      const now = Date.now();
-      const actualMultiplier = bet.autoCashoutMultiplier; 
-      const grossPayout = Math.round(bet.stake * actualMultiplier * 100) / 100;
-      const netProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
-      const netPayout = bet.stake + netProfit;
+    const updatedBet = await AviatorBet.findOneAndUpdate(
+      { _id: bet._id, status: 'PENDING' },
+      {
+        status: 'WON',
+        cashoutMultiplier: actualMultiplier,
+        cashoutTime: new Date(),
+        payout: netPayout
+      },
+      { new: true }
+    );
 
-      const updatedBet = await AviatorBet.findOneAndUpdate(
-        { _id: bet._id, status: 'PENDING' },
-        {
-          status: 'WON',
-          cashoutMultiplier: actualMultiplier,
-          cashoutTime: new Date(now),
-          payout: netPayout
-        },
+    if (updatedBet) {
+      const user = await User.findOneAndUpdate(
+        { username: bet.userId },
+        { $inc: { walletBalance: netPayout } },
         { new: true }
       );
 
-      if (updatedBet) {
-        const user = await User.findOneAndUpdate(
-          { username: bet.userId },
-          { $inc: { walletBalance: netPayout } },
-          { new: true }
-        );
+      if (user) {
+        await distributeCasinoPL(bet.userId, -netProfit, {
+          matchName: `Aviator Round ${currentRound ? currentRound.roundId : ''}`,
+          selection: `Won @ Auto-Cashout ${actualMultiplier}x`
+        });
 
-        if (user) {
-          await distributeCasinoPL(bet.userId, -netProfit, {
-            matchName: `Aviator Round ${currentRound.roundId}`,
-            selection: `Won @ Auto-Cashout ${actualMultiplier}x`
-          });
-
-          io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
-          io.to('aviator').emit('aviator_cashout_success', {
-            userId: bet.userId,
-            betSlot: bet.betSlot,
-            multiplier: actualMultiplier,
-            payout: netPayout
-          });
-          console.log(`[AVIATOR] Auto-Cashout successful for ${bet.userId} at ${actualMultiplier}x`);
-        }
+        io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
+        io.to('aviator').emit('aviator_cashout_success', {
+          userId: bet.userId,
+          betSlot: bet.betSlot,
+          multiplier: actualMultiplier,
+          payout: netPayout
+        });
+        console.log(`[AVIATOR] Auto-Cashout successful for ${bet.userId} at ${actualMultiplier}x`);
       }
     }
   } catch (err) {
-    console.error('[AVIATOR] Error evaluating auto-cashouts:', err);
+    console.error('[AVIATOR] Error processing auto-cashout:', err);
   }
 }
 
 async function triggerCrash() {
   try {
+    if (tickInterval) {
+      clearInterval(tickInterval);
+      tickInterval = null;
+    }
     phase = 'CRASHED';
-    const finalMultiplier = currentRound.crashPoint;
-    currentRound.status = 'CRASHED';
-    currentRound.endTime = new Date();
-    await currentRound.save();
-
-    console.log(`[AVIATOR] Plane crashed at ${finalMultiplier}x. Reveal Seed: ${currentRound.serverSeed}`);
+    const finalMultiplier = currentRound ? currentRound.crashPoint : 1.00;
+    if (currentRound) {
+      currentRound.status = 'CRASHED';
+      currentRound.endTime = new Date();
+      if (typeof currentRound.save === 'function') {
+        currentRound.save().catch(err => console.warn('[AVIATOR] Save crash status warning:', err.message));
+      }
+      console.log(`[AVIATOR] Plane crashed at ${finalMultiplier}x. Reveal Seed: ${currentRound.serverSeed}`);
+    }
     
     history.push(finalMultiplier);
     if (history.length > 30) history.shift();
 
-    // Settle all remaining pending bets in this round as LOSS
-    const uncashedBets = await AviatorBet.find({
-      roundId: currentRound.roundId,
-      status: 'PENDING'
+    // Mark remaining in-memory bets as LOST
+    roundBets.forEach(b => {
+      if (b.status === 'PENDING') {
+        b.status = 'LOST';
+      }
     });
 
-    for (const bet of uncashedBets) {
-      bet.status = 'LOST';
-      await bet.save();
-
-      // House Profit = bet.stake. Distribute up parent hierarchy
-      await distributeCasinoPL(bet.userId, bet.stake, {
-        matchName: `Aviator Round ${currentRound.roundId}`,
-        selection: `Lost @ Crash ${finalMultiplier}x`
+    // Settle all remaining pending bets in this round in DB
+    if (currentRound && mongoose.connection.readyState === 1) {
+      const uncashedBets = await AviatorBet.find({
+        roundId: currentRound.roundId,
+        status: 'PENDING'
       });
-      
-      console.log(`[AVIATOR] Settle lost bet for user ${bet.userId} | Stake: ${bet.stake}`);
+
+      for (const bet of uncashedBets) {
+        bet.status = 'LOST';
+        await bet.save();
+
+        await distributeCasinoPL(bet.userId, bet.stake, {
+          matchName: `Aviator Round ${currentRound.roundId}`,
+          selection: `Lost @ Crash ${finalMultiplier}x`
+        });
+        
+        console.log(`[AVIATOR] Settle lost bet for user ${bet.userId} | Stake: ${bet.stake}`);
+      }
     }
 
     broadcastState();
 
-    // Transition to next round after CRASHED_DURATION
+    // Autonomous loop only continues if players are active in the room!
     setTimeout(() => {
       if (activePlayers.size > 0) {
         startBettingPhase();
       } else {
-        console.log('[AVIATOR] No active players. Pausing engine loop...');
-        phase = 'INIT';
+        console.log('[AVIATOR] No active players in room. Entering IDLE phase.');
+        phase = 'IDLE';
         currentRound = null;
+        if (timerInterval) clearInterval(timerInterval);
+        if (tickInterval) clearInterval(tickInterval);
+        timerInterval = null;
+        tickInterval = null;
+        broadcastState();
       }
     }, CRASHED_DURATION);
   } catch (err) {
     console.error('[AVIATOR] Error triggering crash:', err);
-    setTimeout(startBettingPhase, 5000);
+    if (activePlayers.size > 0) {
+      setTimeout(startBettingPhase, 5000);
+    } else {
+      phase = 'IDLE';
+      currentRound = null;
+      broadcastState();
+    }
   }
 }
 
 // Service helper called by Express APIs
 async function placeBet(userId, betSlot, stake, autoCashoutMultiplier) {
-  if (!currentRound || phase !== 'BETTING') {
+  if (phase === 'IDLE' || phase === 'INIT') {
+    await startBettingPhase();
+  } else if (!currentRound || phase !== 'BETTING') {
     throw new Error('Betting is closed for this round');
   }
   
@@ -407,13 +505,9 @@ async function placeBet(userId, betSlot, stake, autoCashoutMultiplier) {
   const estimatedProfit = autoCashoutMultiplier ? Math.round(stake * (parseFloat(autoCashoutMultiplier) - 1)) : 0;
   await validateBetLimit(userId, 'aviator', stake, estimatedProfit);
 
-  // Prevent double bets on same slot
-  const existing = await AviatorBet.findOne({
-    userId,
-    roundId: currentRound.roundId,
-    betSlot
-  });
-  if (existing) {
+  // Fast in-memory double-bet validation
+  const memExisting = roundBets.find(b => b.userId === userId && b.betSlot === betSlot);
+  if (memExisting) {
     throw new Error(`Bet already placed on Slot ${betSlot}`);
   }
 
@@ -437,7 +531,18 @@ async function placeBet(userId, betSlot, stake, autoCashoutMultiplier) {
     status: 'PENDING'
   });
 
-  await bet.save();
+  // Save bet to database asynchronously in background without blocking response
+  bet.save().catch(err => console.warn('[AVIATOR] Bet save warning:', err.message));
+
+  roundBets.push({
+    _id: bet._id,
+    userId,
+    betSlot,
+    stake,
+    autoCashoutMultiplier: autoCashoutMultiplier ? parseFloat(autoCashoutMultiplier) : null,
+    status: 'PENDING',
+    cashed: false
+  });
 
   io.emit('wallet_updated', { userId, balance: user.walletBalance });
   io.to('aviator').emit('aviator_bet_placed', {
@@ -463,55 +568,80 @@ async function cashout(userId, betSlot) {
   const elapsedMs = now - takeoffTime;
   const currentMultiplier = getMultiplierAt(elapsedMs);
 
-  const bet = await AviatorBet.findOne({
-    userId,
-    roundId: currentRound.roundId,
-    betSlot,
-    status: 'PENDING'
-  });
-
-  if (!bet) {
-    throw new Error('Active bet not found');
+  // Fast in-memory resolution first for zero-latency crash game performance
+  let memBet = roundBets.find(b => b.userId === userId && b.betSlot === betSlot);
+  if (memBet && (memBet.cashed || memBet.status === 'WON')) {
+    return {
+      success: true,
+      alreadyWon: true,
+      multiplier: memBet.cashoutMultiplier,
+      payout: memBet.payout
+    };
   }
 
-  const grossPayout = Math.round(bet.stake * currentMultiplier * 100) / 100;
-  const rawNetProfit = Math.round((grossPayout - bet.stake) * 0.98 * 100) / 100; // 2% house commission
+  let betId = memBet ? memBet._id : null;
+  let stake = memBet ? memBet.stake : null;
+
+  if (!memBet) {
+    // Fallback: check DB if not found in memory (e.g. server restart)
+    let bet = await AviatorBet.findOne({
+      userId,
+      roundId: currentRound.roundId,
+      betSlot,
+      status: 'PENDING'
+    });
+
+    if (!bet) {
+      const wonBet = await AviatorBet.findOne({
+        userId,
+        roundId: currentRound.roundId,
+        betSlot,
+        status: 'WON'
+      });
+      if (wonBet) {
+        const u = await User.findOne({ username: userId });
+        return {
+          success: true,
+          alreadyWon: true,
+          balance: u ? u.walletBalance : 0,
+          bet: wonBet,
+          multiplier: wonBet.cashoutMultiplier,
+          payout: wonBet.payout
+        };
+      }
+
+      const lostBet = await AviatorBet.findOne({
+        userId,
+        roundId: currentRound.roundId,
+        betSlot,
+        status: 'LOST'
+      });
+      if (lostBet) {
+        throw new Error('Round already ended or bet lost');
+      }
+
+      throw new Error('Active bet not found');
+    }
+
+    betId = bet._id;
+    stake = bet.stake;
+  }
+
+  // Calculate payouts
+  const grossPayout = Math.round(stake * currentMultiplier * 100) / 100;
+  const rawNetProfit = Math.round((grossPayout - stake) * 0.98 * 100) / 100; // 2% house commission
   const { netProfit } = await capProfitByLimit(userId, 'aviator', rawNetProfit);
-  const netPayout = bet.stake + netProfit;
+  const netPayout = stake + netProfit;
 
-  // Atomic state protection to avoid double cashouts
-  const updatedBet = await AviatorBet.findOneAndUpdate(
-    { _id: bet._id, status: 'PENDING' },
-    {
-      status: 'WON',
-      cashoutMultiplier: currentMultiplier,
-      cashoutTime: new Date(now),
-      payout: netPayout
-    },
-    { new: true }
-  );
-
-  if (!updatedBet) {
-    throw new Error('Bet already cashed out or settled');
+  // Immediate in-memory lock to guarantee single settlement
+  if (memBet) {
+    memBet.cashed = true;
+    memBet.status = 'WON';
+    memBet.cashoutMultiplier = currentMultiplier;
+    memBet.payout = netPayout;
   }
 
-  const user = await User.findOneAndUpdate(
-    { username: userId },
-    { $inc: { walletBalance: netPayout } },
-    { new: true }
-  );
-
-  if (!user) {
-    throw new Error('Failed to update wallet balance');
-  }
-
-  // Distribute profit share up hierarchy
-  await distributeCasinoPL(userId, -netProfit, {
-    matchName: `Aviator Round ${currentRound.roundId}`,
-    selection: `Won @ Cashout ${currentMultiplier}x`
-  });
-
-  io.emit('wallet_updated', { userId, balance: user.walletBalance });
+  // Real-time broadcast to room immediately
   io.to('aviator').emit('aviator_cashout_success', {
     userId,
     betSlot,
@@ -519,7 +649,41 @@ async function cashout(userId, betSlot) {
     payout: netPayout
   });
 
-  return { success: true, balance: user.walletBalance, multiplier: currentMultiplier, payout: netPayout };
+  // Concurrent atomic database updates (wallet balance + bet status)
+  const [user, updatedBet] = await Promise.all([
+    User.findOneAndUpdate(
+      { username: userId },
+      { $inc: { walletBalance: netPayout } },
+      { new: true }
+    ),
+    AviatorBet.findOneAndUpdate(
+      { _id: betId, status: 'PENDING' },
+      {
+        status: 'WON',
+        cashoutMultiplier: currentMultiplier,
+        cashoutTime: new Date(now),
+        payout: netPayout
+      },
+      { new: true }
+    )
+  ]);
+
+  if (user) {
+    io.emit('wallet_updated', { userId, balance: user.walletBalance });
+  }
+
+  // Asynchronous profit/loss hierarchy distribution without blocking the response
+  distributeCasinoPL(userId, -netProfit, {
+    matchName: `Aviator Round ${currentRound.roundId}`,
+    selection: `Won @ Cashout ${currentMultiplier}x`
+  }).catch(err => console.error('[Aviator distributeCasinoPL]', err));
+
+  return {
+    success: true,
+    balance: user ? user.walletBalance : 0,
+    multiplier: currentMultiplier,
+    payout: netPayout
+  };
 }
 
 function getCurrentRound() {

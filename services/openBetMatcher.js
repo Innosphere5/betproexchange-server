@@ -2,6 +2,8 @@ const Bet = require('../models/Bet');
 const Match = require('../models/Match');
 const User = require('../models/User');
 
+const lastCheckMap = new Map();
+
 function matchesTeamName(runnerStr, teamStr) {
   if (!runnerStr || !teamStr) return false;
   const r = runnerStr.trim().toLowerCase();
@@ -107,6 +109,11 @@ function getActiveMarketOdds(matchInDb, runner, betType, marketType) {
  */
 async function checkAndMatchOpenBets(matchId, io, liveMatchDoc = null) {
   if (!matchId) return 0;
+  const now = Date.now();
+  const lastCheck = lastCheckMap.get(matchId) || 0;
+  if (now - lastCheck < 2000) return 0;
+  lastCheckMap.set(matchId, now);
+
   const cleanId = String(matchId).replace(/^id/, '');
   const altId = `id${cleanId}`;
 
