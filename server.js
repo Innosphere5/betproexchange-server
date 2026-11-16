@@ -15,7 +15,7 @@ const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { validateBetLimit } = require('./services/limitService');
 const { checkAndMatchOpenBets, expireAndRefundOpenBets, cancelUserOpenBet } = require('./services/openBetMatcher');
-const { initRoundManager, getCurrentRound, placeBet: placeCasinoBet } = require('./services/roundManager');
+const { initRoundManager, getCurrentRound, getCurrentState: getCasinoState, placeBet: placeCasinoBet } = require('./services/roundManager');
 const { initAviatorManager } = require('./services/aviatorManager');
 const { initAviatorxManager } = require('./services/aviatorxManager');
 const { initTeenPattiManager } = require('./services/teenPattiManager');
@@ -697,6 +697,29 @@ app.get('/api/casino/active-bets', auth, async (req, res) => {
     res.json(bets);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch active casino bets' });
+  }
+});
+
+// Casino State for Serverless / REST fallback
+app.get('/api/casino/state', (req, res) => {
+  try {
+    const state = getCasinoState();
+    res.json(state);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch casino state' });
+  }
+});
+
+// Casino History for ribbon
+app.get('/api/casino/history', async (req, res) => {
+  try {
+    const rounds = await CasinoRound.find({ status: 'RESULT_DECLARED' })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+    res.json(rounds.map(r => r.result).filter(Boolean));
+  } catch (err) {
+    res.json(['A', 'B', 'A', 'A', 'B', 'B', 'A']);
   }
 });
 

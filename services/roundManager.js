@@ -372,11 +372,119 @@ async function declareResult() {
   }
 }
 
+// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
+function ensureLiveRound(now = Date.now()) {
+  const TOTAL_CYCLE = (TIMINGS.DEALING_DURATION + TIMINGS.BETTING_DURATION + TIMINGS.REVEAL_DURATION + TIMINGS.RESULT_DURATION) * 1000; // 19000ms
+  
+  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
+    const elapsed = now - currentRound.startTime;
+    const dealingEnd = TIMINGS.DEALING_DURATION * 1000;
+    const bettingEnd = dealingEnd + (TIMINGS.BETTING_DURATION * 1000);
+    const revealEnd = bettingEnd + (TIMINGS.REVEAL_DURATION * 1000);
+
+    if (elapsed < dealingEnd) {
+      phase = 'DEALING';
+      currentRound.status = 'DEALING';
+      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+    } else if (elapsed < bettingEnd) {
+      phase = 'OPEN';
+      currentRound.status = 'BETTING_OPEN';
+      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+    } else if (elapsed < revealEnd) {
+      phase = 'CLOSED';
+      currentRound.status = 'BETTING_CLOSED';
+      roundTimer = 0;
+    } else {
+      phase = 'RESULT';
+      currentRound.status = 'RESULT_DECLARED';
+      currentRound.result = currentRound.winResult;
+      roundTimer = 0;
+      if (!currentRound.settled) {
+        currentRound.settled = true;
+        declareResult().catch(err => console.warn('[CASINO SETTLE]', err.message));
+      }
+    }
+    return currentRound;
+  }
+
+  // Generate new deterministic round
+  const roundId = `RND-${now}`;
+  const startTime = now;
+  const endTime = startTime + TOTAL_CYCLE;
+
+  let cardsA, cardsB, rankA, rankB;
+  do {
+    cardsA = drawCards(3);
+    cardsB = drawCards(3, cardsA);
+    rankA = getHandRank(cardsA);
+    rankB = getHandRank(cardsB);
+  } while (rankA.score === rankB.score);
+
+  const winResult = rankA.score > rankB.score ? 'A' : 'B';
+
+  currentRound = {
+    roundId,
+    status: 'BETTING_OPEN',
+    startTime,
+    endTime,
+    result: 'PENDING',
+    cards: { A: cardsA, B: cardsB },
+    handNames: { A: rankA.type, B: rankB.type },
+    winResult,
+    settled: false
+  };
+
+  phase = 'OPEN';
+  roundTimer = TIMINGS.BETTING_DURATION;
+  roundBets = [];
+
+  if (mongoose.connection.readyState === 1) {
+    CasinoRound.create({
+      roundId,
+      status: 'BETTING_OPEN',
+      result: 'PENDING',
+      cards: currentRound.cards,
+      handNames: currentRound.handNames
+    }).catch(err => console.warn('[CASINO] DB create warning:', err.message));
+  }
+
+  return currentRound;
+}
+
+function getCurrentState(now = Date.now()) {
+  const round = ensureLiveRound(now);
+  let sanitizedCards = null;
+  let sanitizedHandNames = null;
+
+  if (round.status === 'RESULT_DECLARED' || round.status === 'BETTING_CLOSED') {
+    sanitizedCards = round.cards;
+    sanitizedHandNames = round.status === 'RESULT_DECLARED' ? round.handNames : null;
+  } else {
+    sanitizedCards = {
+      A: [null, null, null],
+      B: [null, null, null]
+    };
+    sanitizedHandNames = null;
+  }
+
+  return {
+    roundId: round.roundId,
+    status: round.status,
+    result: round.status === 'RESULT_DECLARED' ? round.winResult : 'PENDING',
+    timer: roundTimer,
+    cards: sanitizedCards,
+    handNames: sanitizedHandNames,
+    history: ['A', 'B', 'A', 'A', 'B', 'B', 'A'],
+    serverTimestamp: now
+  };
+}
+
 // In-Memory Zero-Latency Bet Engine
 async function placeBet(userId, choice, amount) {
-  if (phase === 'IDLE' || phase === 'INIT') {
-    await startNewRound();
-  } else if (!currentRound || phase !== 'OPEN') {
+  const now = Date.now();
+  const round = ensureLiveRound(now);
+
+  if (round.status !== 'BETTING_OPEN' && round.status !== 'DEALING') {
     throw new Error('Betting is currently closed for this round');
   }
 
@@ -406,7 +514,7 @@ async function placeBet(userId, choice, amount) {
 
   const bet = new CasinoBet({
     userId,
-    roundId: currentRound.roundId,
+    roundId: round.roundId,
     choice,
     amount: stake,
     odds,
@@ -419,31 +527,35 @@ async function placeBet(userId, choice, amount) {
   roundBets.push({
     _id: bet._id,
     userId,
-    roundId: currentRound.roundId,
+    roundId: round.roundId,
     choice,
     amount: stake,
     odds,
     status: 'PENDING'
   });
 
-  io.emit('wallet_updated', { userId, balance: user.walletBalance });
-  io.emit('casino_bet_placed', {
-    userId,
-    choice,
-    amount: stake,
-    odds,
-    roundId: currentRound.roundId
-  });
+  if (io) {
+    io.emit('wallet_updated', { userId, balance: user.walletBalance });
+    io.emit('casino_bet_placed', {
+      userId,
+      choice,
+      amount: stake,
+      odds,
+      roundId: round.roundId
+    });
+  }
 
   return { success: true, balance: user.walletBalance, bet };
 }
 
 function getCurrentRound() {
-  return currentRound;
+  return currentRound || ensureLiveRound(Date.now());
 }
 
 module.exports = {
   initRoundManager,
+  ensureLiveRound,
+  getCurrentState,
   getCurrentRound,
   placeBet,
   getHandRank

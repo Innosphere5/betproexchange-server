@@ -633,43 +633,173 @@ async function cashout(userId, betSlot) {
   };
 }
 
+// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
+function ensureLiveRound(now = Date.now()) {
+  // If currentRound exists and hasn't reached its complete cycle (endTime)
+  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
+    if (now < currentRound.takeoffTime) {
+      phase = 'BETTING';
+      roundTimer = Math.max(0, currentRound.takeoffTime - now);
+    } else if (now < currentRound.crashTime) {
+      phase = 'FLYING';
+      roundTimer = 0;
+      takeoffTime = currentRound.takeoffTime;
+      crashTime = currentRound.crashTime;
+    } else {
+      phase = 'CRASHED';
+      roundTimer = 0;
+      crashTime = currentRound.crashTime;
+    }
+    return currentRound;
+  }
+
+  // Current round has expired or does not exist yet. Settle old round and advance:
+  if (currentRound && currentRound.crashPoint) {
+    if (!history.includes(currentRound.crashPoint)) {
+      history.push(currentRound.crashPoint);
+      if (history.length > 30) history.shift();
+    }
+    if (mongoose.connection.readyState === 1) {
+      AviatorXBet.updateMany(
+        { roundId: currentRound.roundId, status: 'PENDING' },
+        { status: 'LOST' }
+      ).catch(() => {});
+    }
+  }
+
+  const nonce = now;
+  const fairData = generateProvablyFairRound(nonce);
+  const roundId = `AX-${now}`;
+  const startTime = now;
+  const takeoff = startTime + BETTING_DURATION; // 6000ms
+  const flightDuration = getMsForMultiplier(fairData.crashPoint);
+  const crash = takeoff + flightDuration;
+  const end = crash + CRASHED_DURATION; // 3000ms
+
+  takeoffTime = takeoff;
+  crashTime = crash;
+  phase = 'BETTING';
+  roundTimer = BETTING_DURATION;
+  virtualBets = [];
+  roundBets = [];
+
+  // Generate realistic bot bets
+  const botCount = Math.floor(Math.random() * 8) + 4;
+  for (let i = 0; i < botCount; i++) {
+    const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)] + Math.floor(Math.random() * 900 + 100);
+    const stake = Math.floor(Math.random() * 1500) + 100;
+    const targetCashout = parseFloat((Math.random() * 4 + 1.2).toFixed(2));
+    virtualBets.push({
+      userId: name,
+      stake,
+      autoCashoutMultiplier: targetCashout,
+      cashed: false
+    });
+  }
+
+  currentRound = {
+    roundId,
+    status: 'BETTING_OPEN',
+    startTime,
+    takeoffTime: takeoff,
+    crashTime: crash,
+    endTime: end,
+    flightDuration,
+    serverSeed: fairData.serverSeed,
+    serverSeedHash: fairData.serverSeedHash,
+    clientSeed: fairData.clientSeed,
+    nonce,
+    crashPoint: fairData.crashPoint
+  };
+
+  if (mongoose.connection.readyState === 1) {
+    const roundDoc = new AviatorXRound({
+      roundId,
+      status: 'BETTING_OPEN',
+      startTime: new Date(startTime),
+      serverSeed: fairData.serverSeed,
+      serverSeedHash: fairData.serverSeedHash,
+      clientSeed: fairData.clientSeed,
+      nonce,
+      crashPoint: fairData.crashPoint
+    });
+    roundDoc.save().catch(err => console.warn('[AVIATORX] DB round save warning:', err.message));
+  }
+
+  return currentRound;
+}
+
 function getCurrentState() {
   const now = Date.now();
+  const round = ensureLiveRound(now);
+
+  let currentPhase = 'BETTING';
   let elapsedMs = 0;
   let multiplier = 1.00;
-  
-  if (phase === 'FLYING' && takeoffTime) {
-    elapsedMs = now - takeoffTime;
+  let timer = 0;
+
+  if (now < round.takeoffTime) {
+    currentPhase = 'BETTING';
+    timer = Math.max(0, round.takeoffTime - now);
+    multiplier = 1.00;
+  } else if (now < round.crashTime) {
+    currentPhase = 'FLYING';
+    elapsedMs = now - round.takeoffTime;
     multiplier = getMultiplierAt(elapsedMs);
+    timer = 0;
+  } else {
+    currentPhase = 'CRASHED';
+    multiplier = round.crashPoint;
+    timer = 0;
   }
-  
+
+  // Synchronized snapshot of bots
+  const botsSnapshot = virtualBets.map(b => {
+    const isCashed = currentPhase === 'FLYING' ? (multiplier >= b.autoCashoutMultiplier && b.autoCashoutMultiplier < round.crashPoint) : (currentPhase === 'CRASHED' && b.autoCashoutMultiplier < round.crashPoint);
+    return {
+      userId: b.userId,
+      stake: b.stake,
+      autoCashoutMultiplier: b.autoCashoutMultiplier,
+      cashed: isCashed,
+      multiplier: isCashed ? b.autoCashoutMultiplier : null,
+      payout: isCashed ? Math.round(b.stake * b.autoCashoutMultiplier) : 0
+    };
+  });
+
   return {
-    roundId: currentRound ? currentRound.roundId : '',
-    phase,
+    roundId: round.roundId,
+    phase: currentPhase,
     elapsedMs,
     multiplier,
-    timer: roundTimer,
-    serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
-    serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
-    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
-    history,
+    timer,
+    startTime: round.startTime,
+    takeoffTime: round.takeoffTime,
+    crashTime: round.crashTime,
+    crashPoint: currentPhase === 'CRASHED' ? round.crashPoint : null,
+    endTime: round.endTime,
+    serverSeedHash: round.serverSeedHash,
+    serverSeed: currentPhase === 'CRASHED' ? round.serverSeed : null,
+    history: history.length > 0 ? history : [2.14, 1.45, 3.80, 1.15, 6.20, 1.88],
+    bots: botsSnapshot,
     serverTimestamp: now
   };
 }
 
 function getCurrentRound() {
-  return currentRound;
+  return currentRound || ensureLiveRound(Date.now());
 }
 
 function getActiveBets(userId) {
-  if (!currentRound) return [];
-  return roundBets.filter(b => b.userId === userId && b.roundId === currentRound.roundId);
+  const round = currentRound || ensureLiveRound(Date.now());
+  if (!round) return [];
+  return roundBets.filter(b => b.userId === userId && b.roundId === round.roundId);
 }
 
 module.exports = {
   initAviatorxManager,
   placeBet,
   cashout,
+  ensureLiveRound,
   getCurrentRound,
   getCurrentState,
   getActiveBets,

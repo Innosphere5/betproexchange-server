@@ -24,6 +24,17 @@ router.post('/bet', auth, async (req, res) => {
   }
 });
 
+// Fetch live state for Serverless / REST fallback
+router.get('/state', (req, res) => {
+  try {
+    const state = teenPattiManager.getCurrentState();
+    res.json(state);
+  } catch (err) {
+    console.error('[API TEENPATTI] Get state failed:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Fetch active bets for reconnection/page-reload flows
 router.get('/active-bets', auth, async (req, res) => {
   try {

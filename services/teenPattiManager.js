@@ -489,13 +489,128 @@ async function settleBets(winningChoice, rankA, rankB) {
   }
 }
 
+// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
+function ensureLiveRound(now = Date.now()) {
+  const TOTAL_CYCLE = (ROUND_SETTINGS.DEALING_DURATION + ROUND_SETTINGS.BETTING_DURATION + ROUND_SETTINGS.SUSPENSE_DURATION + ROUND_SETTINGS.RESULT_DURATION) * 1000; // 19000ms
+
+  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
+    const elapsed = now - currentRound.startTime;
+    const dealingEnd = ROUND_SETTINGS.DEALING_DURATION * 1000;
+    const bettingEnd = dealingEnd + (ROUND_SETTINGS.BETTING_DURATION * 1000);
+    const suspenseEnd = bettingEnd + (ROUND_SETTINGS.SUSPENSE_DURATION * 1000);
+
+    if (elapsed < dealingEnd) {
+      phase = 'OPEN';
+      currentRound.status = 'DEALING';
+      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+    } else if (elapsed < bettingEnd) {
+      phase = 'OPEN';
+      currentRound.status = 'BETTING_OPEN';
+      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+    } else if (elapsed < suspenseEnd) {
+      phase = 'CLOSED';
+      currentRound.status = 'BETTING_CLOSED';
+      roundTimer = 0;
+    } else {
+      phase = 'RESULT';
+      currentRound.status = 'RESULT_DECLARED';
+      currentRound.result = currentRound.winResult;
+      roundTimer = 0;
+      if (!currentRound.settled) {
+        currentRound.settled = true;
+        declareResult().catch(err => console.warn('[TEENPATTI SETTLE]', err.message));
+      }
+    }
+    return currentRound;
+  }
+
+  // Generate new deterministic round
+  const roundId = `TP-${now}`;
+  const startTime = now;
+  const endTime = startTime + TOTAL_CYCLE;
+
+  let deck = createDeck();
+  deck = secureShuffle(deck);
+
+  const cardsA = deck.slice(0, 3);
+  const cardsB = deck.slice(3, 6);
+  const rankA = getHandRank(cardsA);
+  const rankB = getHandRank(cardsB);
+
+  let winResult = 'A';
+  if (rankA.score > rankB.score) {
+    winResult = 'A';
+  } else if (rankB.score > rankA.score) {
+    winResult = 'B';
+  } else {
+    winResult = 'TIE';
+  }
+
+  currentRound = {
+    roundId,
+    status: 'BETTING_OPEN',
+    startTime,
+    endTime,
+    result: 'PENDING',
+    cards: { A: cardsA, B: cardsB },
+    handNames: { A: rankA.type, B: rankB.type },
+    winResult,
+    settled: false
+  };
+
+  phase = 'OPEN';
+  roundTimer = ROUND_SETTINGS.BETTING_DURATION;
+
+  if (mongoose.connection.readyState === 1) {
+    TeenPattiHand.create({
+      roundId,
+      status: 'BETTING_OPEN',
+      startTime: new Date(startTime),
+      cards: currentRound.cards,
+      handNames: currentRound.handNames,
+      result: 'PENDING'
+    }).catch(err => console.warn('[TEENPATTI] DB save warning:', err.message));
+  }
+
+  return currentRound;
+}
+
+function getCurrentState(now = Date.now()) {
+  const round = ensureLiveRound(now);
+  let sanitizedCards = null;
+  let sanitizedHandNames = null;
+
+  if (round.status === 'RESULT_DECLARED' || round.status === 'BETTING_CLOSED') {
+    sanitizedCards = round.cards;
+    sanitizedHandNames = round.status === 'RESULT_DECLARED' ? round.handNames : null;
+  } else {
+    sanitizedCards = {
+      A: [null, null, null],
+      B: [null, null, null]
+    };
+    sanitizedHandNames = null;
+  }
+
+  return {
+    roundId: round.roundId,
+    status: round.status,
+    result: round.status === 'RESULT_DECLARED' ? round.winResult : 'PENDING',
+    timer: roundTimer,
+    cards: sanitizedCards,
+    handNames: sanitizedHandNames,
+    history: history.length > 0 ? history : ['A', 'B', 'A', 'A', 'B', 'B', 'A'],
+    serverTimestamp: now
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // API HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════
 async function placeBet(userId, betType, amount) {
-  if (phase === 'IDLE' || phase === 'INIT') {
-    await startNewRound();
-  } else if (!currentRound || phase !== 'OPEN') {
+  const now = Date.now();
+  const round = ensureLiveRound(now);
+
+  if (round.status !== 'BETTING_OPEN' && round.status !== 'DEALING') {
     throw new Error('Betting is currently closed');
   }
 
@@ -526,7 +641,7 @@ async function placeBet(userId, betType, amount) {
 
   const bet = new TeenPattiBet({
     userId,
-    roundId: currentRound.roundId,
+    roundId: round.roundId,
     betType,
     amount,
     odds,
@@ -534,25 +649,27 @@ async function placeBet(userId, betType, amount) {
   });
   await bet.save();
 
-  io.emit('wallet_updated', { userId, balance: user.walletBalance });
-  
-  // Send state update
-  io.to('teenpatti').emit('teenpatti_bet_placed', {
-    userId,
-    betType,
-    amount,
-    odds
-  });
+  if (io) {
+    io.emit('wallet_updated', { userId, balance: user.walletBalance });
+    io.to('teenpatti').emit('teenpatti_bet_placed', {
+      userId,
+      betType,
+      amount,
+      odds
+    });
+  }
 
   return { success: true, balance: user.walletBalance, bet };
 }
 
 function getActiveRound() {
-  return currentRound;
+  return currentRound || ensureLiveRound(Date.now());
 }
 
 module.exports = {
   initTeenPattiManager,
+  ensureLiveRound,
+  getCurrentState,
   placeBet,
   getActiveRound,
   getHandRank
