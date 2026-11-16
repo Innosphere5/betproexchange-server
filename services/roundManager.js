@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const CasinoRound = require('../models/CasinoRound');
 const CasinoBet = require('../models/CasinoBet');
