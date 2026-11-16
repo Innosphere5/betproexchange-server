@@ -18,6 +18,15 @@ let history = [];
 let roundBets = []; // In-memory real player bets for current round
 const activePlayers = new Set();
 
+// Bot player list to simulate multiplayer traffic
+const BOT_NAMES = [
+  'JackpotKing', 'LuckyStriker', 'AeroGamer', 'NovaCrash', 'Spitfire', 
+  'HyperDrive', 'AlphaJet', 'LunaCrasher', 'RiskTaker', 'GoldDigger', 
+  'Zenith', 'CryptoRocket', 'BlitzBets', 'Nebula', 'MaxProfit'
+];
+
+let virtualBets = []; // Holds fake bots active in the current round
+
 const BETTING_DURATION = 6000; // 6 seconds betting window
 const CRASHED_DURATION = 3000; // 3 seconds show crash window
 
