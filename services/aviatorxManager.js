@@ -100,10 +100,22 @@ function broadcastState() {
     elapsedMs,
     multiplier,
     timer: roundTimer,
+    startTime: currentRound ? currentRound.startTime : null,
+    takeoffTime: currentRound ? currentRound.takeoffTime : takeoffTime,
+    crashTime: currentRound ? currentRound.crashTime : crashTime,
+    endTime: currentRound ? currentRound.endTime : null,
+    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
     serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
     serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
-    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
     history,
+    bots: virtualBets.map(b => ({
+      userId: b.userId,
+      stake: b.stake,
+      autoCashoutMultiplier: b.autoCashoutMultiplier,
+      cashed: Boolean(b.cashed),
+      multiplier: b.cashed ? b.autoCashoutMultiplier : null,
+      payout: b.cashed ? Math.round(b.stake * b.autoCashoutMultiplier) : 0
+    })),
     serverTimestamp: now
   });
 }
@@ -187,34 +199,90 @@ async function startBettingPhase() {
     phase = 'BETTING';
     roundTimer = BETTING_DURATION;
     roundBets = []; // Reset in-memory bets for new round
+    virtualBets = [];
     
     const nonce = Date.now();
     const fairData = generateProvablyFairRound(nonce);
-    const roundId = `AVX-${Date.now()}`;
+    const startTime = Date.now();
+    const roundId = `AVX-${startTime}`;
+    const takeoff = startTime + BETTING_DURATION;
+    const flightDuration = getMsForMultiplier(fairData.crashPoint);
+    const crash = takeoff + flightDuration;
+    const end = crash + CRASHED_DURATION;
 
-    const roundDoc = new AviatorXRound({
+    takeoffTime = takeoff;
+    crashTime = crash;
+
+    currentRound = {
       roundId,
       status: 'BETTING_OPEN',
+      startTime,
+      takeoffTime: takeoff,
+      crashTime: crash,
+      endTime: end,
+      flightDuration,
       serverSeed: fairData.serverSeed,
       serverSeedHash: fairData.serverSeedHash,
       clientSeed: fairData.clientSeed,
       nonce,
       crashPoint: fairData.crashPoint
-    });
-    
-    currentRound = roundDoc;
-    roundDoc.save().catch(err => console.warn('[AVIATORX] DB save warning:', err.message));
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      const roundDoc = new AviatorXRound({
+        roundId,
+        status: 'BETTING_OPEN',
+        startTime: new Date(startTime),
+        serverSeed: fairData.serverSeed,
+        serverSeedHash: fairData.serverSeedHash,
+        clientSeed: fairData.clientSeed,
+        nonce,
+        crashPoint: fairData.crashPoint
+      });
+      roundDoc.save().catch(err => console.warn('[AVIATORX] DB save warning:', err.message));
+    }
     console.log(`[AVIATORX] New round: ${roundId} | CrashPoint: ${fairData.crashPoint} | Commit: ${fairData.serverSeedHash}`);
+
+    // Generate random bots placing bets in AviatorX
+    const botCount = Math.floor(Math.random() * 8) + 4; // 4 to 12 bots
+    for (let i = 0; i < botCount; i++) {
+      const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)] + Math.floor(Math.random() * 900 + 100);
+      const stake = Math.floor(Math.random() * 1500) + 100;
+      const targetCashout = parseFloat((Math.random() * 4 + 1.2).toFixed(2));
+      virtualBets.push({
+        userId: name,
+        stake,
+        autoCashoutMultiplier: targetCashout,
+        cashed: false
+      });
+    }
 
     // Immediately broadcast BETTING state so all clients start 6.0s countdown
     broadcastState();
 
     const startTimestamp = Date.now();
+    let botBetTriggerTime = 800;
+
     timerInterval = setInterval(() => {
       const elapsed = Date.now() - startTimestamp;
       roundTimer = Math.max(0, BETTING_DURATION - elapsed);
       broadcastState();
       
+      // Simulate bots placing bets periodically during countdown
+      if (elapsed > botBetTriggerTime && virtualBets.length > 0) {
+        const nextBotIndex = virtualBets.findIndex(b => !b.activeEmit);
+        if (nextBotIndex !== -1) {
+          virtualBets[nextBotIndex].activeEmit = true;
+          io.to('aviatorx').emit('aviatorx_bet_placed', {
+            userId: virtualBets[nextBotIndex].userId,
+            betSlot: 1,
+            stake: virtualBets[nextBotIndex].stake,
+            autoCashoutMultiplier: virtualBets[nextBotIndex].autoCashoutMultiplier
+          });
+        }
+        botBetTriggerTime += Math.floor(Math.random() * 800) + 400;
+      }
+
       if (roundTimer <= 0) {
         clearInterval(timerInterval);
         timerInterval = null;
@@ -294,6 +362,18 @@ async function startFlyingPhase() {
             bet.cashed = true;
             bet.status = 'WON';
             processAutoCashout(bet, bet.autoCashoutMultiplier);
+          }
+        }
+
+        // Simulate bots auto-cashouts in AviatorX
+        for (const b of virtualBets) {
+          if (!b.cashed && currentMultiplier >= b.autoCashoutMultiplier && b.autoCashoutMultiplier < crashPoint) {
+            b.cashed = true;
+            io.to('aviatorx').emit('aviatorx_cashout_success', {
+              userId: b.userId,
+              multiplier: b.autoCashoutMultiplier,
+              payout: Math.round(b.stake * b.autoCashoutMultiplier)
+            });
           }
         }
 
@@ -669,7 +749,7 @@ function ensureLiveRound(now = Date.now()) {
 
   const nonce = now;
   const fairData = generateProvablyFairRound(nonce);
-  const roundId = `AX-${now}`;
+  const roundId = `AVX-${now}`;
   const startTime = now;
   const takeoff = startTime + BETTING_DURATION; // 6000ms
   const flightDuration = getMsForMultiplier(fairData.crashPoint);

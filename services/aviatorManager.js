@@ -114,10 +114,22 @@ function broadcastState() {
     elapsedMs,
     multiplier,
     timer: roundTimer,
+    startTime: currentRound ? currentRound.startTime : null,
+    takeoffTime: currentRound ? currentRound.takeoffTime : takeoffTime,
+    crashTime: currentRound ? currentRound.crashTime : crashTime,
+    endTime: currentRound ? currentRound.endTime : null,
+    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
     serverSeedHash: currentRound ? currentRound.serverSeedHash : '',
     serverSeed: (currentRound && phase === 'CRASHED') ? currentRound.serverSeed : null,
-    crashPoint: (currentRound && phase === 'CRASHED') ? currentRound.crashPoint : null,
     history,
+    bots: virtualBets.map(b => ({
+      userId: b.userId,
+      stake: b.stake,
+      autoCashoutMultiplier: b.autoCashoutMultiplier,
+      cashed: Boolean(b.cashed),
+      multiplier: b.cashed ? b.autoCashoutMultiplier : null,
+      payout: b.cashed ? Math.round(b.stake * b.autoCashoutMultiplier) : 0
+    })),
     serverTimestamp: now
   });
 }
@@ -205,20 +217,44 @@ async function startBettingPhase() {
     
     const nonce = Date.now();
     const fairData = generateProvablyFairRound(nonce);
-    const roundId = `AV-${Date.now()}`;
+    const startTime = Date.now();
+    const roundId = `AV-${startTime}`;
+    const takeoff = startTime + BETTING_DURATION;
+    const flightDuration = getMsForMultiplier(fairData.crashPoint);
+    const crash = takeoff + flightDuration;
+    const end = crash + CRASHED_DURATION;
 
-    const roundDoc = new AviatorRound({
+    takeoffTime = takeoff;
+    crashTime = crash;
+
+    currentRound = {
       roundId,
       status: 'BETTING_OPEN',
+      startTime,
+      takeoffTime: takeoff,
+      crashTime: crash,
+      endTime: end,
+      flightDuration,
       serverSeed: fairData.serverSeed,
       serverSeedHash: fairData.serverSeedHash,
       clientSeed: fairData.clientSeed,
       nonce,
       crashPoint: fairData.crashPoint
-    });
-    
-    currentRound = roundDoc;
-    roundDoc.save().catch(err => console.warn('[AVIATOR] DB save warning:', err.message));
+    };
+
+    if (mongoose.connection.readyState === 1) {
+      const roundDoc = new AviatorRound({
+        roundId,
+        status: 'BETTING_OPEN',
+        startTime: new Date(startTime),
+        serverSeed: fairData.serverSeed,
+        serverSeedHash: fairData.serverSeedHash,
+        clientSeed: fairData.clientSeed,
+        nonce,
+        crashPoint: fairData.crashPoint
+      });
+      roundDoc.save().catch(err => console.warn('[AVIATOR] DB save warning:', err.message));
+    }
     console.log(`[AVIATOR] New round: ${roundId} | CrashPoint: ${fairData.crashPoint}`);
 
     // Immediately broadcast BETTING countdown state to room

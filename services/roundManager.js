@@ -96,7 +96,10 @@ function broadcastState() {
     result: currentRound.status === 'RESULT_DECLARED' ? currentRound.result : 'PENDING',
     timer: roundTimer,
     cards: sanitizedCards,
-    handNames: sanitizedHandNames
+    handNames: sanitizedHandNames,
+    startTime: currentRound.startTime,
+    endTime: currentRound.endTime,
+    serverTimestamp: Date.now()
   });
 }
 
@@ -166,9 +169,15 @@ async function startNewRound() {
 
     const winResult = rankA.score > rankB.score ? 'A' : 'B';
 
+    const startTime = Date.now();
+    const TOTAL_CYCLE = (TIMINGS.DEALING_DURATION + TIMINGS.BETTING_DURATION + TIMINGS.REVEAL_DURATION + TIMINGS.RESULT_DURATION) * 1000;
+    const endTime = startTime + TOTAL_CYCLE;
+
     currentRound = {
       roundId,
       status: 'DEALING',
+      startTime,
+      endTime,
       result: 'PENDING',
       cards: { A: cardsA, B: cardsB },
       handNames: { A: rankA.type, B: rankB.type },

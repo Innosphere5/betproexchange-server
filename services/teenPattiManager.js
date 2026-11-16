@@ -137,7 +137,10 @@ function broadcastState() {
     timer: roundTimer,
     cards: sanitizedCards,
     handNames: sanitizedHandNames,
-    history
+    history,
+    startTime: currentRound.startTime,
+    endTime: currentRound.endTime,
+    serverTimestamp: Date.now()
   });
 }
 
@@ -251,9 +254,15 @@ async function startNewRound() {
     } while (rankA.score === rankB.score);
 
     const roundId = `TP-${Date.now()}`;
+    const startTime = Date.now();
+    const TOTAL_CYCLE = (ROUND_SETTINGS.DEALING_DURATION + ROUND_SETTINGS.BETTING_DURATION + ROUND_SETTINGS.SUSPENSE_DURATION + ROUND_SETTINGS.RESULT_DURATION) * 1000;
+    const endTime = startTime + TOTAL_CYCLE;
+
     currentRound = {
       roundId,
       status: 'DEALING',
+      startTime,
+      endTime,
       result: 'PENDING',
       cards: { A: cardsA, B: cardsB },
       handNames: { A: rankA.type, B: rankB.type }
