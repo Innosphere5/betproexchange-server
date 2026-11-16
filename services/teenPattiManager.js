@@ -498,16 +498,44 @@ async function settleBets(winningChoice, rankA, rankB) {
   }
 }
 
+function drawDeterministicTeenPattiCards(roundId) {
+  const deck = createDeck();
+  const hash = crypto.createHmac('sha256', 'betpro-teenpatti-provably-fair').update(roundId).digest('hex');
+  for (let i = deck.length - 1; i > 0; i--) {
+    const chunk = parseInt(hash.substring((i * 4) % (hash.length - 4), (i * 4) % (hash.length - 4) + 4), 16);
+    const j = chunk % (i + 1);
+    const temp = deck[i];
+    deck[i] = deck[j];
+    deck[j] = temp;
+  }
+
+  let cardsA = deck.slice(0, 3);
+  let cardsB = deck.slice(3, 6);
+  let rankA = getHandRank(cardsA);
+  let rankB = getHandRank(cardsB);
+
+  if (rankA.score === rankB.score) {
+    cardsB = [deck[3], deck[4], deck[6]];
+    rankB = getHandRank(cardsB);
+  }
+
+  return { cardsA, cardsB, rankA, rankB };
+}
+
 // ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
 function ensureLiveRound(now = Date.now()) {
   const TOTAL_CYCLE = (ROUND_SETTINGS.DEALING_DURATION + ROUND_SETTINGS.BETTING_DURATION + ROUND_SETTINGS.SUSPENSE_DURATION + ROUND_SETTINGS.RESULT_DURATION) * 1000; // 19000ms
+  const cycleIndex = Math.floor(now / TOTAL_CYCLE);
+  const startTime = cycleIndex * TOTAL_CYCLE;
+  const endTime = startTime + TOTAL_CYCLE;
+  const roundId = `TP-${startTime}`;
 
-  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
-    const elapsed = now - currentRound.startTime;
-    const dealingEnd = ROUND_SETTINGS.DEALING_DURATION * 1000;
-    const bettingEnd = dealingEnd + (ROUND_SETTINGS.BETTING_DURATION * 1000);
-    const suspenseEnd = bettingEnd + (ROUND_SETTINGS.SUSPENSE_DURATION * 1000);
+  const elapsed = now - startTime;
+  const dealingEnd = ROUND_SETTINGS.DEALING_DURATION * 1000;
+  const bettingEnd = dealingEnd + (ROUND_SETTINGS.BETTING_DURATION * 1000);
+  const suspenseEnd = bettingEnd + (ROUND_SETTINGS.SUSPENSE_DURATION * 1000);
 
+  if (currentRound && currentRound.roundId === roundId) {
     if (elapsed < dealingEnd) {
       phase = 'OPEN';
       currentRound.status = 'DEALING';
@@ -533,52 +561,59 @@ function ensureLiveRound(now = Date.now()) {
     return currentRound;
   }
 
-  // Generate new deterministic round
-  const roundId = `TP-${now}`;
-  const startTime = now;
-  const endTime = startTime + TOTAL_CYCLE;
+  const { cardsA, cardsB, rankA, rankB } = drawDeterministicTeenPattiCards(roundId);
+  const winResult = rankA.score > rankB.score ? 'A' : rankB.score > rankA.score ? 'B' : 'TIE';
 
-  let deck = createDeck();
-  deck = secureShuffle(deck);
+  let currentPhase = 'OPEN';
+  let currentStatus = 'BETTING_OPEN';
+  let timer = 0;
 
-  const cardsA = deck.slice(0, 3);
-  const cardsB = deck.slice(3, 6);
-  const rankA = getHandRank(cardsA);
-  const rankB = getHandRank(cardsB);
-
-  let winResult = 'A';
-  if (rankA.score > rankB.score) {
-    winResult = 'A';
-  } else if (rankB.score > rankA.score) {
-    winResult = 'B';
+  if (elapsed < dealingEnd) {
+    currentPhase = 'OPEN';
+    currentStatus = 'DEALING';
+    timer = Math.ceil((bettingEnd - elapsed) / 1000);
+  } else if (elapsed < bettingEnd) {
+    currentPhase = 'OPEN';
+    currentStatus = 'BETTING_OPEN';
+    timer = Math.ceil((bettingEnd - elapsed) / 1000);
+  } else if (elapsed < suspenseEnd) {
+    currentPhase = 'CLOSED';
+    currentStatus = 'BETTING_CLOSED';
+    timer = 0;
   } else {
-    winResult = 'TIE';
+    currentPhase = 'RESULT';
+    currentStatus = 'RESULT_DECLARED';
+    timer = 0;
   }
 
   currentRound = {
     roundId,
-    status: 'BETTING_OPEN',
+    status: currentStatus,
     startTime,
     endTime,
-    result: 'PENDING',
+    result: currentStatus === 'RESULT_DECLARED' ? winResult : 'PENDING',
     cards: { A: cardsA, B: cardsB },
     handNames: { A: rankA.type, B: rankB.type },
     winResult,
-    settled: false
+    settled: currentStatus === 'RESULT_DECLARED'
   };
 
-  phase = 'OPEN';
-  roundTimer = ROUND_SETTINGS.BETTING_DURATION;
+  phase = currentPhase;
+  roundTimer = timer;
 
   if (mongoose.connection.readyState === 1) {
-    TeenPattiHand.create({
-      roundId,
-      status: 'BETTING_OPEN',
-      startTime: new Date(startTime),
-      cards: currentRound.cards,
-      handNames: currentRound.handNames,
-      result: 'PENDING'
-    }).catch(err => console.warn('[TEENPATTI] DB save warning:', err.message));
+    TeenPattiHand.findOne({ roundId }).then(doc => {
+      if (!doc) {
+        TeenPattiHand.create({
+          roundId,
+          status: currentRound.status,
+          startTime: new Date(startTime),
+          cards: currentRound.cards,
+          handNames: currentRound.handNames,
+          result: currentRound.result
+        }).catch(() => {});
+      }
+    }).catch(() => {});
   }
 
   return currentRound;

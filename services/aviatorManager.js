@@ -728,10 +728,35 @@ async function cashout(userId, betSlot) {
   };
 }
 
-// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
-function ensureLiveRound(now = Date.now()) {
-  // If currentRound exists and hasn't reached its complete cycle (endTime)
-  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
+// Deterministic Provably Fair Continuous Timeline Engine for Serverless Environments
+function getDeterministicBots(roundId) {
+  const bots = [];
+  const hash = crypto.createHash('md5').update(`bots-${roundId}`).digest('hex');
+  const count = (parseInt(hash.substring(0, 2), 16) % 8) + 5; // 5 to 12 bots
+  for (let i = 0; i < count; i++) {
+    const subHash = crypto.createHash('md5').update(`bot-${roundId}-${i}`).digest('hex');
+    const nameIdx = parseInt(subHash.substring(0, 2), 16) % BOT_NAMES.length;
+    const name = BOT_NAMES[nameIdx] + '***';
+    const stake = (parseInt(subHash.substring(2, 6), 16) % 190 + 10) * 10;
+    const rawTarget = 1.1 + (parseInt(subHash.substring(6, 10), 16) % 400) / 100;
+    const autoCashoutMultiplier = parseFloat(rawTarget.toFixed(2));
+    bots.push({
+      userId: name,
+      stake,
+      autoCashoutMultiplier,
+      cashed: false
+    });
+  }
+  return bots;
+}
+
+function getDeterministicRound(now = Date.now()) {
+  const DAY_MS = 86400000;
+  const dayAnchor = Math.floor(now / DAY_MS) * DAY_MS;
+  const SECRET_SALT = 'betpro-aviator-provably-fair-v2';
+
+  // Fast L1 cache: if currentRound is already set in memory and valid for `now`
+  if (currentRound && currentRound.endTime && now >= currentRound.startTime && now < currentRound.endTime) {
     if (now < currentRound.takeoffTime) {
       phase = 'BETTING';
       roundTimer = Math.max(0, currentRound.takeoffTime - now);
@@ -748,84 +773,102 @@ function ensureLiveRound(now = Date.now()) {
     return currentRound;
   }
 
-  // Current round has expired or does not exist yet. Settle old round and advance:
-  if (currentRound && currentRound.crashPoint) {
-    if (!history.includes(currentRound.crashPoint)) {
-      history.push(currentRound.crashPoint);
-      if (history.length > 30) history.shift();
+  let t = dayAnchor;
+  let idx = 0;
+
+  while (t <= now) {
+    const hmac = crypto.createHmac('sha256', SECRET_SALT)
+                       .update(`${dayAnchor}-${idx}`)
+                       .digest('hex');
+    const h = parseInt(hmac.substring(0, 13), 16);
+    const e = Math.pow(2, 52);
+
+    let crashPoint;
+    if (h % 28 === 0) {
+      crashPoint = 1.00;
+    } else {
+      crashPoint = Math.floor((100 * e - h) / (e - h)) / 100;
     }
-    if (mongoose.connection.readyState === 1) {
-      AviatorBet.updateMany(
-        { roundId: currentRound.roundId, status: 'PENDING' },
-        { status: 'LOST' }
-      ).catch(() => {});
+    crashPoint = Math.max(1.00, Math.min(1000, parseFloat(crashPoint.toFixed(2))));
+
+    const flightMs = getMsForMultiplier(crashPoint);
+    const roundDuration = 6000 + flightMs + 3000; // 6s betting + flight + 3s crash
+
+    if (t + roundDuration > now) {
+      const startTime = t;
+      const takeoff = startTime + 6000;
+      const crash = takeoff + flightMs;
+      const end = crash + 3000;
+
+      const roundId = `AV-${Math.round(startTime)}`;
+
+      // Deterministic bot bets seeded by roundId
+      const bots = getDeterministicBots(roundId);
+
+      currentRound = {
+        roundId,
+        index: idx,
+        status: now < takeoff ? 'BETTING_OPEN' : now < crash ? 'FLYING' : 'CRASHED',
+        startTime,
+        takeoffTime: takeoff,
+        crashTime: crash,
+        endTime: end,
+        flightDuration: flightMs,
+        serverSeed: hmac,
+        serverSeedHash: crypto.createHash('sha256').update(hmac).digest('hex'),
+        clientSeed: 'betproexchange',
+        nonce: idx,
+        crashPoint,
+        bots
+      };
+
+      takeoffTime = takeoff;
+      crashTime = crash;
+      virtualBets = bots;
+
+      if (now < takeoff) {
+        phase = 'BETTING';
+        roundTimer = Math.max(0, takeoff - now);
+      } else if (now < crash) {
+        phase = 'FLYING';
+        roundTimer = 0;
+      } else {
+        phase = 'CRASHED';
+        roundTimer = 0;
+      }
+
+      if (mongoose.connection.readyState === 1) {
+        AviatorRound.findOne({ roundId }).then(doc => {
+          if (!doc) {
+            new AviatorRound({
+              roundId,
+              status: currentRound.status,
+              startTime: new Date(startTime),
+              endTime: new Date(end),
+              serverSeed: hmac,
+              serverSeedHash: currentRound.serverSeedHash,
+              clientSeed: 'betproexchange',
+              nonce: idx,
+              crashPoint
+            }).save().catch(() => {});
+          }
+        }).catch(() => {});
+      }
+
+      return currentRound;
     }
+
+    t += roundDuration;
+    idx++;
   }
-
-  const nonce = now;
-  const fairData = generateProvablyFairRound(nonce);
-  const roundId = `AV-${now}`;
-  const startTime = now;
-  const takeoff = startTime + BETTING_DURATION; // 6000ms betting window
-  const flightDuration = getMsForMultiplier(fairData.crashPoint);
-  const crash = takeoff + flightDuration;
-  const end = crash + CRASHED_DURATION; // 3000ms crash display
-
-  takeoffTime = takeoff;
-  crashTime = crash;
-  phase = 'BETTING';
-  roundTimer = BETTING_DURATION;
-  virtualBets = [];
-  roundBets = [];
-
-  // Generate realistic bot bets for social atmosphere
-  const botCount = Math.floor(Math.random() * 8) + 4;
-  for (let i = 0; i < botCount; i++) {
-    const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)] + Math.floor(Math.random() * 900 + 100);
-    const stake = Math.floor(Math.random() * 1500) + 100;
-    const targetCashout = parseFloat((Math.random() * 4 + 1.2).toFixed(2));
-    virtualBets.push({
-      userId: name,
-      stake,
-      autoCashoutMultiplier: targetCashout,
-      cashed: false
-    });
-  }
-
-  currentRound = {
-    roundId,
-    status: 'BETTING_OPEN',
-    startTime,
-    takeoffTime: takeoff,
-    crashTime: crash,
-    endTime: end,
-    flightDuration,
-    serverSeed: fairData.serverSeed,
-    serverSeedHash: fairData.serverSeedHash,
-    clientSeed: fairData.clientSeed,
-    nonce,
-    crashPoint: fairData.crashPoint
-  };
-
-  if (mongoose.connection.readyState === 1) {
-    const roundDoc = new AviatorRound({
-      roundId,
-      status: 'BETTING_OPEN',
-      startTime: new Date(startTime),
-      serverSeed: fairData.serverSeed,
-      serverSeedHash: fairData.serverSeedHash,
-      clientSeed: fairData.clientSeed,
-      nonce,
-      crashPoint: fairData.crashPoint
-    });
-    roundDoc.save().catch(err => console.warn('[AVIATOR] DB round save warning:', err.message));
-  }
-
-  return currentRound;
 }
 
-function getCurrentState() {
-  const now = Date.now();
+// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
+function ensureLiveRound(now = Date.now()) {
+  return getDeterministicRound(now);
+}
+
+function getCurrentState(now = Date.now()) {
   const round = ensureLiveRound(now);
 
   let currentPhase = 'BETTING';
@@ -849,7 +892,7 @@ function getCurrentState() {
   }
 
   // Synchronized snapshot of bots
-  const botsSnapshot = virtualBets.map(b => {
+  const botsSnapshot = (round.bots || virtualBets || []).map(b => {
     const isCashed = currentPhase === 'FLYING' ? (multiplier >= b.autoCashoutMultiplier && b.autoCashoutMultiplier < round.crashPoint) : (currentPhase === 'CRASHED' && b.autoCashoutMultiplier < round.crashPoint);
     return {
       userId: b.userId,

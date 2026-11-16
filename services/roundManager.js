@@ -381,16 +381,52 @@ async function declareResult() {
   }
 }
 
+function drawDeterministicCasinoCards(roundId) {
+  const fullDeck = [];
+  for (const s of SUITS) {
+    for (let i = 0; i < VALUES.length; i++) {
+      fullDeck.push({ value: VALUES[i], suit: s, rank: i });
+    }
+  }
+
+  const hash = crypto.createHmac('sha256', 'betpro-casino-provably-fair').update(roundId).digest('hex');
+  const deck = [...fullDeck];
+  for (let i = deck.length - 1; i > 0; i--) {
+    const chunk = parseInt(hash.substring((i * 4) % (hash.length - 4), (i * 4) % (hash.length - 4) + 4), 16);
+    const j = chunk % (i + 1);
+    const temp = deck[i];
+    deck[i] = deck[j];
+    deck[j] = temp;
+  }
+
+  let cardsA = [deck[0], deck[1], deck[2]];
+  let cardsB = [deck[3], deck[4], deck[5]];
+  let rankA = getHandRank(cardsA);
+  let rankB = getHandRank(cardsB);
+
+  // If tie, break tie by replacing one card deterministically
+  if (rankA.score === rankB.score) {
+    cardsB = [deck[3], deck[4], deck[6]];
+    rankB = getHandRank(cardsB);
+  }
+
+  return { cardsA, cardsB, rankA, rankB };
+}
+
 // ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
 function ensureLiveRound(now = Date.now()) {
   const TOTAL_CYCLE = (TIMINGS.DEALING_DURATION + TIMINGS.BETTING_DURATION + TIMINGS.REVEAL_DURATION + TIMINGS.RESULT_DURATION) * 1000; // 19000ms
-  
-  if (currentRound && currentRound.endTime && now < currentRound.endTime) {
-    const elapsed = now - currentRound.startTime;
-    const dealingEnd = TIMINGS.DEALING_DURATION * 1000;
-    const bettingEnd = dealingEnd + (TIMINGS.BETTING_DURATION * 1000);
-    const revealEnd = bettingEnd + (TIMINGS.REVEAL_DURATION * 1000);
+  const cycleIndex = Math.floor(now / TOTAL_CYCLE);
+  const startTime = cycleIndex * TOTAL_CYCLE;
+  const endTime = startTime + TOTAL_CYCLE;
+  const roundId = `RND-${startTime}`;
 
+  const elapsed = now - startTime;
+  const dealingEnd = TIMINGS.DEALING_DURATION * 1000; // 3000ms
+  const bettingEnd = dealingEnd + (TIMINGS.BETTING_DURATION * 1000); // 11000ms
+  const revealEnd = bettingEnd + (TIMINGS.REVEAL_DURATION * 1000); // 15000ms
+  
+  if (currentRound && currentRound.roundId === roundId) {
     if (elapsed < dealingEnd) {
       phase = 'DEALING';
       currentRound.status = 'DEALING';
@@ -416,45 +452,59 @@ function ensureLiveRound(now = Date.now()) {
     return currentRound;
   }
 
-  // Generate new deterministic round
-  const roundId = `RND-${now}`;
-  const startTime = now;
-  const endTime = startTime + TOTAL_CYCLE;
-
-  let cardsA, cardsB, rankA, rankB;
-  do {
-    cardsA = drawCards(3);
-    cardsB = drawCards(3, cardsA);
-    rankA = getHandRank(cardsA);
-    rankB = getHandRank(cardsB);
-  } while (rankA.score === rankB.score);
-
+  const { cardsA, cardsB, rankA, rankB } = drawDeterministicCasinoCards(roundId);
   const winResult = rankA.score > rankB.score ? 'A' : 'B';
+
+  let currentPhase = 'OPEN';
+  let currentStatus = 'BETTING_OPEN';
+  let timer = 0;
+
+  if (elapsed < dealingEnd) {
+    currentPhase = 'DEALING';
+    currentStatus = 'DEALING';
+    timer = Math.ceil((bettingEnd - elapsed) / 1000);
+  } else if (elapsed < bettingEnd) {
+    currentPhase = 'OPEN';
+    currentStatus = 'BETTING_OPEN';
+    timer = Math.ceil((bettingEnd - elapsed) / 1000);
+  } else if (elapsed < revealEnd) {
+    currentPhase = 'CLOSED';
+    currentStatus = 'BETTING_CLOSED';
+    timer = 0;
+  } else {
+    currentPhase = 'RESULT';
+    currentStatus = 'RESULT_DECLARED';
+    timer = 0;
+  }
 
   currentRound = {
     roundId,
-    status: 'BETTING_OPEN',
+    status: currentStatus,
     startTime,
     endTime,
-    result: 'PENDING',
+    result: currentStatus === 'RESULT_DECLARED' ? winResult : 'PENDING',
     cards: { A: cardsA, B: cardsB },
     handNames: { A: rankA.type, B: rankB.type },
     winResult,
-    settled: false
+    settled: currentStatus === 'RESULT_DECLARED'
   };
 
-  phase = 'OPEN';
-  roundTimer = TIMINGS.BETTING_DURATION;
+  phase = currentPhase;
+  roundTimer = timer;
   roundBets = [];
 
   if (mongoose.connection.readyState === 1) {
-    CasinoRound.create({
-      roundId,
-      status: 'BETTING_OPEN',
-      result: 'PENDING',
-      cards: currentRound.cards,
-      handNames: currentRound.handNames
-    }).catch(err => console.warn('[CASINO] DB create warning:', err.message));
+    CasinoRound.findOne({ roundId }).then(doc => {
+      if (!doc) {
+        CasinoRound.create({
+          roundId,
+          status: currentRound.status,
+          result: currentRound.result,
+          cards: currentRound.cards,
+          handNames: currentRound.handNames
+        }).catch(() => {});
+      }
+    }).catch(() => {});
   }
 
   return currentRound;
