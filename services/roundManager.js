@@ -74,15 +74,19 @@ function getHandRank(cards) {
   return { type: 'HIGH CARD', score: ranks[0] * 100 + ranks[1] * 10 + ranks[2] };
 }
 
+let gameTicker = null;
+
 function broadcastState() {
   if (!io || !currentRound) return;
+  const now = Date.now();
+  const round = ensureLiveRound(now);
 
   let sanitizedCards = null;
   let sanitizedHandNames = null;
 
-  if (currentRound.status === 'RESULT_DECLARED' || currentRound.status === 'BETTING_CLOSED') {
-    sanitizedCards = currentRound.cards;
-    sanitizedHandNames = currentRound.status === 'RESULT_DECLARED' ? currentRound.handNames : null;
+  if (round.status === 'RESULT_DECLARED' || round.status === 'BETTING_CLOSED') {
+    sanitizedCards = round.cards;
+    sanitizedHandNames = round.status === 'RESULT_DECLARED' ? round.handNames : null;
   } else {
     sanitizedCards = {
       A: [null, null, null],
@@ -92,226 +96,121 @@ function broadcastState() {
   }
 
   io.emit('casino_state', {
-    roundId: currentRound.roundId,
-    status: currentRound.status,
-    result: currentRound.status === 'RESULT_DECLARED' ? currentRound.result : 'PENDING',
+    roundId: round.roundId,
+    status: round.status,
+    result: round.status === 'RESULT_DECLARED' ? round.result : 'PENDING',
     timer: roundTimer,
     cards: sanitizedCards,
     handNames: sanitizedHandNames,
-    startTime: currentRound.startTime,
-    endTime: currentRound.endTime,
-    serverTimestamp: Date.now()
+    startTime: round.startTime,
+    endTime: round.endTime,
+    history: ['A', 'B', 'A', 'A', 'B', 'B', 'A'],
+    serverTimestamp: now
   });
 }
 
 function initRoundManager(socketIo) {
   io = socketIo;
-  phase = 'IDLE';
+
+  // Single unified 1-second master loop for live WebSocket broadcasts
+  if (!gameTicker) {
+    gameTicker = setInterval(() => {
+      const now = Date.now();
+      const prevStatus = currentRound?.status;
+      const round = ensureLiveRound(now);
+
+      if (prevStatus !== round.status && io) {
+        if (round.status === 'DEALING') {
+          io.emit('casino_round_start', {
+            roundId: round.roundId,
+            status: 'DEALING',
+            result: 'PENDING',
+            cards: { A: [null, null, null], B: [null, null, null] },
+            timer: roundTimer
+          });
+        } else if (round.status === 'BETTING_CLOSED') {
+          io.emit('casino_betting_closed', {
+            roundId: round.roundId,
+            status: 'BETTING_CLOSED',
+            result: 'PENDING',
+            cards: round.cards,
+            timer: roundTimer
+          });
+        }
+      }
+
+      broadcastState();
+    }, 1000);
+    if (gameTicker.unref) gameTicker.unref();
+  }
 
   io.on('connection', (socket) => {
     const handlePlayerReady = () => {
       socket.join('casino');
       activePlayers.add(socket.id);
-
-      if (phase === 'IDLE' || phase === 'INIT' || !timerInterval) {
-        startNewRound();
-      } else if (currentRound) {
-        broadcastState();
-      }
+      broadcastState();
     };
 
     socket.on('join_casino', handlePlayerReady);
     socket.on('casino_ready', handlePlayerReady);
 
-    const handlePlayerLeave = () => {
+    socket.on('leave_casino', () => {
       socket.leave('casino');
       activePlayers.delete(socket.id);
+    });
 
-      if (activePlayers.size === 0 && (phase === 'DEALING' || phase === 'OPEN')) {
-        CasinoBet.countDocuments({ roundId: currentRound?.roundId, status: 'PENDING' })
-          .then(count => {
-            if (count === 0 && activePlayers.size === 0 && (phase === 'DEALING' || phase === 'OPEN')) {
-              clearInterval(timerInterval);
-              phase = 'IDLE';
-              currentRound = null;
-              broadcastState();
-            }
-          })
-          .catch(() => {});
-      }
-    };
-
-    socket.on('leave_casino', handlePlayerLeave);
-    socket.on('disconnect', handlePlayerLeave);
+    socket.on('disconnect', () => {
+      activePlayers.delete(socket.id);
+    });
   });
 }
 
-async function startNewRound() {
-  if (isStartingRound) return;
-  isStartingRound = true;
-
-  if (timerInterval) {
-    clearInterval(timerInterval);
-    timerInterval = null;
-  }
-
-  try {
-    const roundId = `RND-${Date.now()}`;
-    roundBets = []; // Reset in-memory bets for new round
-
-    // 1. Pre-deal cards with tie-break reroll so there's always a decisive winner
-    let cardsA, cardsB, rankA, rankB;
-    do {
-      cardsA = drawCards(3);
-      cardsB = drawCards(3, cardsA);
-      rankA = getHandRank(cardsA);
-      rankB = getHandRank(cardsB);
-    } while (rankA.score === rankB.score);
-
-    const winResult = rankA.score > rankB.score ? 'A' : 'B';
-
-    const startTime = Date.now();
-    const TOTAL_CYCLE = (TIMINGS.DEALING_DURATION + TIMINGS.BETTING_DURATION + TIMINGS.REVEAL_DURATION + TIMINGS.RESULT_DURATION) * 1000;
-    const endTime = startTime + TOTAL_CYCLE;
-
-    currentRound = {
-      roundId,
-      status: 'DEALING',
-      startTime,
-      endTime,
-      result: 'PENDING',
-      cards: { A: cardsA, B: cardsB },
-      handNames: { A: rankA.type, B: rankB.type },
-      winResult
-    };
-
-    // Save round in DB asynchronously
-    CasinoRound.create({
-      roundId,
-      status: 'DEALING',
-      result: 'PENDING',
-      cards: currentRound.cards,
-      handNames: currentRound.handNames
-    }).then(doc => {
-      if (currentRound && currentRound.roundId === roundId) {
-        currentRound._id = doc._id;
-      }
-    }).catch(err => console.warn('[CASINO] DB create warning:', err.message));
-
-    // Phase 1: DEALING (3 seconds card deal animation to A & B)
-    phase = 'DEALING';
-    roundTimer = TIMINGS.DEALING_DURATION;
-    console.log(`[CASINO] Round ${roundId} - Phase 1: DEALING (${roundTimer}s)`);
-
-    io.emit('casino_round_start', {
-      roundId,
-      status: 'DEALING',
-      result: 'PENDING',
-      cards: { A: [null, null, null], B: [null, null, null] },
-      timer: roundTimer
-    });
-    broadcastState();
-
-    timerInterval = setInterval(async () => {
-      roundTimer--;
-      broadcastState();
-
-      if (roundTimer <= 0) {
-        if (phase === 'DEALING') {
-          // Phase 2: BETTING_OPEN (8 seconds user betting window)
-          phase = 'OPEN';
-          roundTimer = TIMINGS.BETTING_DURATION;
-          currentRound.status = 'BETTING_OPEN';
-
-          if (currentRound._id && mongoose.connection.readyState === 1) {
-            CasinoRound.findByIdAndUpdate(currentRound._id, { status: 'BETTING_OPEN' }).catch(() => {});
-          }
-          console.log(`[CASINO] Round ${roundId} - Phase 2: BETTING_OPEN (${roundTimer}s)`);
-          broadcastState();
-
-        } else if (phase === 'OPEN') {
-          // Phase 3: BETTING_CLOSED & REVEALING (4 seconds suspense card flips)
-          phase = 'CLOSED';
-          roundTimer = TIMINGS.REVEAL_DURATION;
-          currentRound.status = 'BETTING_CLOSED';
-
-          if (currentRound._id && mongoose.connection.readyState === 1) {
-            CasinoRound.findByIdAndUpdate(currentRound._id, { status: 'BETTING_CLOSED' }).catch(() => {});
-          }
-          console.log(`[CASINO] Round ${roundId} - Phase 3: BETTING_CLOSED / REVEALING (${roundTimer}s)`);
-          
-          io.emit('casino_betting_closed', {
-            roundId,
-            status: 'BETTING_CLOSED',
-            result: 'PENDING',
-            cards: currentRound.cards,
-            timer: roundTimer
-          });
-          broadcastState();
-
-        } else if (phase === 'CLOSED') {
-          // Phase 4: RESULT_DECLARED & PAYOUT
-          clearInterval(timerInterval);
-          timerInterval = null;
-          phase = 'RESULT';
-          await declareResult();
-        }
-      }
-    }, 1000);
-    if (timerInterval.unref) timerInterval.unref();
-
-  } catch (err) {
-    console.error("[CASINO] Error starting new round", err);
-    setTimeout(() => {
-      isStartingRound = false;
-      startNewRound();
-    }, 5000);
-  } finally {
-    isStartingRound = false;
-  }
-}
-
-async function declareResult() {
-  if (!currentRound || isProcessingResult) return;
+async function settleCasinoBets(round) {
+  if (!round || isProcessingResult) return;
   isProcessingResult = true;
 
   try {
-    const winResult = currentRound.winResult;
-    currentRound.result = winResult;
-    currentRound.status = 'RESULT_DECLARED';
-    roundTimer = TIMINGS.RESULT_DURATION;
+    const winResult = round.winResult;
+    round.result = winResult;
+    round.status = 'RESULT_DECLARED';
 
-    if (currentRound._id && mongoose.connection.readyState === 1) {
-      await CasinoRound.findByIdAndUpdate(currentRound._id, {
-        $set: {
-          result: winResult,
-          cards: currentRound.cards,
-          handNames: currentRound.handNames,
-          status: 'RESULT_DECLARED'
+    if (mongoose.connection.readyState === 1) {
+      await CasinoRound.findOneAndUpdate(
+        { roundId: round.roundId },
+        {
+          $set: {
+            result: winResult,
+            cards: round.cards,
+            handNames: round.handNames,
+            status: 'RESULT_DECLARED'
+          }
         }
-      }).catch(e => console.warn('[CASINO] Result save warning:', e.message));
+      ).catch(() => {});
     }
 
-    console.log(`[CASINO] Round ${currentRound.roundId} result is ${winResult} (${currentRound.handNames?.A} vs ${currentRound.handNames?.B})`);
-    io.emit('casino_result_declared', currentRound);
-    broadcastState();
+    if (io) {
+      io.emit('casino_result_declared', {
+        roundId: round.roundId,
+        status: 'RESULT_DECLARED',
+        result: winResult,
+        cards: round.cards,
+        handNames: round.handNames
+      });
+    }
 
-    // Settle all in-memory bets first
     const betsToSettle = [...roundBets];
     roundBets = [];
 
-    // Also check DB for any pending bets from reconnected clients
-    let allBets = betsToSettle;
     if (mongoose.connection.readyState === 1) {
-      const dbBets = await CasinoBet.find({ roundId: currentRound.roundId, status: 'PENDING' });
+      const dbBets = await CasinoBet.find({ roundId: round.roundId, status: 'PENDING' });
       for (const dbBet of dbBets) {
-        if (!allBets.some(b => String(b._id) === String(dbBet._id))) {
-          allBets.push(dbBet);
+        if (!betsToSettle.some(b => String(b._id) === String(dbBet._id))) {
+          betsToSettle.push(dbBet);
         }
       }
     }
 
-    for (let bet of allBets) {
+    for (let bet of betsToSettle) {
       const isWin = bet.choice === winResult;
       const odds = bet.odds || TIMINGS.DEFAULT_ODDS;
 
@@ -329,55 +228,45 @@ async function declareResult() {
         );
 
         distributeCasinoPL(bet.userId, -netProfit, {
-          matchName: `Casino Round ${currentRound.roundId}`,
+          matchName: `Casino Round ${round.roundId}`,
           selection: bet.choice
-        }).catch(err => console.warn('[CASINO PL Win]', err.message));
+        }).catch(() => {});
 
-        if (user) {
+        if (user && io) {
           io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
         }
 
-        io.emit('casino_wallet_payout', {
-          userId: bet.userId,
-          amount: payout,
-          profit: netProfit,
-          choice: bet.choice,
-          result: 'WIN'
-        });
+        if (io) {
+          io.emit('casino_wallet_payout', {
+            userId: bet.userId,
+            amount: payout,
+            profit: netProfit,
+            choice: bet.choice,
+            result: 'WIN'
+          });
+        }
       } else {
         bet.status = 'LOSE';
         distributeCasinoPL(bet.userId, bet.amount, {
-          matchName: `Casino Round ${currentRound.roundId}`,
+          matchName: `Casino Round ${round.roundId}`,
           selection: bet.choice
-        }).catch(err => console.warn('[CASINO PL Lose]', err.message));
+        }).catch(() => {});
 
-        io.emit('casino_wallet_payout', {
-          userId: bet.userId,
-          amount: bet.amount,
-          choice: bet.choice,
-          result: 'LOSE'
-        });
+        if (io) {
+          io.emit('casino_wallet_payout', {
+            userId: bet.userId,
+            amount: bet.amount,
+            choice: bet.choice,
+            result: 'LOSE'
+          });
+        }
       }
 
-      CasinoBet.findByIdAndUpdate(bet._id, { status: bet.status }).catch(() => {});
+      if (mongoose.connection.readyState === 1 && bet._id) {
+        CasinoBet.findByIdAndUpdate(bet._id, { status: bet.status }).catch(() => {});
+      }
     }
-
-    // Schedule next round seamlessly after result display duration
-    setTimeout(() => {
-      isProcessingResult = false;
-      if (activePlayers.size > 0) {
-        startNewRound();
-      } else {
-        console.log('[CASINO] No active players. Pausing engine to IDLE.');
-        phase = 'IDLE';
-        currentRound = null;
-        clearInterval(timerInterval);
-        broadcastState();
-      }
-    }, TIMINGS.RESULT_DURATION * 1000);
-
-  } catch (err) {
-    console.error("[CASINO] Error declaring result", err);
+  } finally {
     isProcessingResult = false;
   }
 }
@@ -416,38 +305,39 @@ function drawDeterministicCasinoCards(roundId) {
 
 // ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
 function ensureLiveRound(now = Date.now()) {
-  const TOTAL_CYCLE = (TIMINGS.DEALING_DURATION + TIMINGS.BETTING_DURATION + TIMINGS.REVEAL_DURATION + TIMINGS.RESULT_DURATION) * 1000; // 19000ms
+  const TOTAL_CYCLE = 19000; // 19000ms: Dealing (3s) -> Betting (8s) -> Reveal (4s) -> Result (4s)
   const cycleIndex = Math.floor(now / TOTAL_CYCLE);
   const startTime = cycleIndex * TOTAL_CYCLE;
   const endTime = startTime + TOTAL_CYCLE;
   const roundId = `RND-${startTime}`;
 
   const elapsed = now - startTime;
-  const dealingEnd = TIMINGS.DEALING_DURATION * 1000; // 3000ms
-  const bettingEnd = dealingEnd + (TIMINGS.BETTING_DURATION * 1000); // 11000ms
-  const revealEnd = bettingEnd + (TIMINGS.REVEAL_DURATION * 1000); // 15000ms
-  
+  const dealingEnd = 3000;  // 0s to 3s: DEALING (3 seconds)
+  const bettingEnd = 11000; // 3s to 11s: BETTING_OPEN (8 seconds)
+  const revealEnd = 15000;  // 11s to 15s: BETTING_CLOSED & REVEALING (4 seconds)
+  // 15s to 19s: RESULT_DECLARED (4 seconds)
+
   if (currentRound && currentRound.roundId === roundId) {
     if (elapsed < dealingEnd) {
       phase = 'DEALING';
       currentRound.status = 'DEALING';
-      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+      roundTimer = Math.ceil((dealingEnd - elapsed) / 1000); // 3, 2, 1s
     } else if (elapsed < bettingEnd) {
       phase = 'OPEN';
       currentRound.status = 'BETTING_OPEN';
-      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
+      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000); // 8, 7, 6, 5, 4, 3, 2, 1s
     } else if (elapsed < revealEnd) {
       phase = 'CLOSED';
       currentRound.status = 'BETTING_CLOSED';
-      roundTimer = 0;
+      roundTimer = Math.ceil((revealEnd - elapsed) / 1000); // 4, 3, 2, 1s
     } else {
       phase = 'RESULT';
       currentRound.status = 'RESULT_DECLARED';
       currentRound.result = currentRound.winResult;
-      roundTimer = 0;
+      roundTimer = Math.ceil((endTime - elapsed) / 1000); // 4, 3, 2, 1s
       if (!currentRound.settled) {
         currentRound.settled = true;
-        declareResult().catch(err => console.warn('[CASINO SETTLE]', err.message));
+        settleCasinoBets(currentRound).catch(err => console.warn('[CASINO SETTLE]', err.message));
       }
     }
     return currentRound;
@@ -456,14 +346,14 @@ function ensureLiveRound(now = Date.now()) {
   const { cardsA, cardsB, rankA, rankB } = drawDeterministicCasinoCards(roundId);
   const winResult = rankA.score > rankB.score ? 'A' : 'B';
 
-  let currentPhase = 'OPEN';
-  let currentStatus = 'BETTING_OPEN';
-  let timer = 0;
+  let currentPhase = 'DEALING';
+  let currentStatus = 'DEALING';
+  let timer = 3;
 
   if (elapsed < dealingEnd) {
     currentPhase = 'DEALING';
     currentStatus = 'DEALING';
-    timer = Math.ceil((bettingEnd - elapsed) / 1000);
+    timer = Math.ceil((dealingEnd - elapsed) / 1000);
   } else if (elapsed < bettingEnd) {
     currentPhase = 'OPEN';
     currentStatus = 'BETTING_OPEN';
@@ -471,11 +361,11 @@ function ensureLiveRound(now = Date.now()) {
   } else if (elapsed < revealEnd) {
     currentPhase = 'CLOSED';
     currentStatus = 'BETTING_CLOSED';
-    timer = 0;
+    timer = Math.ceil((revealEnd - elapsed) / 1000);
   } else {
     currentPhase = 'RESULT';
     currentStatus = 'RESULT_DECLARED';
-    timer = 0;
+    timer = Math.ceil((endTime - elapsed) / 1000);
   }
 
   currentRound = {
@@ -506,6 +396,10 @@ function ensureLiveRound(now = Date.now()) {
         }).catch(() => {});
       }
     }).catch(() => {});
+  }
+
+  if (currentStatus === 'RESULT_DECLARED') {
+    settleCasinoBets(currentRound).catch(err => console.warn('[CASINO SETTLE]', err.message));
   }
 
   return currentRound;
