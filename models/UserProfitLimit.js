@@ -9,8 +9,6 @@ const userProfitLimitSchema = new mongoose.Schema({
   maxProfit: { type: Number, default: 10000000 }, // Overall max profit per bet/market
   cricket: { type: Number, default: 5000000 },
   casino: { type: Number, default: 500000 },
-  aviator: { type: Number, default: 500000 },
-  aviatorX: { type: Number, default: 500000 },
   teenpatti: { type: Number, default: 500000 },
   soccer: { type: Number, default: 2000000 },
   tennis: { type: Number, default: 1000000 },

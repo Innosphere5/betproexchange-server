@@ -16,8 +16,6 @@ const CasinoBet = require('./models/CasinoBet');
 const { validateBetLimit } = require('./services/limitService');
 const { checkAndMatchOpenBets, expireAndRefundOpenBets, cancelUserOpenBet } = require('./services/openBetMatcher');
 const { initRoundManager, getCurrentRound, getCurrentState: getCasinoState, placeBet: placeCasinoBet } = require('./services/roundManager');
-const { initAviatorManager } = require('./services/aviatorManager');
-const { initAviatorxManager } = require('./services/aviatorxManager');
 const { initTeenPattiManager } = require('./services/teenPattiManager');
 
 const app = express();
@@ -193,16 +191,12 @@ app.use((req, res, next) => {
 
 // Initialize game loops and managers immediately with io so event listeners are always active
 initRoundManager(io);
-initAviatorManager(io);
-initAviatorxManager(io);
 initTeenPattiManager(io);
 
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
-const aviatorRoutes = require('./routes/aviatorRoutes');
-const aviatorxRoutes = require('./routes/aviatorxRoutes');
 const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
 
@@ -251,8 +245,6 @@ app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/aviator', aviatorRoutes);
-app.use('/api/aviatorx', aviatorxRoutes);
 app.use('/api/teenpatti', teenPattiRoutes);
 
 // Official GET /v4/scores endpoint as specified by oddsapi.io

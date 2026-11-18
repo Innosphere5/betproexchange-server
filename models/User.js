@@ -39,8 +39,6 @@ const userSchema = new mongoose.Schema({
     casino: { type: Number, default: 50000 },
     greyhound: { type: Number, default: 50000 },
     bookmaker: { type: Number, default: 2000000 },
-    aviator: { type: Number, default: 50000 },
-    aviatorX: { type: Number, default: 50000 },
     teenpatti: { type: Number, default: 50000 }
   },
   profitLimits: {
@@ -52,8 +50,6 @@ const userSchema = new mongoose.Schema({
     fancy: { type: Number, default: 2000000 },
     bookmaker: { type: Number, default: 2000000 },
     casino: { type: Number, default: 500000 },
-    aviator: { type: Number, default: 500000 },
-    aviatorX: { type: Number, default: 500000 },
     teenpatti: { type: Number, default: 500000 },
     dailyProfitCap: { type: Number, default: 20000000 }
   },

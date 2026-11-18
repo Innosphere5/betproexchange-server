@@ -7,10 +7,6 @@ const Transaction = require('../models/Transaction');
 const Bet = require('../models/Bet');
 const CasinoBet = require('../models/CasinoBet');
 const CasinoRound = require('../models/CasinoRound');
-const AviatorBet = require('../models/AviatorBet');
-const AviatorRound = require('../models/AviatorRound');
-const AviatorXBet = require('../models/AviatorXBet');
-const AviatorXRound = require('../models/AviatorXRound');
 const TeenPattiBet = require('../models/TeenPattiBet');
 const TeenPattiHand = require('../models/TeenPattiHand');
 
@@ -41,28 +37,18 @@ async function resetSystem() {
       cricketBets,
       casinoBets,
       casinoRounds,
-      aviatorBets,
-      aviatorRounds,
-      aviatorXBets,
-      aviatorXRounds,
       teenPattiBets,
       teenPattiHands
     ] = await Promise.all([
       Bet.deleteMany({}),
       CasinoBet.deleteMany({}),
       CasinoRound.deleteMany({}),
-      AviatorBet.deleteMany({}),
-      AviatorRound.deleteMany({}),
-      AviatorXBet.deleteMany({}),
-      AviatorXRound.deleteMany({}),
       TeenPattiBet.deleteMany({}),
       TeenPattiHand.deleteMany({})
     ]);
 
     console.log(`Deleted Cricket Bets: ${cricketBets.deletedCount}`);
     console.log(`Deleted Casino Bets: ${casinoBets.deletedCount}, Rounds: ${casinoRounds.deletedCount}`);
-    console.log(`Deleted Aviator Bets: ${aviatorBets.deletedCount}, Rounds: ${aviatorRounds.deletedCount}`);
-    console.log(`Deleted AviatorX Bets: ${aviatorXBets.deletedCount}, Rounds: ${aviatorXRounds.deletedCount}`);
     console.log(`Deleted TeenPatti Bets: ${teenPattiBets.deletedCount}, Hands: ${teenPattiHands.deletedCount}`);
 
     // Try deleting JetRun collections if they exist dynamically

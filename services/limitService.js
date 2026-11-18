@@ -37,8 +37,6 @@ const DEFAULT_MAX_BET_SIZES = {
   races: 200000,
   greyhound: 50000,
   casino: 50000,
-  aviator: 50000,
-  aviatorX: 50000,
   teenpatti: 50000,
   toss: 2000000,
   figure: 100000,
@@ -55,8 +53,6 @@ const DEFAULT_PROFIT_LIMITS = {
   fancy: 2000000,
   bookmaker: 2000000,
   casino: 500000,
-  aviator: 500000,
-  aviatorX: 500000,
   teenpatti: 500000,
   dailyProfitCap: 20000000
 };
@@ -68,8 +64,6 @@ function normalizeCategory(category) {
   if (!category) return 'cricket';
   const c = String(category).toLowerCase().trim();
 
-  if (c.includes('aviatorx') || c.includes('aviator_x') || c === 'aviator-x') return 'aviatorX';
-  if (c.includes('aviator')) return 'aviator';
   if (c.includes('teenpatti') || c.includes('teen_patti') || c.includes('teen-patti')) return 'teenpatti';
   if (c.includes('casino')) return 'casino';
   if (c.includes('soccer') || c.includes('football')) return 'soccer';
@@ -97,8 +91,6 @@ function getCategoryDisplayName(cat) {
     races: 'Races',
     greyhound: 'Greyhound',
     casino: 'Casino',
-    aviator: 'Aviator',
-    aviatorX: 'Aviator X',
     teenpatti: 'Teen Patti',
     toss: 'Toss',
     figure: 'Figure',
@@ -315,7 +307,7 @@ async function applyLimitsToDownline(parentId, { maxBetSizes, profitLimits, upda
   if (profitLimits) {
     const profitUpdates = {};
     for (const [k, v] of Object.entries(profitLimits)) {
-      if (['maxProfit', 'cricket', 'casino', 'aviator', 'aviatorX', 'teenpatti', 'soccer', 'tennis', 'fancy', 'bookmaker', 'dailyProfitCap', 'isEnabled'].includes(k)) {
+      if (['maxProfit', 'cricket', 'casino', 'teenpatti', 'soccer', 'tennis', 'fancy', 'bookmaker', 'dailyProfitCap', 'isEnabled'].includes(k)) {
         profitUpdates[k] = v;
       }
     }
@@ -347,8 +339,6 @@ async function syncUserProfitLimitRecord(user, parent = null, updatedBy = 'syste
     maxProfit: profitLimits.maxProfit ?? DEFAULT_PROFIT_LIMITS.maxProfit,
     cricket: profitLimits.cricket ?? DEFAULT_PROFIT_LIMITS.cricket,
     casino: profitLimits.casino ?? DEFAULT_PROFIT_LIMITS.casino,
-    aviator: profitLimits.aviator ?? DEFAULT_PROFIT_LIMITS.aviator,
-    aviatorX: profitLimits.aviatorX ?? DEFAULT_PROFIT_LIMITS.aviatorX,
     teenpatti: profitLimits.teenpatti ?? DEFAULT_PROFIT_LIMITS.teenpatti,
     soccer: profitLimits.soccer ?? DEFAULT_PROFIT_LIMITS.soccer,
     tennis: profitLimits.tennis ?? DEFAULT_PROFIT_LIMITS.tennis,

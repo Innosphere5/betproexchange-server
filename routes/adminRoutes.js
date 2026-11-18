@@ -7,9 +7,7 @@ const Transaction = require('../models/Transaction');
 const Match = require('../models/Match');
 const Bet = require('../models/Bet');
 const CasinoBet = require('../models/CasinoBet');
-const AviatorBet = require('../models/AviatorBet');
 const TeenPattiBet = require('../models/TeenPattiBet');
-const AviatorXBet = require('../models/AviatorXBet');
 const UserProfitLimit = require('../models/UserProfitLimit');
 const auth = require('../middleware/auth');
 const { generateFinalSheet } = require('../services/finalSheetEngine');
@@ -1013,8 +1011,6 @@ router.get('/profit-limits-table', auth, isAuthorized, async (req, res) => {
           maxProfit: pl.maxProfit ?? DEFAULT_PROFIT_LIMITS.maxProfit,
           cricket: pl.cricket ?? DEFAULT_PROFIT_LIMITS.cricket,
           casino: pl.casino ?? DEFAULT_PROFIT_LIMITS.casino,
-          aviator: pl.aviator ?? DEFAULT_PROFIT_LIMITS.aviator,
-          aviatorX: pl.aviatorX ?? DEFAULT_PROFIT_LIMITS.aviatorX,
           teenpatti: pl.teenpatti ?? DEFAULT_PROFIT_LIMITS.teenpatti,
           soccer: pl.soccer ?? DEFAULT_PROFIT_LIMITS.soccer,
           tennis: pl.tennis ?? DEFAULT_PROFIT_LIMITS.tennis,
@@ -2228,7 +2224,7 @@ router.get('/daily-report-market-details', auth, isAuthorized, async (req, res) 
       if (!marketsMap[mName]) {
         let displayEvent = mName;
         if (tx.category === 'casino') {
-          displayEvent = `TeenPatti Studio / Aviator ${mName.replace('RND-', '')}`;
+          displayEvent = `TeenPatti Studio / Casino ${mName.replace('RND-', '')}`;
         }
         marketsMap[mName] = {
           date: tx.createdAt,
@@ -2489,10 +2485,6 @@ router.post('/reset-system', auth, async (req, res) => {
     }
 
     const CasinoRound = require('../models/CasinoRound');
-    const AviatorBet = require('../models/AviatorBet');
-    const AviatorRound = require('../models/AviatorRound');
-    const AviatorXBet = require('../models/AviatorXBet');
-    const AviatorXRound = require('../models/AviatorXRound');
     const TeenPattiBet = require('../models/TeenPattiBet');
     const TeenPattiHand = require('../models/TeenPattiHand');
 
@@ -2510,10 +2502,6 @@ router.post('/reset-system', auth, async (req, res) => {
       Bet.deleteMany({}),
       CasinoBet.deleteMany({}),
       CasinoRound.deleteMany({}),
-      AviatorBet.deleteMany({}),
-      AviatorRound.deleteMany({}),
-      AviatorXBet.deleteMany({}),
-      AviatorXRound.deleteMany({}),
       TeenPattiBet.deleteMany({}),
       TeenPattiHand.deleteMany({})
     ]);
@@ -2862,8 +2850,6 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
     const Transaction = require('../models/Transaction');
     const Bet = require('../models/Bet');
     const CasinoBet = require('../models/CasinoBet');
-    const AviatorBet = require('../models/AviatorBet');
-    const AviatorXBet = require('../models/AviatorXBet');
     const TeenPattiBet = require('../models/TeenPattiBet');
 
     let message = '';
@@ -2892,8 +2878,6 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
     await Transaction.deleteMany({});
     await Bet.deleteMany({});
     if (CasinoBet) await CasinoBet.deleteMany({});
-    if (AviatorBet) await AviatorBet.deleteMany({});
-    if (AviatorXBet) await AviatorXBet.deleteMany({});
     if (TeenPattiBet) await TeenPattiBet.deleteMany({});
 
     res.json({ 
