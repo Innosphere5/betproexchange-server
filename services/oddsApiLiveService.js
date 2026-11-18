@@ -604,6 +604,15 @@ class OddsApiLiveService {
       multansultans: "multansultans",
       quettagladiators: "quettagladiators",
       lahoreqalandars: "lahoreqalandars",
+      // Other Franchise & Domestic Leagues
+      kathmandugurkhas: "kathmandugorkhas",
+      kathmandugorkhas: "kathmandugorkhas",
+      chitwanrhinos: "chitwanrhinos",
+      uaebulls: "uaebulls",
+      banglatigers: "banglatigers",
+      unitedtigers: "unitedtigers",
+      emirateseagles: "emirateseagles",
+      yaslions: "yaslions",
     };
     for (const [key, value] of Object.entries(aliases)) {
       if (n.includes(key)) return value;
@@ -883,12 +892,35 @@ class OddsApiLiveService {
 
     // If no exchange/bookmaker odds found, generate synthetic implied odds for LIVE matches
     if (bestHomePrice === 0 || bestAwayPrice === 0) {
-      if (!metadata.isLive) return; // Only for live matches
-
-      // Try to derive implied odds from live scores
+      let dbMatch = null;
       try {
-        const dbMatch = await Match.findOne({ matchId });
-        if (!dbMatch || !dbMatch.score) return;
+        dbMatch = await Match.findOne({ matchId });
+      } catch (e) {}
+
+      const isLiveMatch = metadata.isLive ||
+        dbMatch?.status === 'live' ||
+        dbMatch?.inplay === true ||
+        Boolean(dbMatch?.score?.overs && dbMatch.score.overs !== '0' && dbMatch.score.overs !== '0.0');
+
+      if (!isLiveMatch) return; // Only for live matches
+
+      // Try to derive implied odds from live scores (Roanuz authoritative score or DB score)
+      try {
+        if (!dbMatch) return;
+        // Merge authoritative in-memory / Redis live score from Roanuz
+        try {
+          const { roanuzScoreService } = require('./roanuzScoreService');
+          const hotScore = await roanuzScoreService.getLiveScore(matchId) ||
+            (dbMatch.roanuzMatchKey ? await roanuzScoreService.getLiveScore(dbMatch.roanuzMatchKey) : null);
+          if (hotScore) {
+            dbMatch.score = {
+              ...(dbMatch.score || {}),
+              ...hotScore
+            };
+          }
+        } catch (e) {}
+
+        if (!dbMatch.score) return;
 
         const p1Runs = parseInt(String(dbMatch.score.teamA_runs).split('/')[0], 10) || 0;
         const p2Runs = parseInt(String(dbMatch.score.teamB_runs).split('/')[0], 10) || 0;
@@ -1030,6 +1062,38 @@ class OddsApiLiveService {
     const bmBackDraw = drawBack ? Number(drawBack.toFixed(2)) : null;
     const bmLayDraw = drawLay ? Number(Math.max(drawLay, (drawBack || 0) + 0.01).toFixed(2)) : (bmBackDraw ? Number((bmBackDraw + 0.02).toFixed(2)) : null);
 
+    // ─── Extract Market 278 (To Win the Coin Toss) from OddsPapi quotes ──
+    let tossHomeBack = null, tossHomeLay = null;
+    let tossAwayBack = null, tossAwayLay = null;
+    for (const [bkKey, outcomes] of Object.entries(normalizedOdds)) {
+      const quoteList = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
+      const tossQuotes = quoteList.filter(q => q && (q.marketId === 278 || String(q.marketName || '').toLowerCase().includes('coin toss')));
+      if (tossQuotes.length >= 2) {
+        tossQuotes.sort((a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0));
+        const qA = tossQuotes[0];
+        const qB = tossQuotes[1];
+        if (qA.meta?.availableToBack?.[0]) {
+          tossHomeBack = qA.meta.availableToBack[0].price;
+          tossHomeLay = qA.meta.availableToLay?.[0]?.price || Number((tossHomeBack + 0.04).toFixed(2));
+        } else if (qA.price > 0) {
+          tossHomeBack = qA.price;
+          tossHomeLay = Number((tossHomeBack + 0.04).toFixed(2));
+        }
+        if (qB.meta?.availableToBack?.[0]) {
+          tossAwayBack = qB.meta.availableToBack[0].price;
+          tossAwayLay = qB.meta.availableToLay?.[0]?.price || Number((tossAwayBack + 0.04).toFixed(2));
+        } else if (qB.price > 0) {
+          tossAwayBack = qB.price;
+          tossAwayLay = Number((tossAwayBack + 0.04).toFixed(2));
+        }
+        break;
+      }
+    }
+    const tossBackA = needsSwap ? tossAwayBack : tossHomeBack;
+    const tossLayA = needsSwap ? tossAwayLay : tossHomeLay;
+    const tossBackB = needsSwap ? tossHomeBack : tossAwayBack;
+    const tossLayB = needsSwap ? tossHomeLay : tossAwayLay;
+
     const now = new Date();
     const oddsPayload = {
       matchId,
@@ -1058,6 +1122,11 @@ class OddsApiLiveService {
       bookmakerDepthBackDraw: "100",
       bookmakerDepthLayDraw: "100",
       bookmakerMarketStatus: "OPEN",
+      tossBackA: tossBackA || 1.98,
+      tossLayA: tossLayA || 2.02,
+      tossBackB: tossBackB || 1.98,
+      tossLayB: tossLayB || 2.02,
+      tossMarketStatus: "OPEN",
       isTestMatch,
       bookmaker: usedBookie,
       isLive: metadata.isLive,
@@ -1157,6 +1226,11 @@ class OddsApiLiveService {
         runners: runnersList,
         bookmakerMarketStatus: "OPEN",
         bookmakerRunners: bmRunnersList,
+        tossBackA: oddsPayload.tossBackA,
+        tossLayA: oddsPayload.tossLayA,
+        tossBackB: oddsPayload.tossBackB,
+        tossLayB: oddsPayload.tossLayB,
+        tossMarketStatus: oddsPayload.tossMarketStatus,
       });
 
       // Seamlessly trigger real-time Tied Match, Fancy 2, Figure, and Even-Odd markets update
@@ -1204,6 +1278,15 @@ class OddsApiLiveService {
     const timer = setTimeout(
       async () => {
         this.deletedGraceTimers.delete(eventId);
+        try {
+          const match = await Match.findOne({ matchId });
+          if (match && (match.status === 'live' || match.inplay || Boolean(match.score?.overs))) {
+            console.log(
+              `[OddsApiLive] ⚡ Event ${eventId} (match ${matchId}) is LIVE — keeping market OPEN despite deleted event`,
+            );
+            return;
+          }
+        } catch (e) {}
         console.log(
           `[OddsApiLive] ⛔ Grace period expired for event ${eventId} (match ${matchId}) — suspending market`,
         );
@@ -1480,6 +1563,11 @@ class OddsApiLiveService {
             bookmakerDepthBackDraw: update.bookmakerDepthBackDraw || "100",
             bookmakerDepthLayDraw: update.bookmakerDepthLayDraw || "100",
             bookmakerMarketStatus: update.bookmakerMarketStatus || "OPEN",
+            tossBackA: update.tossBackA || 1.98,
+            tossLayA: update.tossLayA || 2.02,
+            tossBackB: update.tossBackB || 1.98,
+            tossLayB: update.tossLayB || 2.02,
+            tossMarketStatus: update.tossMarketStatus || "OPEN",
             isTestMatch: Boolean(update.isTestMatch),
             marketStatus: "OPEN",
             lastUpdated: update.updatedAt,
@@ -1535,6 +1623,33 @@ class OddsApiLiveService {
               console.warn(`[OddsApiLive] ⚠️ REST recovery failed for match ${market.matchId}:`, err.message);
             }
           }
+
+          // If match is active in Roanuz, is in-play, or has a fresh live score, do NOT suspend! Refresh live market to OPEN
+          try {
+            const { roanuzScoreService } = require('./roanuzScoreService');
+            const isRoanuzActive = match.status === 'live' ||
+              match.inplay === true ||
+              Boolean(match.score?.overs && match.score.overs !== '0' && match.score.overs !== '0.0') ||
+              roanuzScoreService?.memoryCache?.has(String(market.matchId)) ||
+              (match.roanuzMatchKey && roanuzScoreService?.memoryCache?.has(String(match.roanuzMatchKey))) ||
+              (match.score?.lastUpdated && (Date.now() - new Date(match.score.lastUpdated).getTime() < 60 * 60 * 1000));
+
+            if (isRoanuzActive) {
+              console.log(
+                `[OddsApiLive] ⚡ Match ${market.matchId} (${match.teamA} v ${match.teamB}) is active via Roanuz — keeping market OPEN.`,
+              );
+              await MarketOdds.updateOne({ matchId: market.matchId }, { $set: { marketStatus: "OPEN", updatedAt: new Date() } });
+              await Match.updateOne({ matchId: market.matchId }, { $set: { marketStatus: "OPEN", bookmakerMarketStatus: "OPEN", lastUpdated: new Date() } });
+              if (this.io) {
+                this.io.emit("market_odds_update", {
+                  matchId: String(market.matchId),
+                  marketStatus: "OPEN",
+                  bookmakerMarketStatus: "OPEN",
+                });
+              }
+              continue;
+            }
+          } catch (roanuzErr) { }
 
           console.log(
             `[OddsApiLive] ⛔ Suspending stale market for match ${market.matchId} (${match.teamA} v ${match.teamB}) — no update for ${Math.round(STALE_TIMEOUT_MS / 60000)} minutes`,

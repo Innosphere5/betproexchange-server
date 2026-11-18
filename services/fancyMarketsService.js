@@ -433,14 +433,24 @@ class FancyMarketsService {
       hasChanges = true;
     }
 
-    // 5. Default Bookmaker odds if missing
+    // 5. Default Bookmaker odds if missing, and ensure OPEN when prices exist
     if (!match.bookmakerBackA && match.backOddsA) {
       match.bookmakerBackA = match.backOddsA;
       match.bookmakerLayA = match.layOddsA ? Number((match.layOddsA > match.backOddsA ? match.layOddsA + 0.01 : match.backOddsA + 0.02).toFixed(2)) : 1.97;
       match.bookmakerBackB = match.backOddsB ? Number((match.backOddsB >= 2 ? match.backOddsB - 0.02 : match.backOddsB).toFixed(2)) : 2.05;
       match.bookmakerLayB = match.layOddsB ? Number((match.layOddsB >= 2 ? match.layOddsB + 0.02 : match.layOddsB + 0.02).toFixed(2)) : 2.08;
-      match.bookmakerMarketStatus = match.bookmakerMarketStatus || 'OPEN';
+      match.bookmakerMarketStatus = 'OPEN';
       hasChanges = true;
+    }
+    if ((match.bookmakerBackA || match.backOddsA) && match.status !== 'completed' && match.status !== 'resulted') {
+      if (match.bookmakerMarketStatus === 'SUSPENDED') {
+        match.bookmakerMarketStatus = 'OPEN';
+        hasChanges = true;
+      }
+      if (match.marketStatus === 'SUSPENDED') {
+        match.marketStatus = 'OPEN';
+        hasChanges = true;
+      }
     }
 
     // 6. Toss odds handling

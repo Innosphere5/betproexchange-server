@@ -374,7 +374,7 @@ const fetchUpcomingMatches = async (io) => {
         depthBackDraw: odds ? odds.depthBackDraw : "0",
         depthLayDraw: odds ? odds.depthLayDraw : "0",
         isTestMatch: Boolean(odds?.isTestMatch || getMatchFormat(f) === 'TEST'),
-        marketStatus: odds ? "OPEN" : "SUSPENDED",
+        marketStatus: "OPEN",
         lastUpdated: new Date(),
       };
     });

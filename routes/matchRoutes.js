@@ -279,19 +279,27 @@ router.get('/:id', async (req, res) => {
             response.winner = match.winner || response.winner || null;
         } else {
             response.isCompleted = false;
-            // Real cricket logic: Once match is LIVE or start time has passed, the toss is already completed!
+            // For live matches, ensure marketStatus and bookmakerMarketStatus are OPEN if prices/scores exist
             if (isMatchLive) {
+                if (response.marketStatus === 'SUSPENDED' && (response.backOddsA || response.score?.overs)) {
+                    response.marketStatus = 'OPEN';
+                    Match.updateOne({ _id: match._id }, { $set: { marketStatus: 'OPEN', bookmakerMarketStatus: 'OPEN' } }).catch(() => {});
+                }
+                if (response.bookmakerMarketStatus === 'SUSPENDED' && (response.bookmakerBackA || response.backOddsA)) {
+                    response.bookmakerMarketStatus = 'OPEN';
+                }
+                // Real cricket logic: Once match is LIVE or start time has passed, the toss is already completed!
                 response.tossMarketStatus = 'CLOSED';
                 response.tossBackA = null;
                 response.tossLayA = null;
                 response.tossBackB = null;
                 response.tossLayB = null;
             } else if (!match.tossWinner) {
-                // Universal Toss Odds: 1.98 for Back, 2.02 for Lay
-                response.tossBackA = 1.98;
-                response.tossLayA = 2.02;
-                response.tossBackB = 1.98;
-                response.tossLayB = 2.02;
+                // Toss Odds: Use OddsPapi Market 278 quotes if available, otherwise fair standard 1.98 / 2.02
+                if (!response.tossBackA) response.tossBackA = 1.98;
+                if (!response.tossLayA) response.tossLayA = 2.02;
+                if (!response.tossBackB) response.tossBackB = 1.98;
+                if (!response.tossLayB) response.tossLayB = 2.02;
                 response.tossMarketStatus = match.tossMarketStatus === 'SUSPENDED' ? 'SUSPENDED' : 'OPEN';
             }
         }

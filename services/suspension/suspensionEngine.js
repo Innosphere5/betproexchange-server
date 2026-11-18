@@ -467,7 +467,7 @@ export function init(io) {
   timerHandle = setInterval(async () => {
     try {
       const activeMatches = await Match.find({
-        status: { $in: ['live', 'upcoming'] },
+        status: 'live',
       }).select('matchId status inplay').lean();
 
       const now = Date.now();
