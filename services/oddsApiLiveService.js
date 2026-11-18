@@ -1256,12 +1256,12 @@ class OddsApiLiveService {
         scores: payload.scores || {}
       };
 
-      // If this match is tracked by Sportmonks real-time score engine, do not let
+      // If this match is tracked by Roanuz or Sportmonks real-time score engine, do not let
       // delayed / synthetic oddspapi run updates overwrite real wickets, overs, and batsmen
-      if (matchInDb.sportmonksFixtureId) {
+      if (matchInDb.roanuzMatchKey || matchInDb.sportmonksFixtureId) {
         const lastUpdatedMs = matchInDb.score?.lastUpdated ? new Date(matchInDb.score.lastUpdated).getTime() : 0;
-        const isFreshSportmonks = (Date.now() - lastUpdatedMs) < 60000;
-        if (isFreshSportmonks && matchInDb.score?.overs && matchInDb.score.overs !== '0.0') {
+        const isFresh = (Date.now() - lastUpdatedMs) < 60000;
+        if (isFresh && matchInDb.score?.overs && matchInDb.score.overs !== '0.0') {
           return;
         }
       }

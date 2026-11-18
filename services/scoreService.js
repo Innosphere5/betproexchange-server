@@ -2,6 +2,7 @@ const Match = require('../models/Match');
 const { getData, getFixtureOdds } = require('./apiManager');
 const { getOrInitializeMatchState, advanceCricketState, extractOddsHint } = require('./cricketEngine');
 const { sportmonksScoreService, parseSportmonksFixture } = require('./sportmonksScoreService');
+const { roanuzScoreService, parseRoanuzMatch } = require('./roanuzScoreService');
 
 const normalizeScoreValue = (value, fallback = 0) => {
     if (value === null || value === undefined || value === '') return fallback;
@@ -98,8 +99,8 @@ const extractLiveScorePayload = (liveData, existingMatchOrScore = {}, oddsHint =
  */
 const updateLiveScores = async (io) => {
     try {
-        // Run Sportmonks live scores sync (non-blocking) — primary real-time engine
-        await sportmonksScoreService.syncLiveScores(io).catch(() => 0);
+        // Run Roanuz live scores sync (non-blocking) — primary real-time engine
+        await roanuzScoreService.syncLiveScores(io).catch(() => 0);
 
         // OddsPapi /fixtures/live — global live feed (may exclude some leagues like WBBL)
         const response = await getData('fixtures/live');

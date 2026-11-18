@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const matchSchema = new mongoose.Schema({
   matchId: { type: String, required: true, unique: true, index: true },
   sportmonksFixtureId: { type: Number, default: null, index: true },
+  roanuzMatchKey: { type: String, default: null, index: true },
   oddsApiEventId: { type: String, default: null, index: true },
   reissuedFixtureId: { type: String, default: null },
   tournamentId: { type: Number, index: true }, // oddspapi tournament ID

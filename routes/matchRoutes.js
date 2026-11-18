@@ -305,13 +305,19 @@ router.get('/:id/scores', async (req, res) => {
     }
 });
 
-// GET /api/matches/:id/live-score - Instant Sportmonks Real-Time Live Cricket Score
+// GET /api/matches/:id/live-score - Instant Roanuz Real-Time Live Cricket Score
 router.get('/:id/live-score', async (req, res) => {
     try {
-        const { sportmonksScoreService } = require('../services/sportmonksScoreService');
-        const score = await sportmonksScoreService.getLiveScore(req.params.id);
+        const { roanuzScoreService } = require('../services/roanuzScoreService');
+        const score = await roanuzScoreService.getLiveScore(req.params.id);
         if (score) {
             return res.status(200).json(score);
+        }
+        // Fallback to sportmonks if needed
+        const { sportmonksScoreService } = require('../services/sportmonksScoreService');
+        const smScore = await sportmonksScoreService.getLiveScore(req.params.id);
+        if (smScore) {
+            return res.status(200).json(smScore);
         }
         return res.status(404).json({ message: 'Live score not available for this match' });
     } catch (err) {
