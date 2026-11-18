@@ -317,12 +317,19 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
     };
   }
 
+  // Match format
+  const roanuzFormat = String(matchData.format || '').toLowerCase();
+  const detectedFormat = (roanuzFormat === 'oneday' || roanuzFormat === 'odi' || maxOvers === 50) ? 'ODI' :
+                         (roanuzFormat === 'test') ? 'TEST' : 'T20';
+
   return {
     matchId: String(matchData.key),
     roanuzMatchKey: matchData.key,
     teamA: matchInDb ? matchInDb.teamA : teamAName,
     teamB: matchInDb ? matchInDb.teamB : teamBName,
     league: matchData.tournament?.name || 'Cricket',
+    format: detectedFormat,
+    oversPerInnings: maxOvers,
     teamA_runs,
     teamB_runs,
     teamA_wickets,
@@ -487,15 +494,20 @@ class RoanuzScoreService {
             const league = matchData.tournament?.name || 'Cricket';
 
             try {
+              const roanuzFormat = String(matchData.format || '').toLowerCase();
+              const autoFormat = (roanuzFormat === 'oneday' || roanuzFormat === 'odi') ? 'ODI' : (roanuzFormat === 'test' ? 'TEST' : 'T20');
               matchInDb = await Match.create({
                 matchId: newMatchId,
                 roanuzMatchKey: matchData.key,
                 teamA,
                 teamB,
                 league,
+                format: autoFormat,
                 status: 'live',
                 startTime: new Date(matchData.start_at ? matchData.start_at * 1000 : Date.now()),
-                score: {}
+                score: {
+                  format: autoFormat
+                }
               });
               console.log(`[Roanuz] 🆕 Auto-created live match in DB: ${teamA} v ${teamB} (${newMatchId})`);
             } catch (createErr) {
@@ -507,18 +519,24 @@ class RoanuzScoreService {
           if (!parsed) continue;
 
           const matchDbId = matchInDb ? matchInDb.matchId : String(matchData.key);
+          const altDbId = String(matchDbId).startsWith('id') ? String(matchDbId).replace(/^id/, '') : ('id' + String(matchDbId));
 
-          // Update memory cache
+          // Update memory cache for both IDs
           this.memoryCache.set(matchDbId, parsed);
+          this.memoryCache.set(altDbId, parsed);
           this.memoryCache.set(String(matchData.key), parsed);
 
           // Update Redis cache (12s TTL)
           await redisCache.setScore(matchDbId, parsed, 12).catch(() => {});
+          await redisCache.setScore(altDbId, parsed, 12).catch(() => {});
 
           // Debounced DB persistence
           this._scheduledDbWrite(matchDbId, {
             status: parsed.status,
+            format: parsed.format,
             score: {
+              format: parsed.format,
+              oversPerInnings: parsed.oversPerInnings,
               teamA_runs: parsed.teamA_runs,
               teamB_runs: parsed.teamB_runs,
               teamA_wickets: parsed.teamA_wickets,
@@ -644,22 +662,30 @@ class RoanuzScoreService {
    */
   async getLiveScore(matchId) {
     if (!matchId) return null;
+    const cleanId = String(matchId);
+    const altId = cleanId.startsWith('id') ? cleanId.replace(/^id/, '') : ('id' + cleanId);
 
     // 1. In-process cache (0ms)
-    if (this.memoryCache.has(matchId)) {
-      return this.memoryCache.get(matchId);
-    }
+    if (this.memoryCache.has(cleanId)) return this.memoryCache.get(cleanId);
+    if (this.memoryCache.has(altId)) return this.memoryCache.get(altId);
 
     // 2. Redis cache (sub-5ms)
-    const cached = await redisCache.getScore(matchId).catch(() => null);
+    const cached = await redisCache.getScore(cleanId).catch(() => null) ||
+                   await redisCache.getScore(altId).catch(() => null);
     if (cached) {
-      this.memoryCache.set(matchId, cached);
+      this.memoryCache.set(cleanId, cached);
+      this.memoryCache.set(altId, cached);
       return cached;
     }
 
     // 3. Fallback to MongoDB
     const match = await Match.findOne({
-      $or: [{ matchId }, { roanuzMatchKey: matchId }]
+      $or: [
+        { matchId: cleanId },
+        { matchId: altId },
+        { roanuzMatchKey: cleanId },
+        { roanuzMatchKey: altId }
+      ]
     }).lean();
 
     if (match && match.score) {
@@ -671,7 +697,8 @@ class RoanuzScoreService {
         status: match.status,
         ...match.score
       };
-      this.memoryCache.set(matchId, scoreObj);
+      this.memoryCache.set(cleanId, scoreObj);
+      this.memoryCache.set(altId, scoreObj);
       return scoreObj;
     }
 

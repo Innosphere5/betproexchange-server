@@ -1,4 +1,5 @@
 const Match = require('../models/Match');
+const pricingEngine = require('./pricing/pricingEngine.js');
 
 class FancyMarketsService {
   constructor() {
@@ -12,30 +13,7 @@ class FancyMarketsService {
    * Helper to derive short team codes (e.g. "South Africa Legends" -> "SA-L")
    */
   getShortTeamCode(teamName) {
-    if (!teamName) return 'TEAM';
-    const clean = teamName.trim();
-    if (clean.toLowerCase().includes('south africa')) return 'SA-L';
-    if (clean.toLowerCase().includes('west indies')) return 'WI-L';
-    if (clean.toLowerCase().includes('australia')) return 'AUS-L';
-    if (clean.toLowerCase().includes('pakistan')) return 'PAK-L';
-    if (clean.toLowerCase().includes('india')) return 'IND-L';
-    if (clean.toLowerCase().includes('england')) return 'ENG-L';
-    if (clean.toLowerCase().includes('kuwait')) return 'KUW';
-    if (clean.toLowerCase().includes('qatar')) return 'QAT';
-    if (clean.toLowerCase().includes('united arab emirates') || clean.toLowerCase() === 'uae') return 'UAE';
-    if (clean.toLowerCase() === 'usa' || clean.toLowerCase().includes('united states')) return 'USA';
-    if (clean.toLowerCase().includes('sharjah')) return 'SHJ';
-    if (clean.toLowerCase().includes('emirates red')) return 'EMR';
-    if (clean.toLowerCase().includes('bangladesh champions')) return 'BD-C';
-    if (clean.toLowerCase().includes('england legends')) return 'ENG-L';
-    if (clean.toLowerCase().includes('paarl royals')) return 'PR';
-    if (clean.toLowerCase().includes('durban super giants')) return 'DSG';
-
-    const words = clean.split(/\s+/);
-    if (words.length >= 2) {
-      return words.map(w => w[0].toUpperCase()).join('');
-    }
-    return clean.slice(0, 4).toUpperCase();
+    return pricingEngine.getShortTeamCode(teamName);
   }
 
   /**
@@ -71,8 +49,8 @@ class FancyMarketsService {
         maxBet: 500000,
         status: 'SUSPENDED',
         runners: [
-          { name: 'Yes', backOdds: [], layOdds: [] },
-          { name: 'No', backOdds: [], layOdds: [] }
+          { name: 'Yes', backOdds: [{ price: 25.0, volume: '100' }], layOdds: [{ price: 30.0, volume: '100' }] },
+          { name: 'No', backOdds: [{ price: 1.02, volume: '1.5M' }], layOdds: [{ price: 1.04, volume: '1.5M' }] }
         ]
       };
     }
@@ -168,12 +146,14 @@ class FancyMarketsService {
   }
 
   /**
-   * Extract real Odd / Even markets from Oddspapi feed (e.g. marketId 2724029)
-   * or maintain realistic session odd/even markets.
-   * If market has revealed odds -> status: 'OPEN'
-   * If market has not revealed odds -> status: 'SUSPENDED', backPrice: null, layPrice: null
+   * Extract or assemble Even / Odd markets.
+   * Uses real bookmaker quotes if present, otherwise uses calibrated Monte Carlo engine.
    */
-  extractEvenOddMarkets(normalizedOdds, match) {
+  extractEvenOddMarkets(normalizedOdds, match, computed = null) {
+    if (computed?.evenOddMarkets && computed.evenOddMarkets.length > 0) {
+      return computed.evenOddMarkets;
+    }
+
     let oddQuote = null;
     let evenQuote = null;
 
@@ -215,8 +195,12 @@ class FancyMarketsService {
       ];
     }
 
-    // When market has NOT revealed the odds yet for Even/Odd:
-    // UI shows market name, but status is SUSPENDED until market reveals odds
+    // Default calculated fallback
+    try {
+      const res = pricingEngine.computeMatchOdds(match);
+      if (res?.evenOddMarkets?.length > 0) return res.evenOddMarkets;
+    } catch (e) {}
+
     return [
       {
         name: '1st inn 15 Over Run Odd (Kalli)',
@@ -241,23 +225,22 @@ class FancyMarketsService {
 
   /**
    * Extract or assemble Fancy 2 markets for live match.
-   * If real over-run quotes exist in Oddspapi feed, populate them.
-   * If market has not revealed odds, status: 'SUSPENDED', backPrice: null.
-   * No dummy random drift!
+   * Uses real bookmaker quotes if present, otherwise uses calibrated Monte Carlo engine.
    */
-  extractFancyMarkets(normalizedOdds, match) {
+  extractFancyMarkets(normalizedOdds, match, computed = null) {
+    if (computed?.fancyMarkets && computed.fancyMarkets.length > 0) {
+      return computed.fancyMarkets;
+    }
+
     const teamA = match.teamA || 'Team A';
     const teamB = match.teamB || 'Team B';
     const shortA = this.getShortTeamCode(teamA);
     const shortB = this.getShortTeamCode(teamB);
 
-    // ── Collect over-run and wicket market quotes from all bookmakers ───────
-    // Parse any "N Over Run" or "N-overs" style market, capturing the over number.
-    // Also capture wkt fall markets (Fall of 1st/2nd/3rd Wkt, 3rd Wkt Lost To X Balls).
-    const overQuotes  = {};  // keyed by over number (string): e.g. '6', '10', '15', '20'
-    const wktQuotes   = {};  // keyed by wicket number (string): e.g. '1', '2', '3'
-    const overLineRe  = /(\d+)[_\s-]?over/i;
-    const wktRe       = /(\d+)(?:st|nd|rd|th)?\s*wkt/i;
+    const overQuotes = {};
+    const wktQuotes = {};
+    const overLineRe = /(\d+)[_\s-]?over/i;
+    const wktRe = /(\d+)(?:st|nd|rd|th)?\s*wkt/i;
 
     if (normalizedOdds) {
       for (const [, outcomes] of Object.entries(normalizedOdds)) {
@@ -265,11 +248,10 @@ class FancyMarketsService {
         const quotes = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
         for (const q of quotes) {
           if (!q || !q.marketType) continue;
-          const mt   = String(q.marketType);
+          const mt = String(q.marketType);
           const name = String(q.name || q.marketType || '');
           const isActive = q.price > 0 && q.active !== false && q.status !== 'SUSPENDED';
 
-          // Over-run market
           const overMatch = overLineRe.exec(mt) || overLineRe.exec(name);
           if (overMatch) {
             const n = String(parseInt(overMatch[1], 10));
@@ -278,7 +260,6 @@ class FancyMarketsService {
             }
           }
 
-          // Wicket fall market
           const wktMatch = wktRe.exec(mt) || wktRe.exec(name);
           if (wktMatch) {
             const n = String(parseInt(wktMatch[1], 10));
@@ -290,68 +271,87 @@ class FancyMarketsService {
       }
     }
 
-    // Helper to build a fancy row from an over quote (or suspended placeholder)
-    const makeOverRow = (label, overN) => {
-      const q = overQuotes[String(overN)];
-      return {
-        name: label,
-        backPrice: q ? Number(q.handicap || q.price) : null,
-        backVol:   q ? this.formatVolume(q.limit) : '100',
-        layPrice:  q ? Number((q.handicap || q.price) - 1) : null,
-        layVol:    q ? this.formatVolume(q.limit) : '100',
-        status:    q ? 'OPEN' : 'SUSPENDED',
-        maxBet:    2000000
+    if (Object.keys(overQuotes).length > 0 || Object.keys(wktQuotes).length > 0) {
+      const makeOverRow = (label, overN) => {
+        const q = overQuotes[String(overN)];
+        return {
+          name: label,
+          overN,
+          backPrice: q ? Number(q.handicap || q.price) : null,
+          backVol: q ? this.formatVolume(q.limit) : '100',
+          layPrice: q ? Number((q.handicap || q.price) - 1) : null,
+          layVol: q ? this.formatVolume(q.limit) : '100',
+          status: q ? 'OPEN' : 'SUSPENDED',
+          maxBet: 2000000
+        };
       };
-    };
 
-    // Helper to build a wkt-fall row
-    const makeWktRow = (label, wktN) => {
-      const q = wktQuotes[String(wktN)];
-      return {
-        name: label,
-        backPrice: q ? Number(q.handicap || q.price) : null,
-        backVol:   q ? this.formatVolume(q.limit) : '100',
-        layPrice:  q ? Number((q.handicap || q.price) + 1) : null,
-        layVol:    q ? this.formatVolume(q.limit) : '100',
-        status:    q ? 'OPEN' : 'SUSPENDED',
-        maxBet:    2000000
+      const makeWktRow = (label, wktN) => {
+        const q = wktQuotes[String(wktN)];
+        return {
+          name: label,
+          wicketN: wktN,
+          backPrice: q ? Number(q.handicap || q.price) : null,
+          backVol: q ? this.formatVolume(q.limit) : '100',
+          layPrice: q ? Number((q.handicap || q.price) + 1) : null,
+          layVol: q ? this.formatVolume(q.limit) : '100',
+          status: q ? 'OPEN' : 'SUSPENDED',
+          maxBet: 2000000
+        };
       };
-    };
+
+      return [
+        makeOverRow(`6 Over Run ${shortA}`, 6),
+        makeOverRow(`7 Over Run ${shortA}`, 7),
+        makeOverRow(`8 Over Run ${shortA}`, 8),
+        makeOverRow(`10 Over Run ${shortA}`, 10),
+        makeOverRow(`15 Over Run ${shortA}`, 15),
+        {
+          name: `11 Over Run Only ${shortA}`,
+          backPrice: null,
+          backVol: '100',
+          layPrice: null,
+          layVol: '100',
+          status: 'SUSPENDED',
+          maxBet: 2000000
+        },
+        makeOverRow(`20 Over Run ${shortA}`, 20),
+        makeWktRow(`Fall of 1st Wkt ${shortA}`, 1),
+        makeWktRow(`Fall of 2nd Wkt ${shortA}`, 2),
+        makeWktRow(`Fall of 3rd Wkt ${shortA}`, 3),
+        makeOverRow(`10 Over Run ${shortB}`, 10),
+        makeWktRow(`Fall of 1st Wkt ${shortB}`, 1)
+      ];
+    }
+
+    // Default calculated fallback
+    try {
+      const res = pricingEngine.computeMatchOdds(match);
+      if (res?.fancyMarkets?.length > 0) return res.fancyMarkets;
+    } catch (e) {}
 
     return [
-      makeOverRow(`6 Over Run ${shortA}`,    6),
-      makeOverRow(`7 Over Run ${shortA}`,    7),
-      makeOverRow(`8 Over Run ${shortA}`,    8),
-      makeOverRow(`10 Over Run ${shortA}`,   10),
-      makeOverRow(`15 Over Run ${shortA}`,   15),
-      {
-        name: `11 Over Run Only ${shortA}`,
-        backPrice: null,
-        backVol: '100',
-        layPrice: null,
-        layVol: '100',
-        status: 'SUSPENDED',
-        maxBet: 2000000
-      },
-      makeOverRow(`20 Over Run ${shortA}`,   20),
-      makeWktRow(`Fall of 1st Wkt ${shortA}`, 1),
-      makeWktRow(`Fall of 2nd Wkt ${shortA}`, 2),
-      makeWktRow(`Fall of 3rd Wkt ${shortA}`, 3),
-      makeOverRow(`10 Over Run ${shortB}`,   10),
-      makeWktRow(`Fall of 1st Wkt ${shortB}`, 1)
+      { name: `6 Over Run ${shortA}`, backPrice: null, layPrice: null, status: 'SUSPENDED' },
+      { name: `10 Over Run ${shortA}`, backPrice: null, layPrice: null, status: 'SUSPENDED' },
+      { name: `15 Over Run ${shortA}`, backPrice: null, layPrice: null, status: 'SUSPENDED' },
+      { name: `20 Over Run ${shortA}`, backPrice: null, layPrice: null, status: 'SUSPENDED' }
     ];
   }
 
   /**
    * Extract or assemble Figure (0-9 Digits) markets for live match.
-   * If market revealed odds -> status: 'OPEN'
-   * If unrevealed -> status: 'SUSPENDED'
    */
-  extractFigureMarkets(normalizedOdds, match) {
-    const teamA = match.teamA || 'Team A';
+  extractFigureMarkets(normalizedOdds, match, computed = null) {
+    if (computed?.figureMarkets && computed.figureMarkets.length > 0) {
+      return computed.figureMarkets;
+    }
 
-    // Figure markets in BPExch: 10 digits 0 to 9
-    // When market is live but odds not revealed yet: status is SUSPENDED
+    try {
+      const res = pricingEngine.computeMatchOdds(match);
+      if (res?.figureMarkets?.length > 0) return res.figureMarkets;
+    } catch (e) {}
+
+    const teamA = match.teamA || 'Team A';
     const digits = Array.from({ length: 10 }, (_, i) => ({
       digit: i,
       odds: 8.85,
@@ -370,30 +370,60 @@ class FancyMarketsService {
 
   /**
    * Ensure a single match document has all required markets (Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, Even-Odd).
-   * For live matches, live quotes are mapped. For upcoming matches, markets are maintained in scheduled/suspended state
-   * so all market boards are visible accurately.
+   * For live matches, live calibrated quotes are calculated.
    */
   async ensureMatchMarkets(match, io = null) {
     if (!match) return match;
-    const isLive = match.status === 'live' || match.inplay === true;
+
+    // Merge authoritative in-memory / Redis live score from Roanuz
+    try {
+      const { roanuzScoreService } = require('./roanuzScoreService');
+      const hotScore = await roanuzScoreService.getLiveScore(match.matchId) ||
+        (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+      if (hotScore) {
+        match.score = {
+          ...(match.score || {}),
+          ...hotScore,
+          lastUpdated: new Date()
+        };
+        if (hotScore.format && !match.format) match.format = hotScore.format;
+      }
+    } catch (e) {}
+
+    // Compute calibrated Monte Carlo odds
+    let computed = null;
+    try {
+      computed = pricingEngine.computeMatchOdds(match);
+    } catch (calcErr) {
+      console.warn(`[FancyMarketsService] Pricing calc warning in ensureMatchMarkets:`, calcErr.message);
+    }
 
     let hasChanges = false;
 
     // 1. Fancy Markets
-    if (!match.fancyMarkets || match.fancyMarkets.length === 0) {
-      match.fancyMarkets = this.extractFancyMarkets(null, match);
+    if (computed?.fancyMarkets?.length > 0) {
+      match.fancyMarkets = computed.fancyMarkets;
+      hasChanges = true;
+    } else if (!match.fancyMarkets || match.fancyMarkets.length === 0) {
+      match.fancyMarkets = this.extractFancyMarkets(null, match, computed);
       hasChanges = true;
     }
 
     // 2. Figure Markets (0-9 Digits)
-    if (!match.figureMarkets || match.figureMarkets.length === 0) {
-      match.figureMarkets = this.extractFigureMarkets(null, match);
+    if (computed?.figureMarkets?.length > 0) {
+      match.figureMarkets = computed.figureMarkets;
+      hasChanges = true;
+    } else if (!match.figureMarkets || match.figureMarkets.length === 0) {
+      match.figureMarkets = this.extractFigureMarkets(null, match, computed);
       hasChanges = true;
     }
 
     // 3. Even/Odd Markets
-    if (!match.evenOddMarkets || match.evenOddMarkets.length === 0) {
-      match.evenOddMarkets = this.extractEvenOddMarkets(null, match);
+    if (computed?.evenOddMarkets?.length > 0) {
+      match.evenOddMarkets = computed.evenOddMarkets;
+      hasChanges = true;
+    } else if (!match.evenOddMarkets || match.evenOddMarkets.length === 0) {
+      match.evenOddMarkets = this.extractEvenOddMarkets(null, match, computed);
       hasChanges = true;
     }
 
@@ -413,8 +443,7 @@ class FancyMarketsService {
       hasChanges = true;
     }
 
-    // 6. Toss odds handling:
-    // Real cricket logic: if match is live, started, or completed, Toss is completed! Market MUST be CLOSED.
+    // 6. Toss odds handling
     const now = new Date();
     const isStartedOrLive = match.status === 'live' || match.status === 'completed' || match.status === 'resulted' || (match.startTime && now >= new Date(match.startTime));
 
@@ -448,8 +477,9 @@ class FancyMarketsService {
 
     if (hasChanges) {
       try {
+        const altId = String(match.matchId).startsWith('id') ? String(match.matchId).replace(/^id/, '') : ('id' + String(match.matchId));
         await Match.updateOne(
-          { matchId: match.matchId },
+          { $or: [{ matchId: match.matchId }, { matchId: altId }, { roanuzMatchKey: match.roanuzMatchKey || match.matchId }] },
           {
             $set: {
               fancyMarkets: match.fancyMarkets,
@@ -476,43 +506,88 @@ class FancyMarketsService {
       } catch (err) {}
     }
 
+    // Run suspension engine evaluation with statsMap
+    try {
+      const suspensionEngine = require('./suspension/suspensionEngine.js');
+      await suspensionEngine.evaluateMatch(match.matchId, {
+        match,
+        statsMap: computed?.statsByMarket || null
+      });
+    } catch (sErr) {}
+
     return match;
   }
 
   /**
-   * Real-Time Pipeline processor called whenever live odds arrive from Oddspapi.
-   * Extracts Tied Match (from market 276 / 273), Even/Odd, Fancy, and Figure markets,
+   * Real-Time Pipeline processor called whenever live odds arrive or scores update.
+   * Extracts or computes Tied Match, Even/Odd, Fancy 2, and Figure markets,
    * throttles DB writes & suspension evaluation, and emits WebSocket events to the frontend.
    */
   async processLiveMarkets({ matchId, normalizedOdds, io = null, isLive = true }) {
     try {
       const now = Date.now();
+      const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
       let match = null;
-      const cached = this.matchCache.get(matchId);
-      if (cached && (now - cached.timestamp < 15000)) {
+      const cached = this.matchCache.get(matchId) || this.matchCache.get(altMatchId);
+      if (cached && (now - cached.timestamp < 10000)) {
         match = cached.match;
       } else {
-        match = await Match.findOne({ matchId });
+        match = await Match.findOne({
+          $or: [
+            { matchId },
+            { matchId: altMatchId },
+            { roanuzMatchKey: matchId },
+            { roanuzMatchKey: altMatchId }
+          ]
+        });
         if (match) {
           this.matchCache.set(matchId, { match, timestamp: now });
+          this.matchCache.set(altMatchId, { match, timestamp: now });
         }
       }
       if (!match) return;
 
+      // Merge latest hot score from Roanuz (0ms latency)
+      try {
+        const { roanuzScoreService } = require('./roanuzScoreService');
+        const hotScore = await roanuzScoreService.getLiveScore(match.matchId) ||
+          await roanuzScoreService.getLiveScore(altMatchId) ||
+          (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+        if (hotScore) {
+          match.score = {
+            ...(match.score || {}),
+            ...hotScore,
+            lastUpdated: new Date()
+          };
+          if (hotScore.format && !match.format) match.format = hotScore.format;
+        }
+      } catch (e) {}
+
       const isActuallyLive = isLive || match.status === 'live' || match.inplay === true;
-      if (!isActuallyLive) return;
 
       // 1. Extract real Tied Match from Betfair Exchange quotes
       const tiedMatchMarket = this.extractTiedMatch(normalizedOdds);
 
-      // 2. Extract Even / Odd markets
-      const evenOddMarkets = this.extractEvenOddMarkets(normalizedOdds, match);
+      // 2. Compute calculated odds via pricingEngine
+      let computed = null;
+      try {
+        computed = pricingEngine.computeMatchOdds(match);
+      } catch (calcErr) {
+        console.warn(`[FancyMarketsService] Pricing calc warning for ${matchId}:`, calcErr.message);
+      }
 
-      // 3. Extract Fancy 2 markets
-      const fancyMarkets = this.extractFancyMarkets(normalizedOdds, match);
+      // 3. Assemble markets
+      const fancyMarkets = (computed?.fancyMarkets?.length > 0)
+        ? computed.fancyMarkets
+        : this.extractFancyMarkets(normalizedOdds, match, computed);
 
-      // 4. Extract Figure markets
-      const figureMarkets = this.extractFigureMarkets(normalizedOdds, match);
+      const figureMarkets = (computed?.figureMarkets?.length > 0)
+        ? computed.figureMarkets
+        : this.extractFigureMarkets(normalizedOdds, match, computed);
+
+      const evenOddMarkets = (computed?.evenOddMarkets?.length > 0)
+        ? computed.evenOddMarkets
+        : this.extractEvenOddMarkets(normalizedOdds, match, computed);
 
       // Update match document in cache/memory
       match.tiedMatchMarket = tiedMatchMarket;
@@ -520,12 +595,13 @@ class FancyMarketsService {
       match.fancyMarkets = fancyMarkets;
       match.figureMarkets = figureMarkets;
 
-      // Throttle DB write to at most once per 3 seconds per match
+      // Throttle DB write to at most once per 2 seconds per match
       const lastDbUpdate = this.lastDbUpdateTime.get(matchId) || 0;
-      if (now - lastDbUpdate >= 3000) {
+      if (now - lastDbUpdate >= 2000) {
         this.lastDbUpdateTime.set(matchId, now);
+        this.lastDbUpdateTime.set(altMatchId, now);
         Match.updateOne(
-          { matchId },
+          { $or: [{ matchId: match.matchId }, { matchId: altMatchId }, { roanuzMatchKey: match.roanuzMatchKey || match.matchId }] },
           {
             $set: {
               tiedMatchMarket,
@@ -537,13 +613,17 @@ class FancyMarketsService {
         ).catch(e => console.warn(`[FancyMarketsService] DB update warning for ${matchId}:`, e.message));
       }
 
-      // Throttle suspension evaluation to at most once per 3 seconds per match
+      // Evaluate suspension with pricing stats
       const lastSuspension = this.lastSuspensionTime.get(matchId) || 0;
-      if (now - lastSuspension >= 3000) {
+      if (now - lastSuspension >= 2000) {
         this.lastSuspensionTime.set(matchId, now);
+        this.lastSuspensionTime.set(altMatchId, now);
         try {
           const suspensionEngine = require('./suspension/suspensionEngine.js');
-          suspensionEngine.evaluateMatch(matchId).catch(() => {});
+          await suspensionEngine.evaluateMatch(match.matchId, {
+            match,
+            statsMap: computed?.statsByMarket || null
+          });
         } catch (e) {
           console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);
         }
@@ -552,11 +632,19 @@ class FancyMarketsService {
       // Emit live updates via Socket.IO immediately
       const targetIo = io || this.io;
       if (targetIo) {
-        const matchIdStr = String(matchId);
-        targetIo.emit('tied_match_market_update', { matchId: matchIdStr, tiedMatchMarket });
-        targetIo.emit('even_odd_market_update', { matchId: matchIdStr, evenOddMarkets: match.evenOddMarkets });
-        targetIo.emit('fancy_market_update', { matchId: matchIdStr, fancyMarkets: match.fancyMarkets });
-        targetIo.emit('figure_market_update', { matchId: matchIdStr, figureMarkets: match.figureMarkets });
+        const matchIdStr = String(match.matchId);
+        const altMatchId = matchIdStr.startsWith('id') ? matchIdStr.replace(/^id/, '') : ('id' + matchIdStr);
+        const emitTargets = [matchIdStr, altMatchId];
+        if (match.roanuzMatchKey && !emitTargets.includes(match.roanuzMatchKey)) {
+          emitTargets.push(match.roanuzMatchKey);
+        }
+
+        for (const tId of emitTargets) {
+          targetIo.emit('tied_match_market_update', { matchId: tId, tiedMatchMarket });
+          targetIo.emit('even_odd_market_update', { matchId: tId, evenOddMarkets: match.evenOddMarkets });
+          targetIo.emit('fancy_market_update', { matchId: tId, fancyMarkets: match.fancyMarkets });
+          targetIo.emit('figure_market_update', { matchId: tId, figureMarkets: match.figureMarkets });
+        }
       }
     } catch (err) {
       console.error(`[FancyMarketsService] Error processing live markets for ${matchId}:`, err.message);
@@ -564,18 +652,18 @@ class FancyMarketsService {
   }
 
   /**
-   * Legacy hook called when live odds arrive
+   * Real-time hook called when live scores or odds arrive
    */
   async handleLiveMatchOdds(matchId, io, normalizedOdds = null) {
     await this.processLiveMarkets({ matchId, normalizedOdds, io: io || this.io, isLive: true });
   }
 
   /**
-   * Initialize service (no fake dummy random drift loop!)
+   * Initialize service
    */
   init(io) {
     this.io = io;
-    console.log('✅ FancyMarketsService real-time pipeline initialized (pure live data, no dummy odds)');
+    console.log('✅ FancyMarketsService real-time pipeline initialized (pure live calculated odds)');
   }
 }
 

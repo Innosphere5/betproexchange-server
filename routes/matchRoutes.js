@@ -141,16 +141,24 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
     try {
         const lookupId = req.params.id;
-        const numId = Number(lookupId);
+        const altMatchId = String(lookupId).startsWith('id') ? String(lookupId).replace(/^id/, '') : ('id' + String(lookupId));
+        const numId = Number(String(lookupId).replace(/^id/, ''));
         let match = await Match.findOne({
             $or: [
                 { matchId: lookupId },
+                { matchId: altMatchId },
                 ...(!isNaN(numId) ? [{ sportmonksFixtureId: numId }] : []),
-                { oddsApiEventId: lookupId }
+                { roanuzMatchKey: lookupId },
+                { roanuzMatchKey: altMatchId },
+                { oddsApiEventId: lookupId },
+                { oddsApiEventId: altMatchId }
             ]
         });
         if (!match && mongoose.Types.ObjectId.isValid(lookupId)) {
             match = await Match.findById(lookupId);
+        }
+        if (!match && mongoose.Types.ObjectId.isValid(altMatchId)) {
+            match = await Match.findById(altMatchId);
         }
         if (!match) {
             // Check if bets exist for this matchId
@@ -195,15 +203,25 @@ router.get('/:id', async (req, res) => {
             return res.status(404).json({ message: 'Match not found' });
         }
         
+        // Merge authoritative in-memory / Redis live score from Roanuz (0ms latency, no stale DB lag)
+        const { roanuzScoreService } = require('../services/roanuzScoreService');
+        const hotScore = await roanuzScoreService.getLiveScore(lookupId) ||
+          await roanuzScoreService.getLiveScore(altMatchId) ||
+          (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+        if (hotScore) {
+            match.score = {
+                ...(match.score || {}),
+                ...hotScore,
+                lastUpdated: new Date()
+            };
+            if (hotScore.format && !match.format) match.format = hotScore.format;
+        }
+
         // Ensure Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, and Even-Odd markets are populated
         const fancyMarketsService = require('../services/fancyMarketsService');
         match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
 
         const response = match.toObject ? match.toObject() : match;
-
-        // Merge authoritative in-memory / Redis live score from Roanuz (0ms latency, no stale DB lag)
-        const { roanuzScoreService } = require('../services/roanuzScoreService');
-        const hotScore = await roanuzScoreService.getLiveScore(lookupId) || (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
         if (hotScore) {
             response.score = {
                 ...(response.score || {}),

@@ -181,11 +181,31 @@ export async function computeMarketExposure(matchId, marketName, marketSpec) {
  */
 export async function evaluateMatch(matchId, options = {}) {
   try {
-    const match = await Match.findOne({ matchId }).lean();
+    const cleanId = String(matchId);
+    const altId = cleanId.startsWith('id') ? cleanId.replace(/^id/, '') : ('id' + cleanId);
+
+    let match = options.match;
+    if (!match) {
+      match = await Match.findOne({
+        $or: [
+          { matchId: cleanId },
+          { matchId: altId },
+          { roanuzMatchKey: cleanId },
+          { roanuzMatchKey: altId }
+        ]
+      }).lean();
+    }
     if (!match) return;
 
     const now = options.now || Date.now();
-    const isLive = match.status === 'live' || match.inplay === true;
+    const isLive = match.status === 'live' ||
+                   match.inplay === true ||
+                   match.status === 'inplay' ||
+                   match.status === 'started' ||
+                   Boolean(match.score?.overs && match.score.overs !== '0' && match.score.overs !== '0.0' && match.score.overs !== 'Final');
+    const effectiveMatchStatus = (match.status === 'completed' || match.status === 'resulted')
+      ? 'completed'
+      : (isLive ? 'live' : (match.status || 'upcoming'));
 
     // Track sequence and previous state
     let stateSeq = (matchStateSeqMap.get(matchId) || 0) + 1;
@@ -203,7 +223,7 @@ export async function evaluateMatch(matchId, options = {}) {
       wickets,
       legalBalls,
       stateSeq,
-      status: match.status || 'upcoming',
+      status: effectiveMatchStatus,
       lastBall: match.score?.lastBall ? { note: match.score.lastBall } : null,
     };
     const prevSt = matchPrevStateMap.get(matchId) || curSt;
@@ -213,9 +233,12 @@ export async function evaluateMatch(matchId, options = {}) {
     if (!matchSmStore.has(matchId)) matchSmStore.set(matchId, new Map());
     const smMap = matchSmStore.get(matchId);
 
-    const feedLastUpdateMs = match.score?.lastUpdated
-      ? new Date(match.score.lastUpdated).getTime()
-      : (match.lastUpdated ? new Date(match.lastUpdated).getTime() : now);
+    // If options.match or live state was just passed from pricing engine, consider feed fresh (0ms lag)
+    const feedLastUpdateMs = options.match
+      ? now
+      : (match.score?.lastUpdated
+          ? new Date(match.score.lastUpdated).getTime()
+          : (match.lastUpdated ? new Date(match.lastUpdated).getTime() : now));
 
     const validatorOk = options.validatorOk !== undefined ? options.validatorOk : true;
 
@@ -251,6 +274,8 @@ export async function evaluateMatch(matchId, options = {}) {
         const btd = ballsToDecision(spec, curSt);
         const runsAtOverEndKnown = btd === 0;
 
+        const marketStats = options.statsMap?.get(spec.name) || null;
+
         const ctx = {
           now,
           matchStatus: match.status || 'upcoming',
@@ -259,8 +284,8 @@ export async function evaluateMatch(matchId, options = {}) {
           feedLastUpdateMs,
           validatorOk,
           quote,
-          stats: null, // Connected to pricing engine when active
-          pEarlyEnd: 0,
+          stats: marketStats?.stats || null,
+          pEarlyEnd: marketStats?.pEarlyEnd || 0,
           exposureRatio,
           manualHold: isManuallyHeld,
           runsAtOverEndKnown,
@@ -305,14 +330,23 @@ export async function evaluateMatch(matchId, options = {}) {
           });
         }
 
-        updatedList.push({
+        const updatedMarket = {
           ...m,
           status: newStatus,
           reasons: newReasons,
           topReason,
           statusSince: statusChanged ? new Date(now) : (m.statusSince || new Date(now)),
           manualHold: isManuallyHeld,
-        });
+        };
+
+        if (sec.type === 'figure' && Array.isArray(m.digits)) {
+          updatedMarket.digits = m.digits.map(d => ({
+            ...d,
+            status: newStatus
+          }));
+        }
+
+        updatedList.push(updatedMarket);
       }
 
       updatedSections[sec.key] = updatedList;
@@ -321,7 +355,7 @@ export async function evaluateMatch(matchId, options = {}) {
     // Persist changes and audit rows
     if (hasChanges) {
       await Match.updateOne(
-        { matchId },
+        { $or: [{ matchId: cleanId }, { matchId: altId }, { roanuzMatchKey: cleanId }, { roanuzMatchKey: altId }] },
         {
           $set: {
             fancyMarkets: updatedSections.fancyMarkets,
@@ -342,15 +376,19 @@ export async function evaluateMatch(matchId, options = {}) {
       // Broadcast changes via Socket.IO
       const io = ioInstance;
       if (io) {
-        io.emit('fancy_market_update', { matchId, fancyMarkets: updatedSections.fancyMarkets });
-        io.emit('figure_market_update', { matchId, figureMarkets: updatedSections.figureMarkets });
-        io.emit('even_odd_market_update', { matchId, evenOddMarkets: updatedSections.evenOddMarkets });
-        io.emit('suspension_status_update', {
-          matchId,
-          fancyMarkets: updatedSections.fancyMarkets,
-          figureMarkets: updatedSections.figureMarkets,
-          evenOddMarkets: updatedSections.evenOddMarkets,
-        });
+        const emitIds = [cleanId, altId];
+        if (match.roanuzMatchKey && !emitIds.includes(match.roanuzMatchKey)) emitIds.push(match.roanuzMatchKey);
+        for (const tid of emitIds) {
+          io.emit('fancy_market_update', { matchId: tid, fancyMarkets: updatedSections.fancyMarkets });
+          io.emit('figure_market_update', { matchId: tid, figureMarkets: updatedSections.figureMarkets });
+          io.emit('even_odd_market_update', { matchId: tid, evenOddMarkets: updatedSections.evenOddMarkets });
+          io.emit('suspension_status_update', {
+            matchId: tid,
+            fancyMarkets: updatedSections.fancyMarkets,
+            figureMarkets: updatedSections.figureMarkets,
+            evenOddMarkets: updatedSections.evenOddMarkets,
+          });
+        }
       }
 
       // Push SSE update to subscribed clients
