@@ -1258,7 +1258,15 @@ class OddsApiLiveService {
 
       // If this match is tracked by Roanuz or Sportmonks real-time score engine, do not let
       // delayed / synthetic oddspapi run updates overwrite real wickets, overs, and batsmen
-      if (matchInDb.roanuzMatchKey || matchInDb.sportmonksFixtureId) {
+      if (matchInDb.roanuzMatchKey) {
+        return; // Roanuz is the exclusive authoritative score provider for this fixture
+      }
+      const { roanuzScoreService } = require('./roanuzScoreService');
+      if (roanuzScoreService?.memoryCache?.has(String(matchId)) || roanuzScoreService?.memoryCache?.has(String(matchInDb.matchId))) {
+        return;
+      }
+
+      if (matchInDb.sportmonksFixtureId) {
         const lastUpdatedMs = matchInDb.score?.lastUpdated ? new Date(matchInDb.score.lastUpdated).getTime() : 0;
         const isFresh = (Date.now() - lastUpdatedMs) < 60000;
         if (isFresh && matchInDb.score?.overs && matchInDb.score.overs !== '0.0') {

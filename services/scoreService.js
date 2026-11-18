@@ -205,6 +205,11 @@ const updateLiveScores = async (io) => {
                 });
                 console.log(`[ScoreService] Automatically added verified real LIVE match: ${matchInDb.teamA} v ${matchInDb.teamB} (Toss Closed)`);
             } else {
+                // Primary Guard: Never let delayed OddsPapi scores overwrite matches managed by Roanuz Cricket API
+                if (matchInDb.roanuzMatchKey || roanuzScoreService.memoryCache?.has(String(matchId)) || roanuzScoreService.memoryCache?.has(String(matchInDb.matchId))) {
+                    continue; // Authoritative Roanuz live ball-by-ball active — skip OddsPapi fallback
+                }
+
                 // Guard: Don't overwrite if Sportmonks updated this match within the last 30 seconds
                 const lastUp = matchInDb.score?.lastUpdated || matchInDb.lastUpdated;
                 if (lastUp && matchInDb.sportmonksFixtureId) {
@@ -222,6 +227,15 @@ const updateLiveScores = async (io) => {
             // Determine if match is finished
             const p1Total = parseInt(teamA_score.split('/')[0], 10) || 0;
             const p2Total = parseInt(teamB_score.split('/')[0], 10) || 0;
+
+            // Monotonic Progress Guard: Cricket scores within an innings can never decrease
+            const currRunsA = parseInt(String(matchInDb.score?.teamA_runs || '0').split('/')[0], 10) || 0;
+            const currRunsB = parseInt(String(matchInDb.score?.teamB_runs || '0').split('/')[0], 10) || 0;
+            if (matchInDb.score?.innings && matchInDb.score.innings === parsedScore.innings) {
+                if ((p1Total < currRunsA && p1Total > 0) || (p2Total < currRunsB && p2Total > 0)) {
+                    continue; // Reject regressive / out-of-order score update
+                }
+            }
 
             const isLiveStatus = Boolean(liveData.status?.live === true || 
                                           liveData.status?.statusName === 'Live' || 

@@ -533,6 +533,7 @@ class RoanuzScoreService {
               remBalls: parsed.remBalls,
               battingTeam: parsed.battingTeam,
               battingTeamName: parsed.battingTeamName,
+              bowlingTeamName: parsed.bowlingTeamName,
               innings: parsed.innings,
               statusText: parsed.statusText,
               batsmen: parsed.batsmen,

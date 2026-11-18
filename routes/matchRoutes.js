@@ -201,6 +201,17 @@ router.get('/:id', async (req, res) => {
 
         const response = match.toObject ? match.toObject() : match;
 
+        // Merge authoritative in-memory / Redis live score from Roanuz (0ms latency, no stale DB lag)
+        const { roanuzScoreService } = require('../services/roanuzScoreService');
+        const hotScore = await roanuzScoreService.getLiveScore(lookupId) || (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+        if (hotScore) {
+            response.score = {
+                ...(response.score || {}),
+                ...hotScore,
+                lastUpdated: new Date()
+            };
+        }
+
         // Ensure wickets and run strings are fully formed (e.g. 321/8, 225/6)
         if (response.score) {
             const sc = response.score;
