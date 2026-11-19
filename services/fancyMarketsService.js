@@ -1,5 +1,46 @@
 const Match = require('../models/Match');
-const pricingEngine = require('./pricing/pricingEngine.js');
+
+// Dynamic / resilient loader for pricingEngine to support both CommonJS and ES Module environments (e.g. Vercel Lambda Node 18/20/22/24)
+let pricingEngine = null;
+try {
+  pricingEngine = require('./pricing/pricingEngine.js');
+  if (pricingEngine && pricingEngine.default) pricingEngine = { ...pricingEngine.default, ...pricingEngine };
+} catch (e) {
+  // If CommonJS require() of ESM is blocked by this Node runtime, load via async import()
+  import('./pricing/pricingEngine.js').then(m => {
+    pricingEngine = m.default ? { ...m.default, ...m } : m;
+  }).catch(() => {});
+}
+
+async function getPricingEngine() {
+  if (pricingEngine) return pricingEngine;
+  try {
+    const m = await import('./pricing/pricingEngine.js');
+    pricingEngine = m.default ? { ...m.default, ...m } : m;
+    return pricingEngine;
+  } catch (err) {
+    console.warn('[FancyMarketsService] Could not load pricingEngine dynamically:', err.message);
+    return null;
+  }
+}
+
+let suspensionEngine = null;
+async function getSuspensionEngine() {
+  if (suspensionEngine) return suspensionEngine;
+  try {
+    suspensionEngine = require('./suspension/suspensionEngine.js');
+    if (suspensionEngine && suspensionEngine.default) suspensionEngine = { ...suspensionEngine.default, ...suspensionEngine };
+    return suspensionEngine;
+  } catch (e) {
+    try {
+      const m = await import('./suspension/suspensionEngine.js');
+      suspensionEngine = m.default ? { ...m.default, ...m } : m;
+      return suspensionEngine;
+    } catch (err) {
+      return null;
+    }
+  }
+}
 
 class FancyMarketsService {
   constructor() {
@@ -14,7 +55,7 @@ class FancyMarketsService {
    * Cached & throttled calibrated Monte Carlo odds computation (recomputes when score changes or >=5s)
    */
   getCalibratedOdds(match) {
-    if (!match) return null;
+    if (!match || !pricingEngine || !pricingEngine.computeMatchOdds) return null;
     const matchId = String(match.matchId || match._id || 'match');
     const now = Date.now();
     const scoreKey = `${match.status}_${match.score?.overs}_${match.score?.runs}_${match.score?.wickets}_${match.score?.battingTeam}`;
@@ -38,7 +79,23 @@ class FancyMarketsService {
    * Helper to derive short team codes (e.g. "South Africa Legends" -> "SA-L")
    */
   getShortTeamCode(teamName) {
-    return pricingEngine.getShortTeamCode(teamName);
+    if (pricingEngine && typeof pricingEngine.getShortTeamCode === 'function') {
+      return pricingEngine.getShortTeamCode(teamName);
+    }
+    if (!teamName) return 'TEAM';
+    const clean = teamName.trim();
+    const lower = clean.toLowerCase();
+    if (lower.includes('south africa')) return 'SA-L';
+    if (lower.includes('west indies')) return 'WI-L';
+    if (lower.includes('australia')) return 'AUS-L';
+    if (lower.includes('pakistan')) return 'PAK-L';
+    if (lower.includes('india')) return 'IND-L';
+    if (lower.includes('england')) return 'ENG-L';
+    if (lower.includes('bangladesh')) return 'BAN-L';
+    if (lower.includes('sri lanka') || lower.includes('srilanka')) return 'SL-L';
+    if (lower.includes('new zealand') || lower.includes('newzealand')) return 'NZ-L';
+    if (lower.includes('afghanistan')) return 'AFG-L';
+    return clean.slice(0, 4).toUpperCase();
   }
 
   /**
@@ -222,7 +279,7 @@ class FancyMarketsService {
 
     // Default calculated fallback
     try {
-      const res = pricingEngine.computeMatchOdds(match);
+      const res = (pricingEngine && typeof pricingEngine.computeMatchOdds === 'function') ? pricingEngine.computeMatchOdds(match) : null;
       if (res?.evenOddMarkets?.length > 0) return res.evenOddMarkets;
     } catch (e) {}
 
@@ -351,7 +408,7 @@ class FancyMarketsService {
 
     // Default calculated fallback
     try {
-      const res = pricingEngine.computeMatchOdds(match);
+      const res = (pricingEngine && typeof pricingEngine.computeMatchOdds === 'function') ? pricingEngine.computeMatchOdds(match) : null;
       if (res?.fancyMarkets?.length > 0) return res.fancyMarkets;
     } catch (e) {}
 
@@ -372,7 +429,7 @@ class FancyMarketsService {
     }
 
     try {
-      const res = pricingEngine.computeMatchOdds(match);
+      const res = (pricingEngine && typeof pricingEngine.computeMatchOdds === 'function') ? pricingEngine.computeMatchOdds(match) : null;
       if (res?.figureMarkets?.length > 0) return res.figureMarkets;
     } catch (e) {}
 
@@ -416,6 +473,7 @@ class FancyMarketsService {
     } catch (e) {}
 
     // Compute calibrated Monte Carlo odds (cached & throttled)
+    await getPricingEngine();
     const computed = this.getCalibratedOdds(match);
 
     let hasChanges = false;
@@ -538,11 +596,13 @@ class FancyMarketsService {
 
     // Run suspension engine evaluation with statsMap
     try {
-      const suspensionEngine = require('./suspension/suspensionEngine.js');
-      await suspensionEngine.evaluateMatch(match.matchId, {
-        match,
-        statsMap: computed?.statsByMarket || null
-      });
+      const se = await getSuspensionEngine();
+      if (se && se.evaluateMatch) {
+        await se.evaluateMatch(match.matchId, {
+          match,
+          statsMap: computed?.statsByMarket || null
+        });
+      }
     } catch (sErr) {}
 
     return match;
@@ -644,11 +704,13 @@ class FancyMarketsService {
         this.lastSuspensionTime.set(matchId, now);
         this.lastSuspensionTime.set(altMatchId, now);
         try {
-          const suspensionEngine = require('./suspension/suspensionEngine.js');
-          await suspensionEngine.evaluateMatch(match.matchId, {
-            match,
-            statsMap: computed?.statsByMarket || null
-          });
+          const se = await getSuspensionEngine();
+          if (se && se.evaluateMatch) {
+            await se.evaluateMatch(match.matchId, {
+              match,
+              statsMap: computed?.statsByMarket || null
+            });
+          }
         } catch (e) {
           console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);
         }

@@ -204,22 +204,31 @@ router.get('/:id', async (req, res) => {
         }
         
         // Merge authoritative in-memory / Redis live score from Roanuz (0ms latency, no stale DB lag)
-        const { roanuzScoreService } = require('../services/roanuzScoreService');
-        const hotScore = await roanuzScoreService.getLiveScore(lookupId) ||
-          await roanuzScoreService.getLiveScore(altMatchId) ||
-          (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
-        if (hotScore) {
-            match.score = {
-                ...(match.score || {}),
-                ...hotScore,
-                lastUpdated: new Date()
-            };
-            if (hotScore.format && !match.format) match.format = hotScore.format;
+        let hotScore = null;
+        try {
+            const { roanuzScoreService } = require('../services/roanuzScoreService');
+            hotScore = await roanuzScoreService.getLiveScore(lookupId) ||
+              await roanuzScoreService.getLiveScore(altMatchId) ||
+              (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+            if (hotScore) {
+                match.score = {
+                    ...(match.score || {}),
+                    ...hotScore,
+                    lastUpdated: new Date()
+                };
+                if (hotScore.format && !match.format) match.format = hotScore.format;
+            }
+        } catch (scErr) {
+            console.warn('[MatchRoutes] Live score fetch warning:', scErr.message);
         }
 
         // Ensure Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, and Even-Odd markets are populated
-        const fancyMarketsService = require('../services/fancyMarketsService');
-        match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
+        try {
+            const fancyMarketsService = require('../services/fancyMarketsService');
+            match = await fancyMarketsService.ensureMatchMarkets(match, req.app.get('io'));
+        } catch (fmErr) {
+            console.warn('[MatchRoutes] Ensure markets warning:', fmErr.message);
+        }
 
         const response = match.toObject ? match.toObject() : match;
         if (hotScore) {
@@ -231,27 +240,31 @@ router.get('/:id', async (req, res) => {
         }
 
         // Ensure wickets and run strings are fully formed (e.g. 321/8, 225/6)
-        if (response.score) {
-            const sc = response.score;
-            let p1w = sc.teamA_wickets ?? (String(sc.teamA_runs).includes('/') ? parseInt(String(sc.teamA_runs).split('/')[1], 10) : (sc.innings === 2 ? 8 : (sc.battingTeam === 'teamA' ? sc.wickets : 0)));
-            let p2w = sc.teamB_wickets ?? (String(sc.teamB_runs).includes('/') ? parseInt(String(sc.teamB_runs).split('/')[1], 10) : (sc.battingTeam === 'teamB' ? sc.wickets : 0));
-            
-            const r1 = String(sc.teamA_runs || '0').split(/[\/-]/)[0];
-            const r2 = String(sc.teamB_runs || '0').split(/[\/-]/)[0];
-            
-            if (Number(r1) > 0 && (!p1w || p1w === 0) && sc.innings === 2) p1w = Math.min(9, Math.max(6, Math.floor(Number(r1) / 40)));
-            if (Number(r2) > 0 && (!p2w || p2w === 0)) p2w = Math.min(9, Math.floor(Number(r2) / 35));
-            
-            sc.teamA_runs = `${r1}/${p1w || 0}`;
-            sc.teamB_runs = `${r2}/${p2w || 0}`;
-            sc.teamA_wickets = Number(p1w) || 0;
-            sc.teamB_wickets = Number(p2w) || 0;
-            if (!sc.wickets || sc.wickets === 0) {
-                sc.wickets = sc.battingTeam === 'teamB' ? sc.teamB_wickets : sc.teamA_wickets;
+        try {
+            if (response.score) {
+                const sc = response.score;
+                let p1w = sc.teamA_wickets ?? (String(sc.teamA_runs).includes('/') ? parseInt(String(sc.teamA_runs).split('/')[1], 10) : (sc.innings === 2 ? 8 : (sc.battingTeam === 'teamA' ? sc.wickets : 0)));
+                let p2w = sc.teamB_wickets ?? (String(sc.teamB_runs).includes('/') ? parseInt(String(sc.teamB_runs).split('/')[1], 10) : (sc.battingTeam === 'teamB' ? sc.wickets : 0));
+                
+                const r1 = String(sc.teamA_runs || '0').split(/[\/-]/)[0];
+                const r2 = String(sc.teamB_runs || '0').split(/[\/-]/)[0];
+                
+                if (Number(r1) > 0 && (!p1w || p1w === 0) && sc.innings === 2) p1w = Math.min(9, Math.max(6, Math.floor(Number(r1) / 40)));
+                if (Number(r2) > 0 && (!p2w || p2w === 0)) p2w = Math.min(9, Math.floor(Number(r2) / 35));
+                
+                sc.teamA_runs = `${r1}/${p1w || 0}`;
+                sc.teamB_runs = `${r2}/${p2w || 0}`;
+                sc.teamA_wickets = Number(p1w) || 0;
+                sc.teamB_wickets = Number(p2w) || 0;
+                if (!sc.wickets || sc.wickets === 0) {
+                    sc.wickets = sc.battingTeam === 'teamB' ? sc.teamB_wickets : sc.teamA_wickets;
+                }
+                if (!sc.thisOver || sc.thisOver.length === 0) {
+                    sc.thisOver = ['0', '1', '0', '1'];
+                }
             }
-            if (!sc.thisOver || sc.thisOver.length === 0) {
-                sc.thisOver = ['0', '1', '0', '1'];
-            }
+        } catch (fmtErr) {
+            console.warn('[MatchRoutes] Score format warning:', fmtErr.message);
         }
 
         const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);

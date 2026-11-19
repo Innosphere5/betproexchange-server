@@ -105,6 +105,14 @@ router.get('/statement', auth, async (req, res) => {
         });
     });
 
+    statement.sort((a, b) => new Date(b.date) - new Date(a.date));
+    res.json(statement);
+  } catch (err) {
+    console.error('Error fetching statement:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Get User Results (Only settled bets)
 router.get('/results', auth, async (req, res) => {
   try {
@@ -189,13 +197,6 @@ router.get('/bets', auth, async (req, res) => {
             updated: b.createdAt
         }))
     ];
-
-    combinedBets.sort((a, b) => new Date(b.placed) - new Date(a.placed));
-    res.json(combinedBets);
-  } catch (err) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
 
     combinedBets.sort((a, b) => new Date(b.placed) - new Date(a.placed));
     res.json(combinedBets);
