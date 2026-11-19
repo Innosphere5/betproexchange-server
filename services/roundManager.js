@@ -111,58 +111,11 @@ function broadcastState() {
 
 function initRoundManager(socketIo) {
   io = socketIo;
-
-  // Single unified 1-second master loop for live WebSocket broadcasts
-  if (!gameTicker) {
-    gameTicker = setInterval(() => {
-      const now = Date.now();
-      const prevStatus = currentRound?.status;
-      const round = ensureLiveRound(now);
-
-      if (prevStatus !== round.status && io) {
-        if (round.status === 'DEALING') {
-          io.emit('casino_round_start', {
-            roundId: round.roundId,
-            status: 'DEALING',
-            result: 'PENDING',
-            cards: { A: [null, null, null], B: [null, null, null] },
-            timer: roundTimer
-          });
-        } else if (round.status === 'BETTING_CLOSED') {
-          io.emit('casino_betting_closed', {
-            roundId: round.roundId,
-            status: 'BETTING_CLOSED',
-            result: 'PENDING',
-            cards: round.cards,
-            timer: roundTimer
-          });
-        }
-      }
-
-      broadcastState();
-    }, 1000);
-    if (gameTicker.unref) gameTicker.unref();
+  if (gameTicker) {
+    clearInterval(gameTicker);
+    gameTicker = null;
   }
-
-  io.on('connection', (socket) => {
-    const handlePlayerReady = () => {
-      socket.join('casino');
-      activePlayers.add(socket.id);
-      broadcastState();
-    };
-
-    socket.on('join_casino', handlePlayerReady);
-    socket.on('casino_ready', handlePlayerReady);
-
-    socket.on('leave_casino', () => {
-      socket.leave('casino');
-      activePlayers.delete(socket.id);
-    });
-
-    socket.on('disconnect', () => {
-      activePlayers.delete(socket.id);
-    });
-  });
+  console.log('[CASINO] Casino game engine is paused (under development).');
 }
 
 async function settleCasinoBets(round) {

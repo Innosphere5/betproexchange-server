@@ -167,74 +167,12 @@ async function loadHistory() {
 
 function initTeenPattiManager(socketIo) {
   io = socketIo;
-  loadHistory();
-
-  // On boot, start in IDLE state. Engine runs ONLY when players are present and ready!
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
   phase = 'IDLE';
-
-  io.on('connection', (socket) => {
-    const handlePlayerReady = () => {
-      socket.join('teenpatti');
-      activePlayers.add(socket.id);
-      console.log(`[TEENPATTI] Socket ${socket.id} joined/ready. Total: ${activePlayers.size}`);
-
-      // Auto start game loop if game is idle or paused
-      if (phase === 'IDLE' || phase === 'INIT' || !timerInterval) {
-        startNewRound();
-      } else if (currentRound) {
-        let sanitizedCards = null;
-        let sanitizedHandNames = null;
-
-        if (currentRound.status === 'RESULT_DECLARED') {
-          sanitizedCards = currentRound.cards;
-          sanitizedHandNames = currentRound.handNames;
-        } else {
-          sanitizedCards = {
-            A: [null, null, null],
-            B: [null, null, null]
-          };
-          sanitizedHandNames = null;
-        }
-
-        socket.emit('teenpatti_state', {
-          roundId: currentRound.roundId,
-          status: currentRound.status,
-          result: currentRound.status === 'RESULT_DECLARED' ? currentRound.result : 'PENDING',
-          timer: roundTimer,
-          cards: sanitizedCards,
-          handNames: sanitizedHandNames,
-          history
-        });
-      }
-    };
-
-    socket.on('join_teenpatti', handlePlayerReady);
-    socket.on('teenpatti_ready', handlePlayerReady);
-
-    const handlePlayerLeave = () => {
-      socket.leave('teenpatti');
-      activePlayers.delete(socket.id);
-      console.log(`[TEENPATTI] Socket ${socket.id} left. Total: ${activePlayers.size}`);
-
-      // If no players remain and game is currently in BETTING phase with no bets placed, pause to IDLE
-      if (activePlayers.size === 0 && phase === 'OPEN') {
-        TeenPattiBet.countDocuments({ roundId: currentRound?.roundId, status: 'PENDING' })
-          .then(count => {
-            if (count === 0 && activePlayers.size === 0 && phase === 'OPEN') {
-              console.log('[TEENPATTI] All players left with no bets. Pausing engine to IDLE.');
-              clearInterval(timerInterval);
-              phase = 'IDLE';
-              currentRound = null;
-              broadcastState();
-            }
-          })
-          .catch(() => {});
-      }
-    };
-
-    socket.on('leave_teenpatti', handlePlayerLeave);
-    socket.on('disconnect', handlePlayerLeave);
-  });
+  console.log('[TEENPATTI] Teen Patti game engine is paused (under development).');
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

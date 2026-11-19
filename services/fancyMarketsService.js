@@ -7,6 +7,31 @@ class FancyMarketsService {
     this.matchCache = new Map();
     this.lastDbUpdateTime = new Map();
     this.lastSuspensionTime = new Map();
+    this.computedOddsCache = new Map();
+  }
+
+  /**
+   * Cached & throttled calibrated Monte Carlo odds computation (recomputes when score changes or >=5s)
+   */
+  getCalibratedOdds(match) {
+    if (!match) return null;
+    const matchId = String(match.matchId || match._id || 'match');
+    const now = Date.now();
+    const scoreKey = `${match.status}_${match.score?.overs}_${match.score?.runs}_${match.score?.wickets}_${match.score?.battingTeam}`;
+
+    const cached = this.computedOddsCache.get(matchId);
+    if (cached && cached.scoreKey === scoreKey && (now - cached.time < 5000)) {
+      return cached.computed;
+    }
+
+    try {
+      const computed = pricingEngine.computeMatchOdds(match);
+      this.computedOddsCache.set(matchId, { scoreKey, time: now, computed });
+      return computed;
+    } catch (calcErr) {
+      console.warn(`[FancyMarketsService] Pricing calc warning for ${matchId}:`, calcErr.message);
+      return cached ? cached.computed : null;
+    }
   }
 
   /**
@@ -390,13 +415,8 @@ class FancyMarketsService {
       }
     } catch (e) {}
 
-    // Compute calibrated Monte Carlo odds
-    let computed = null;
-    try {
-      computed = pricingEngine.computeMatchOdds(match);
-    } catch (calcErr) {
-      console.warn(`[FancyMarketsService] Pricing calc warning in ensureMatchMarkets:`, calcErr.message);
-    }
+    // Compute calibrated Monte Carlo odds (cached & throttled)
+    const computed = this.getCalibratedOdds(match);
 
     let hasChanges = false;
 
@@ -578,13 +598,8 @@ class FancyMarketsService {
       // 1. Extract real Tied Match from Betfair Exchange quotes
       const tiedMatchMarket = this.extractTiedMatch(normalizedOdds);
 
-      // 2. Compute calculated odds via pricingEngine
-      let computed = null;
-      try {
-        computed = pricingEngine.computeMatchOdds(match);
-      } catch (calcErr) {
-        console.warn(`[FancyMarketsService] Pricing calc warning for ${matchId}:`, calcErr.message);
-      }
+      // 2. Compute calculated odds via pricingEngine (cached & throttled)
+      const computed = this.getCalibratedOdds(match);
 
       // 3. Assemble markets
       const fancyMarkets = (computed?.fancyMarkets?.length > 0)

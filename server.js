@@ -189,9 +189,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Initialize game loops and managers immediately with io so event listeners are always active
-initRoundManager(io);
-initTeenPattiManager(io);
+// Game loops and managers are disabled (games are under development to ensure 100% smooth cricket performance)
+// initRoundManager(io);
+// initTeenPattiManager(io);
 
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
@@ -668,51 +668,28 @@ app.post('/api/user/bets/:betId/cancel', auth, async (req, res) => {
   }
 });
 
-// Casino Bet Placement Endpoint
+// Casino Endpoints (Games under development)
 app.post('/api/casino/bet', auth, async (req, res) => {
-  try {
-    const { choice, amount } = req.body;
-    const result = await placeCasinoBet(req.user.userId, choice, amount);
-    res.json(result);
-  } catch (err) {
-    console.error("Casino Bet Error:", err.message);
-    res.status(400).json({ error: err.message || 'Casino bet failed' });
-  }
+  return res.status(503).json({
+    success: false,
+    status: 'UNDER_DEVELOPMENT',
+    message: 'Casino games are currently under development. Cricket Exchange is fully operational.'
+  });
 });
 
-// Casino Active Bets for Reconnect Flow
 app.get('/api/casino/active-bets', auth, async (req, res) => {
-  try {
-    const currentRound = getCurrentRound();
-    if (!currentRound) return res.json([]);
-    const bets = await CasinoBet.find({ userId: req.user.userId, roundId: currentRound.roundId });
-    res.json(bets);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch active casino bets' });
-  }
+  return res.json([]);
 });
 
-// Casino State for Serverless / REST fallback
 app.get('/api/casino/state', (req, res) => {
-  try {
-    const state = getCasinoState();
-    res.json(state);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch casino state' });
-  }
+  return res.json({
+    status: 'UNDER_DEVELOPMENT',
+    message: 'Casino games are currently under development. Cricket Exchange is fully operational.'
+  });
 });
 
-// Casino History for ribbon
 app.get('/api/casino/history', async (req, res) => {
-  try {
-    const rounds = await CasinoRound.find({ status: 'RESULT_DECLARED' })
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .lean();
-    res.json(rounds.map(r => r.result).filter(Boolean));
-  } catch (err) {
-    res.json(['A', 'B', 'A', 'A', 'B', 'B', 'A']);
-  }
+  return res.json([]);
 });
 
 // 404 Handler

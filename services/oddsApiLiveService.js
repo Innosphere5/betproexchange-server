@@ -632,9 +632,15 @@ class OddsApiLiveService {
       if (!matchId) return;
     }
 
-    console.log(
-      `[OddsApiLive] ⚡ WebSocket odds received for event ${eventId} (match ${matchId})`,
-    );
+    if (!this.lastOddsLogTime) this.lastOddsLogTime = new Map();
+    const now = Date.now();
+    const lastLog = this.lastOddsLogTime.get(eventId) || 0;
+    if (now - lastLog >= 10000) {
+      this.lastOddsLogTime.set(eventId, now);
+      console.log(
+        `[OddsApiLive] ⚡ WebSocket odds streaming for event ${eventId} (match ${matchId})`,
+      );
+    }
     await this.processOddsForEvent(msg.payload || msg);
   }
 
@@ -675,14 +681,6 @@ class OddsApiLiveService {
     }
 
     const normalizedOdds = storedBookies;
-
-    // Real-time pipeline: process Tied Match, Fancy 2, Figure, and Even-Odd markets
-    fancyMarketsService.processLiveMarkets({
-      matchId,
-      normalizedOdds,
-      io: this.io,
-      isLive: metadata?.isLive
-    });
 
     let bestHomePrice = 0;
     let bestAwayPrice = 0;
