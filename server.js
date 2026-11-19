@@ -38,6 +38,11 @@ const isOriginAllowed = (origin) => {
     return true;
   }
 
+  // Allow Render and Vercel preview/production domains
+  if (origin.endsWith('.onrender.com') || origin.endsWith('.vercel.app')) {
+    return true;
+  }
+
   // Always allow localhost / 127.0.0.1 / private LAN IPs (10.x, 192.168.x, 172.x) for local testing and dev
   if (
     /^https?:\/\/localhost(:\d+)?$/.test(origin) ||
@@ -207,7 +212,7 @@ app.use(express.json({ limit: '1mb' }));
 // Essential for serverless platforms like Vercel where execution starts without server.listen
 app.use(async (req, res, next) => {
   // Never block OPTIONS preflight requests or non-DB public health endpoints
-  if (req.method === 'OPTIONS' || req.path === '/') {
+  if (req.method === 'OPTIONS' || req.path === '/' || req.path === '/health' || req.path === '/api/health') {
     return next();
   }
 
@@ -296,6 +301,19 @@ if (require.main === module) {
 
 app.get('/', (req, res) => {
   res.send('server working');
+});
+
+// Production & Render Health Check Endpoint
+app.get(['/health', '/api/health'], (req, res) => {
+  const state = mongoose.connection.readyState;
+  const stateMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  res.json({
+    status: 'ok',
+    server: 'running',
+    dbState: stateMap[state] || state,
+    hasMongoUri: Boolean(process.env.MONGO_URI),
+    time: new Date().toISOString()
+  });
 });
 
 // API Key Pool + Redis Cache Health Endpoint (admin/monitoring use)

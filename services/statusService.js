@@ -47,6 +47,13 @@ function evaluateMatchCompletion(match, now) {
     const startTimeMs = match.startTime ? new Date(match.startTime).getTime() : 0;
     const hoursElapsed = startTimeMs > 0 ? (now.getTime() - startTimeMs) / (1000 * 60 * 60) : 0;
 
+    // Test match guard: Day 1 Stumps or day breaks are NOT match completion
+    if (formatInfo.format === 'Test') {
+        if (p2Score === 0 && p1Score > 0 && hoursElapsed < 96) {
+            return { isCompleted: false };
+        }
+    }
+
     // 1. Explicit API / statusText finished marker
     if (statusText === 'finished' || statusText === 'ended' || statusText === 'completed' || oversStr === 'final') {
         const winner = p1Score > p2Score ? match.teamA : (p2Score > p1Score ? match.teamB : (p1Score > 0 ? 'TIE' : 'VOID'));

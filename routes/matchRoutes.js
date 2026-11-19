@@ -292,14 +292,16 @@ router.get('/:id', async (req, res) => {
             response.winner = match.winner || response.winner || null;
         } else {
             response.isCompleted = false;
-            // For live matches, ensure marketStatus and bookmakerMarketStatus are OPEN if prices/scores exist
+            // For live matches, ensure marketStatus and bookmakerMarketStatus are properly maintained
             if (isMatchLive) {
-                if (response.marketStatus === 'SUSPENDED' && (response.backOddsA || response.score?.overs)) {
+                const isStumps = Boolean(response.score?.statusText?.toLowerCase()?.includes('stump'));
+                if (response.marketStatus === 'SUSPENDED' && !isStumps && (response.backOddsA || response.score?.overs)) {
                     response.marketStatus = 'OPEN';
-                    Match.updateOne({ _id: match._id }, { $set: { marketStatus: 'OPEN', bookmakerMarketStatus: 'OPEN' } }).catch(() => {});
+                    Match.updateOne({ _id: match._id }, { $set: { marketStatus: 'OPEN' } }).catch(() => {});
                 }
-                if (response.bookmakerMarketStatus === 'SUSPENDED' && (response.bookmakerBackA || response.backOddsA)) {
-                    response.bookmakerMarketStatus = 'OPEN';
+                // If Bookmaker is explicitly SUSPENDED (e.g. Stumps or innings break), preserve SUSPENDED
+                if (isStumps) {
+                    response.bookmakerMarketStatus = 'SUSPENDED';
                 }
                 // Real cricket logic: Once match is LIVE or start time has passed, the toss is already completed!
                 response.tossMarketStatus = 'CLOSED';

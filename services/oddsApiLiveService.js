@@ -746,20 +746,38 @@ class OddsApiLiveService {
         // Group by marketId to find h2h / match odds market (2 or 3 outcomes)
         const byMarket = {};
         for (const q of quoteList) {
-          const mid = q.marketId ?? "default";
+          const mid = String(q.marketId ?? "default");
           if (!byMarket[mid]) byMarket[mid] = [];
           byMarket[mid].push(q);
         }
 
-        // Prioritize market with mainLine === true or marketId 271 / 273 (standard h2h / 1x2), or 2 or 3 outcome market
+        // PRIORITY 1: 1X2 Market 273 (Home / Draw / Away) takes highest priority for 3-way cricket (Test matches)
         let winnerMarket = null;
-        for (const [mId, grp] of Object.entries(byMarket)) {
-          if (
-            (grp.length === 2 || grp.length === 3) &&
-            (grp.some((q) => q.mainLine === true) || mId === "271" || mId === "273")
-          ) {
-            winnerMarket = grp;
-            break;
+        if (byMarket["273"] && byMarket["273"].length >= 2) {
+          winnerMarket = byMarket["273"];
+        } else {
+          // Check for any market with 3 outcomes or outcomeId 274 (Draw)
+          for (const [mId, grp] of Object.entries(byMarket)) {
+            if (grp.length === 3 || grp.some(q => q.outcomeId === 274 || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'the draw' || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'draw')) {
+              winnerMarket = grp;
+              break;
+            }
+          }
+        }
+        // PRIORITY 2: Market 271 or any 2-way market with mainLine
+        if (!winnerMarket) {
+          if (byMarket["271"] && byMarket["271"].length >= 2) {
+            winnerMarket = byMarket["271"];
+          } else {
+            for (const [mId, grp] of Object.entries(byMarket)) {
+              if (
+                (grp.length === 2 || grp.length === 3) &&
+                (grp.some((q) => q.mainLine === true) || mId === "default")
+              ) {
+                winnerMarket = grp;
+                break;
+              }
+            }
           }
         }
         if (!winnerMarket) {
@@ -772,7 +790,7 @@ class OddsApiLiveService {
         }
 
         if (winnerMarket) {
-          if (winnerMarket.length === 3) {
+          if (winnerMarket.length === 3 || winnerMarket.some(q => q.outcomeId === 274 || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'the draw' || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'draw')) {
             drawOutcome = winnerMarket.find(q => {
               const name = String(q.outcomeName || q.name || q.label || '').trim().toLowerCase();
               return q.outcomeId === 274 || name === 'x' || name === 'the draw' || name === 'draw' || name === 'tie';
@@ -888,118 +906,178 @@ class OddsApiLiveService {
       }
     }
 
-    // If no exchange/bookmaker odds found, generate synthetic implied odds for LIVE matches
+    // If no exchange/bookmaker odds found, check if DB already has valid odds
     if (bestHomePrice === 0 || bestAwayPrice === 0) {
       let dbMatch = null;
       try {
         dbMatch = await Match.findOne({ matchId });
       } catch (e) {}
 
-      const isLiveMatch = metadata.isLive ||
-        dbMatch?.status === 'live' ||
-        dbMatch?.inplay === true ||
-        Boolean(dbMatch?.score?.overs && dbMatch.score.overs !== '0' && dbMatch.score.overs !== '0.0');
+      // PRESERVE EXISTING ODDS: If match already has valid exchange odds in DB, KEEP them!
+      // When a match is at Stumps or in a break, OddsPapi's active quotes are empty.
+      // We must NEVER wipe out real traded exchange prices with synthetic guesses!
+      if (dbMatch && dbMatch.backOddsA > 1 && dbMatch.backOddsB > 1) {
+        homeBack = dbMatch.backOddsA;
+        homeLay = dbMatch.layOddsA || Number((dbMatch.backOddsA + 0.02).toFixed(2));
+        awayBack = dbMatch.backOddsB;
+        awayLay = dbMatch.layOddsB || Number((dbMatch.backOddsB + 0.02).toFixed(2));
+        drawBack = dbMatch.backOddsDraw || 0;
+        drawLay = dbMatch.layOddsDraw || 0;
+        homeBackVol = dbMatch.depthBackA || "100";
+        homeLayVol = dbMatch.depthLayA || "100";
+        awayBackVol = dbMatch.depthBackB || "100";
+        awayLayVol = dbMatch.depthLayB || "100";
+        drawBackVol = dbMatch.depthBackDraw || "100";
+        drawLayVol = dbMatch.depthLayDraw || "100";
+        bestHomePrice = homeBack;
+        bestAwayPrice = awayBack;
+        usedBookie = dbMatch.bookmaker || "cached-exchange";
+      } else {
+        const isLiveMatch = metadata.isLive ||
+          dbMatch?.status === 'live' ||
+          dbMatch?.inplay === true ||
+          Boolean(dbMatch?.score?.overs && dbMatch.score.overs !== '0' && dbMatch.score.overs !== '0.0');
 
-      if (!isLiveMatch) return; // Only for live matches
+        if (!isLiveMatch) return; // Only for live matches
 
-      // Try to derive implied odds from live scores (Roanuz authoritative score or DB score)
-      try {
-        if (!dbMatch) return;
-        // Merge authoritative in-memory / Redis live score from Roanuz
+        // Try to derive implied odds from live scores (Roanuz authoritative score or DB score)
         try {
-          const { roanuzScoreService } = require('./roanuzScoreService');
-          const hotScore = await roanuzScoreService.getLiveScore(matchId) ||
-            (dbMatch.roanuzMatchKey ? await roanuzScoreService.getLiveScore(dbMatch.roanuzMatchKey) : null);
-          if (hotScore) {
-            dbMatch.score = {
-              ...(dbMatch.score || {}),
-              ...hotScore
-            };
-          }
-        } catch (e) {}
+          if (!dbMatch) return;
+          // Merge authoritative in-memory / Redis live score from Roanuz
+          try {
+            const { roanuzScoreService } = require('./roanuzScoreService');
+            const hotScore = await roanuzScoreService.getLiveScore(matchId) ||
+              (dbMatch.roanuzMatchKey ? await roanuzScoreService.getLiveScore(dbMatch.roanuzMatchKey) : null);
+            if (hotScore) {
+              dbMatch.score = {
+                ...(dbMatch.score || {}),
+                ...hotScore
+              };
+            }
+          } catch (e) {}
 
-        if (!dbMatch.score) return;
+          if (!dbMatch.score) return;
 
-        const p1Runs = parseInt(String(dbMatch.score.teamA_runs).split('/')[0], 10) || 0;
-        const p2Runs = parseInt(String(dbMatch.score.teamB_runs).split('/')[0], 10) || 0;
-        const target = dbMatch.score.target || 0;
-        const innings = dbMatch.score.innings || 1;
-        const battingTeam = dbMatch.score.battingTeam || 'teamA';
+          const p1Runs = parseInt(String(dbMatch.score.teamA_runs).split('/')[0], 10) || 0;
+          const p2Runs = parseInt(String(dbMatch.score.teamB_runs).split('/')[0], 10) || 0;
+          const target = dbMatch.score.target || 0;
+          const innings = dbMatch.score.innings || 1;
+          const battingTeam = dbMatch.score.battingTeam || 'teamA';
 
-        // Only generate if there are actual scores to work with
-        if (p1Runs === 0 && p2Runs === 0) return;
+          // Only generate if there are actual scores to work with
+          if (p1Runs === 0 && p2Runs === 0) return;
 
-        let homeImpliedOdds = 1.50;
-        let awayImpliedOdds = 3.00;
+          const isTestFormat = Boolean(
+            dbMatch?.isTestMatch ||
+            (dbMatch?.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(dbMatch.league)) ||
+            (metadata?.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league)) ||
+            (dbMatch?.format === 'TEST')
+          );
 
-        if (innings === 2 && target > 0) {
-          // 2nd innings: calculate win probability from required run rate
-          const chasingRuns = battingTeam === 'teamB' ? p2Runs : p1Runs;
-          const remainingRuns = Math.max(0, target - chasingRuns);
-          const league = (dbMatch.league || '').toLowerCase();
-          const isODI = league.includes('odi') || league.includes('one day') || league.includes('tri-series') || league.includes('world cup');
-          const maxBalls = isODI ? 300 : 120;
-          const avgRPO = isODI ? 5.5 : 8.0;
-          const estimatedBallsBowled = Math.min(Math.round((chasingRuns / avgRPO) * 6), maxBalls);
-          const remainingBalls = Math.max(1, maxBalls - estimatedBallsBowled);
-          const rrr = (remainingRuns / (remainingBalls / 6));
+          let homeImpliedOdds = 1.50;
+          let awayImpliedOdds = 3.00;
 
-          // Win probability for chasing team based on RRR vs average
-          let chasingWinProb;
-          if (remainingRuns <= 0) {
-            chasingWinProb = 0.98; // Already won
-          } else if (rrr < avgRPO * 0.7) {
-            chasingWinProb = 0.80 + Math.random() * 0.05; // Easy chase
-          } else if (rrr < avgRPO) {
-            chasingWinProb = 0.55 + Math.random() * 0.1; // Competitive
-          } else if (rrr < avgRPO * 1.5) {
-            chasingWinProb = 0.30 + Math.random() * 0.1; // Difficult
-          } else if (rrr < avgRPO * 2) {
-            chasingWinProb = 0.15 + Math.random() * 0.05; // Very difficult
+          if (isTestFormat) {
+            // Realistic 3-way Test match model (Home, Away, Draw)
+            // On Day 1, scores around 240/5 represent a competitive test day:
+            // Batting team ~ 45% (2.18), Bowling team ~ 29% (3.45), Draw ~ 26% (3.85)
+            let probBat = 0.46;
+            let probBowl = 0.29;
+            let probDraw = 0.25;
+
+            const wkts = dbMatch.score?.wickets ?? 5;
+            if (p1Runs > 0) {
+              if (wkts >= 8 && p1Runs < 200) {
+                probBat = 0.28;
+                probBowl = 0.48;
+                probDraw = 0.24;
+              } else if (p1Runs >= 350 && wkts <= 4) {
+                probBat = 0.58;
+                probBowl = 0.18;
+                probDraw = 0.24;
+              } else {
+                // Balanced Day 1 (like NZ 243/5)
+                probBat = 0.46;
+                probBowl = 0.29;
+                probDraw = 0.25;
+              }
+            }
+
+            homeImpliedOdds = Number((1 / probBat).toFixed(2));
+            awayImpliedOdds = Number((1 / probBowl).toFixed(2));
+            drawBack = Number((1 / probDraw).toFixed(2));
+            drawLay = Number((drawBack + 0.05).toFixed(2));
+            drawBackVol = "900K";
+            drawLayVol = "200K";
+          } else if (innings === 2 && target > 0) {
+            // 2nd innings: calculate win probability from required run rate
+            const chasingRuns = battingTeam === 'teamB' ? p2Runs : p1Runs;
+            const remainingRuns = Math.max(0, target - chasingRuns);
+            const league = (dbMatch.league || '').toLowerCase();
+            const isODI = league.includes('odi') || league.includes('one day') || league.includes('tri-series') || league.includes('world cup');
+            const maxBalls = isODI ? 300 : 120;
+            const avgRPO = isODI ? 5.5 : 8.0;
+            const estimatedBallsBowled = Math.min(Math.round((chasingRuns / avgRPO) * 6), maxBalls);
+            const remainingBalls = Math.max(1, maxBalls - estimatedBallsBowled);
+            const rrr = (remainingRuns / (remainingBalls / 6));
+
+            // Win probability for chasing team based on RRR vs average
+            let chasingWinProb;
+            if (remainingRuns <= 0) {
+              chasingWinProb = 0.98; // Already won
+            } else if (rrr < avgRPO * 0.7) {
+              chasingWinProb = 0.80 + Math.random() * 0.05; // Easy chase
+            } else if (rrr < avgRPO) {
+              chasingWinProb = 0.55 + Math.random() * 0.1; // Competitive
+            } else if (rrr < avgRPO * 1.5) {
+              chasingWinProb = 0.30 + Math.random() * 0.1; // Difficult
+            } else if (rrr < avgRPO * 2) {
+              chasingWinProb = 0.15 + Math.random() * 0.05; // Very difficult
+            } else {
+              chasingWinProb = 0.05 + Math.random() * 0.05; // Nearly impossible
+            }
+
+            const fieldingWinProb = 1 - chasingWinProb;
+
+            if (battingTeam === 'teamB') {
+              // Team A batted first, Team B chasing
+              homeImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
+              awayImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
+            } else {
+              // Team B batted first, Team A chasing
+              homeImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
+              awayImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
+            }
           } else {
-            chasingWinProb = 0.05 + Math.random() * 0.05; // Nearly impossible
+            // 1st innings: slight bias toward batting team (limited overs)
+            const totalRuns = p1Runs + p2Runs;
+            if (totalRuns > 0) {
+              homeImpliedOdds = p1Runs >= p2Runs ? 1.60 : 2.40;
+              awayImpliedOdds = p1Runs >= p2Runs ? 2.40 : 1.60;
+            }
           }
 
-          const fieldingWinProb = 1 - chasingWinProb;
+          // Clamp odds to reasonable range
+          homeImpliedOdds = Math.max(1.01, Math.min(1000, homeImpliedOdds));
+          awayImpliedOdds = Math.max(1.01, Math.min(1000, awayImpliedOdds));
 
-          if (battingTeam === 'teamB') {
-            // Team A batted first, Team B chasing
-            homeImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
-            awayImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
-          } else {
-            // Team B batted first, Team A chasing
-            homeImpliedOdds = Math.max(1.01, Number((1 / chasingWinProb).toFixed(2)));
-            awayImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
-          }
-        } else {
-          // 1st innings: slight bias toward batting team
-          const totalRuns = p1Runs + p2Runs;
-          if (totalRuns > 0) {
-            homeImpliedOdds = p1Runs >= p2Runs ? 1.60 : 2.40;
-            awayImpliedOdds = p1Runs >= p2Runs ? 2.40 : 1.60;
-          }
+          bestHomePrice = homeImpliedOdds;
+          bestAwayPrice = awayImpliedOdds;
+          homeBack = homeImpliedOdds;
+          homeLay = Number((homeImpliedOdds + 0.02).toFixed(2));
+          homeBackVol = "100";
+          homeLayVol = "100";
+          awayBack = awayImpliedOdds;
+          awayLay = Number((awayImpliedOdds + 0.02).toFixed(2));
+          awayBackVol = "100";
+          awayLayVol = "100";
+          usedBookie = "synthetic-implied";
+
+          console.log(`[OddsApiLive] 🧮 Generated synthetic odds for ${dbMatch.teamA} v ${dbMatch.teamB}: A(${homeBack}/${homeLay}) B(${awayBack}/${awayLay})${drawBack ? ` Draw(${drawBack}/${drawLay})` : ''} [Innings ${innings}, Target: ${target}]`);
+        } catch (err) {
+          console.warn(`[OddsApiLive] Could not generate synthetic odds for ${matchId}:`, err.message);
+          return;
         }
-
-        // Clamp odds to reasonable range
-        homeImpliedOdds = Math.max(1.01, Math.min(1000, homeImpliedOdds));
-        awayImpliedOdds = Math.max(1.01, Math.min(1000, awayImpliedOdds));
-
-        bestHomePrice = homeImpliedOdds;
-        bestAwayPrice = awayImpliedOdds;
-        homeBack = homeImpliedOdds;
-        homeLay = Number((homeImpliedOdds + 0.02).toFixed(2));
-        homeBackVol = "100";
-        homeLayVol = "100";
-        awayBack = awayImpliedOdds;
-        awayLay = Number((awayImpliedOdds + 0.02).toFixed(2));
-        awayBackVol = "100";
-        awayLayVol = "100";
-        usedBookie = "synthetic-implied";
-
-        console.log(`[OddsApiLive] 🧮 Generated synthetic odds for ${dbMatch.teamA} v ${dbMatch.teamB}: A(${homeBack}/${homeLay}) B(${awayBack}/${awayLay}) [Innings ${innings}, Target: ${target}]`);
-      } catch (err) {
-        console.warn(`[OddsApiLive] Could not generate synthetic odds for ${matchId}:`, err.message);
-        return;
       }
     }
 
@@ -1036,7 +1114,8 @@ class OddsApiLiveService {
     const isTestMatch = Boolean(
       drawOutcome ||
       (drawBack > 0) ||
-      (metadata?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
+      (metadata?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league)) ||
+      (this.eventMetadata.get(eventId)?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(this.eventMetadata.get(eventId).league))
     );
 
     // If Test match has no explicit Draw runner from Oddspapi (since Oddspapi maps market 271 as 2-way moneyline),
@@ -1045,11 +1124,11 @@ class OddsApiLiveService {
       const probA = 1 / teamABack;
       const probB = 1 / teamBBack;
       const margin = 0.02; // standard 2% Betfair overround
-      const probDraw = Math.max(0.01, (1 + margin) - (probA + probB));
+      const probDraw = Math.max(0.20, (1 + margin) - (probA + probB));
       drawBack = Number((1 / probDraw).toFixed(2));
       drawLay = Number((drawBack + 0.02).toFixed(2));
-      drawBackVol = "100";
-      drawLayVol = "100";
+      drawBackVol = "900K";
+      drawLayVol = "200K";
     }
 
     // ─── Calculate Bookmaker Odds (BPExch-compatible tighter spread & fixed depth) ──
@@ -1059,6 +1138,12 @@ class OddsApiLiveService {
     const bmLayB = teamBLay ? Number((teamBLay >= 2 ? teamBLay + 0.02 : teamBLay + 0.01).toFixed(2)) : (bmBackB ? Number((bmBackB + 0.02).toFixed(2)) : null);
     const bmBackDraw = drawBack ? Number(drawBack.toFixed(2)) : null;
     const bmLayDraw = drawLay ? Number(Math.max(drawLay, (drawBack || 0) + 0.01).toFixed(2)) : (bmBackDraw ? Number((bmBackDraw + 0.02).toFixed(2)) : null);
+
+    const isAtStumps = Boolean(
+      metadata?.statusText?.toLowerCase()?.includes('stump') ||
+      (metadata?.statusName && String(metadata.statusName).toLowerCase().includes('stump'))
+    );
+    const bmMarketStatus = isAtStumps ? "SUSPENDED" : "OPEN";
 
     // ─── Extract Market 278 (To Win the Coin Toss) from OddsPapi quotes ──
     let tossHomeBack = null, tossHomeLay = null;
@@ -1119,7 +1204,7 @@ class OddsApiLiveService {
       bookmakerDepthLayB: "100",
       bookmakerDepthBackDraw: "100",
       bookmakerDepthLayDraw: "100",
-      bookmakerMarketStatus: "OPEN",
+      bookmakerMarketStatus: bmMarketStatus,
       tossBackA: tossBackA || 1.98,
       tossLayA: tossLayA || 2.02,
       tossBackB: tossBackB || 1.98,
@@ -1222,7 +1307,7 @@ class OddsApiLiveService {
         updatedAt: now,
         marketStatus: "OPEN",
         runners: runnersList,
-        bookmakerMarketStatus: "OPEN",
+        bookmakerMarketStatus: bmMarketStatus,
         bookmakerRunners: bmRunnersList,
         tossBackA: oddsPayload.tossBackA,
         tossLayA: oddsPayload.tossLayA,

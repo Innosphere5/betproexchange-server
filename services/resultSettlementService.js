@@ -196,6 +196,21 @@ const processMatchResults = async (io) => {
                 let dbMatch = await Match.findOne({ matchId: { $in: [matchId, altId] } });
                 const sampleBet = activeBets.find(b => b.matchId === matchId || b.matchId === altId);
 
+                // Test match guard: A Test match has up to 4 innings and 5 days.
+                // Day 1 Stumps (e.g. 243/5 with 0 runs for Team 2) is a day break, NEVER match completion!
+                const isTest = Boolean(
+                    dbMatch?.isTestMatch ||
+                    (dbMatch?.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(dbMatch.league)) ||
+                    (apiMatch.tournament?.tournamentName && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(apiMatch.tournament.tournamentName))
+                );
+
+                if (isTest) {
+                    if (p2Score === 0 || (p1Score > 0 && p2Score < 50)) {
+                        console.log(`[ResultSettlement] ⏸️ Test match ${matchId} is at Day Break / Stumps (Day 1 score: ${p1Score} - ${p2Score}). NOT finished.`);
+                        continue;
+                    }
+                }
+
                 const p1Name = dbMatch?.teamA || apiMatch.participants?.participant1Name || 'Team 1';
                 const p2Name = dbMatch?.teamB || apiMatch.participants?.participant2Name || 'Team 2';
 
