@@ -1301,7 +1301,7 @@ class OddsApiLiveService {
         });
       }
 
-      this.io.emit("market_odds_update", {
+      const marketUpdatePayload = {
         matchId: String(matchId), // string for frontend Map lookup
         matchIdNum: Number(matchId), // number for legacy listeners
         updatedAt: now,
@@ -1314,7 +1314,20 @@ class OddsApiLiveService {
         tossBackB: oddsPayload.tossBackB,
         tossLayB: oddsPayload.tossLayB,
         tossMarketStatus: oddsPayload.tossMarketStatus,
-      });
+      };
+
+      this.io.emit("market_odds_update", marketUpdatePayload);
+      if (this.io.to) {
+        this.io.to(`match:${matchId}`).emit("market_odds_update", marketUpdatePayload);
+      }
+
+      // ⚡ Fast Upstash Redis Cache for Market Odds
+      try {
+        const redisCache = require('./upstashRedisCache');
+        redisCache.setOdds(String(matchId), marketUpdatePayload, 3000).catch(() => {});
+        const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+        redisCache.setOdds(altId, marketUpdatePayload, 3000).catch(() => {});
+      } catch (rErr) {}
 
       // Seamlessly trigger real-time Tied Match, Fancy 2, Figure, and Even-Odd markets update
       fancyMarketsService.processLiveMarkets({

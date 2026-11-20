@@ -101,6 +101,29 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 5000;
 app.set('io', io);
 
+// ⚡ Dynamic Room Subscriptions (Scalable WebSocket Channel Partitioning)
+io.on('connection', (socket) => {
+  socket.on('join_match', (matchId) => {
+    if (matchId) {
+      socket.join(`match:${matchId}`);
+      const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+      socket.join(`match:${altId}`);
+    }
+  });
+
+  socket.on('leave_match', (matchId) => {
+    if (matchId) {
+      socket.leave(`match:${matchId}`);
+      const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+      socket.leave(`match:${altId}`);
+    }
+  });
+
+  socket.on('join_user', (userId) => {
+    if (userId) socket.join(`user:${userId}`);
+  });
+});
+
 // MongoDB Connection Options & Handler
 mongoose.set('bufferCommands', true);
 
@@ -655,6 +678,15 @@ app.post('/api/user/bet', auth, async (req, res) => {
       io.emit('bet_placed', { matchId, bet: newBet, isOpenBet });
       io.emit('wallet_updated', { userId: req.user.userId, balance: user.walletBalance });
     }
+
+    // ⚡ Atomic Upstash Redis Wallet Cache update on bet placement
+    try {
+      const redisCache = require('./services/upstashRedisCache');
+      redisCache.setUserWallet(req.user.userId, {
+        balance: user.walletBalance,
+        credit: user.credit || 0
+      }, 15000).catch(() => {});
+    } catch (rErr) {}
 
     // If placed as an open bet, immediately check if live odds can match it
     if (isOpenBet) {

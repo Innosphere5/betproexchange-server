@@ -178,6 +178,111 @@ class UpstashRedisCache {
     return this.get(`bpx:score:${matchId}`);
   }
 
+  // ─── Odds-specific helpers (OddsPapi 1X2, Bookmaker, Even/Odd, Draw, Tied) ─
+
+  /**
+   * Cache real-time odds payload (OddsPapi)
+   * @param {string} matchId
+   * @param {Object} oddsData
+   * @param {number} ttlMs - Default 2000ms
+   */
+  async setOdds(matchId, oddsData, ttlMs = 2000) {
+    return this.set(`bpx:odds:${matchId}`, oddsData, ttlMs);
+  }
+
+  /**
+   * Get cached market odds
+   * @param {string} matchId
+   * @returns {Object|null}
+   */
+  async getOdds(matchId) {
+    return this.get(`bpx:odds:${matchId}`);
+  }
+
+  // ─── Match Catalog Caching (Fast dashboard listing) ───────────────────
+
+  /**
+   * Cache live in-play matches list
+   */
+  async setLiveMatches(matches, ttlMs = 5000) {
+    return this.set('bpx:matches:live', matches, ttlMs);
+  }
+
+  /**
+   * Get cached live in-play matches list
+   */
+  async getLiveMatches() {
+    return this.get('bpx:matches:live');
+  }
+
+  /**
+   * Cache full cricket catalog
+   */
+  async setAllMatches(matches, ttlMs = 30000) {
+    return this.set('bpx:matches:all', matches, ttlMs);
+  }
+
+  /**
+   * Get cached full cricket catalog
+   */
+  async getAllMatches() {
+    return this.get('bpx:matches:all');
+  }
+
+  /**
+   * Invalidate match list caches (e.g. on new match created or status changed)
+   */
+  async invalidateMatchCatalogs() {
+    await Promise.all([
+      this.del('bpx:matches:live'),
+      this.del('bpx:matches:all')
+    ]);
+  }
+
+  // ─── User Account & Wallet Fast Cache ────────────────────────────────
+
+  /**
+   * Cache user balance & credit
+   */
+  async setUserWallet(userId, walletData, ttlMs = 15000) {
+    return this.set(`bpx:user:${userId}:wallet`, walletData, ttlMs);
+  }
+
+  /**
+   * Get cached user balance & credit
+   */
+  async getUserWallet(userId) {
+    return this.get(`bpx:user:${userId}:wallet`);
+  }
+
+  /**
+   * Invalidate user wallet on bet, deposit, settlement
+   */
+  async invalidateUserWallet(userId) {
+    return this.del(`bpx:user:${userId}:wallet`);
+  }
+
+  /**
+   * Cache user betting limits
+   */
+  async setUserLimits(userId, limitsData, ttlMs = 60000) {
+    return this.set(`bpx:user:${userId}:limits`, limitsData, ttlMs);
+  }
+
+  /**
+   * Get cached user betting limits
+   */
+  async getUserLimits(userId) {
+    return this.get(`bpx:user:${userId}:limits`);
+  }
+
+  /**
+   * Invalidate user limits
+   */
+  async invalidateUserLimits(userId) {
+    return this.del(`bpx:user:${userId}:limits`);
+  }
+
   /**
    * Cache raw Sportmonks fixture response
    */

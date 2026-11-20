@@ -42,13 +42,22 @@ function deduplicateMatches(matches) {
     return Array.from(uniqueMap.values());
 }
 
-// Get only live matches
+// Get only live matches (Fast Upstash Redis Cache)
 router.get('/live', async (req, res) => {
     try {
+        const redisCache = require('../services/upstashRedisCache');
+        const cached = await redisCache.getLiveMatches();
+        if (cached && Array.isArray(cached) && cached.length > 0) {
+            return res.json(cached);
+        }
+
         const liveMatches = await Match.find({ status: 'live' }).sort({ startTime: -1 });
         const now = new Date();
         const filtered = deduplicateMatches(liveMatches)
             .filter((match) => shouldIncludeFixture(match, now));
+
+        // Cache live list in Redis for 4 seconds
+        redisCache.setLiveMatches(filtered, 4000).catch(() => {});
         res.json(filtered);
     } catch (error) {
         res.status(500).json({ message: error.message });
@@ -94,9 +103,15 @@ router.get('/odds-status', async (req, res) => {
     }
 });
 
-// Get all matches
+// Get all matches (Fast Upstash Redis Cache)
 router.get('/', async (req, res) => {
     try {
+        const redisCache = require('../services/upstashRedisCache');
+        const cached = await redisCache.getAllMatches();
+        if (cached && Array.isArray(cached) && cached.length > 0) {
+            return res.json(cached);
+        }
+
         const matches = await Match.find({ status: { $ne: 'cancelled' } }).sort({ startTime: 1 });
         const now = new Date();
         const { getCricketPriority } = require('../services/fixtureFilter');
@@ -131,6 +146,8 @@ router.get('/', async (req, res) => {
             }
         }
 
+        // Cache full catalog in Redis for 10 seconds
+        redisCache.setAllMatches(deduped, 10000).catch(() => {});
         res.json(deduped);
     } catch (error) {
         res.status(500).json({ message: error.message });

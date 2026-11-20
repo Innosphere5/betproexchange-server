@@ -7,17 +7,37 @@ const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
 const { resolveUserEffectiveLimits } = require('../services/limitService');
 
-// Get Current User's Wallet Balance & Credit
+// Get Current User's Wallet Balance & Credit (Fast Upstash Redis Cache)
 router.get('/wallet', auth, async (req, res) => {
   try {
-    const user = await User.findOne({ username: req.user.userId }).select('walletBalance credit username role').lean();
+    const userId = req.user.userId;
+    const redisCache = require('../services/upstashRedisCache');
+
+    // ⚡ Fast Redis Cache Read (sub-5ms)
+    const cachedWallet = await redisCache.getUserWallet(userId);
+    if (cachedWallet) {
+      return res.json({
+        success: true,
+        balance: cachedWallet.balance || 0,
+        credit: cachedWallet.credit || 0
+      });
+    }
+
+    const user = await User.findOne({ username: userId }).select('walletBalance credit username role').lean();
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    res.json({
-      success: true,
+    const walletData = {
       balance: user.walletBalance || 0,
       credit: user.credit || 0
+    };
+    // Cache for 15s in Upstash Redis
+    redisCache.setUserWallet(userId, walletData, 15000).catch(() => {});
+
+    res.json({
+      success: true,
+      balance: walletData.balance,
+      credit: walletData.credit
     });
   } catch (err) {
     console.error('Error fetching user wallet:', err);
@@ -25,10 +45,27 @@ router.get('/wallet', auth, async (req, res) => {
   }
 });
 
-// Get Current User's Effective Limits (Max Bet Sizes & Profit Limits)
+// Get Current User's Effective Limits (Max Bet Sizes & Profit Limits, Fast Redis Cache)
 router.get('/limits', auth, async (req, res) => {
   try {
-    const limits = await resolveUserEffectiveLimits(req.user.userId);
+    const userId = req.user.userId;
+    const redisCache = require('../services/upstashRedisCache');
+
+    // ⚡ Fast Redis Cache Read
+    const cachedLimits = await redisCache.getUserLimits(userId);
+    if (cachedLimits) {
+      return res.json({
+        success: true,
+        bettingAllowed: cachedLimits.bettingAllowed,
+        maxBetSizes: cachedLimits.effectiveMaxBetSizes,
+        profitLimits: cachedLimits.effectiveProfitLimits
+      });
+    }
+
+    const limits = await resolveUserEffectiveLimits(userId);
+    // Cache for 60s in Upstash Redis
+    redisCache.setUserLimits(userId, limits, 60000).catch(() => {});
+
     res.json({
       success: true,
       bettingAllowed: limits.bettingAllowed,
