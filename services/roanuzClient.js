@@ -8,6 +8,7 @@ class RoanuzClient {
     this.authToken = null;
     this.tokenExpiresAt = 0;
     this.authPromise = null;
+    this.authBackoffUntil = 0;
   }
 
   /**
@@ -16,6 +17,10 @@ class RoanuzClient {
    */
   async getAuthToken(forceRefresh = false) {
     const now = Date.now();
+    if (!forceRefresh && this.authBackoffUntil && now < this.authBackoffUntil) {
+      return null;
+    }
+
     if (!forceRefresh && this.authToken && now < this.tokenExpiresAt - 3600000) {
       return this.authToken;
     }
@@ -38,6 +43,7 @@ class RoanuzClient {
 
         if (res.data && res.data.data && res.data.data.token) {
           this.authToken = res.data.data.token;
+          this.authBackoffUntil = 0;
           // data.expires is unix timestamp in seconds
           this.tokenExpiresAt = (res.data.data.expires || (Math.floor(now / 1000) + 86400)) * 1000;
           console.log(`[Roanuz] 🔑 Successfully authenticated. Token active until ${new Date(this.tokenExpiresAt).toISOString()}`);
@@ -46,7 +52,13 @@ class RoanuzClient {
           throw new Error('Roanuz auth response missing data.token');
         }
       } catch (err) {
-        console.error('[Roanuz] ❌ Authentication failed:', err.response?.data || err.message);
+        const status = err.response?.status;
+        if (status === 403) {
+          this.authBackoffUntil = Date.now() + 5 * 60 * 1000;
+          console.warn('[Roanuz] ⚠️ Authentication 403 (Access limited to specific user groups). Backing off for 5 minutes. Live scores will continue via OddsPapi feed.');
+        } else {
+          console.error('[Roanuz] ❌ Authentication failed:', err.response?.data || err.message);
+        }
         throw err;
       } finally {
         this.authPromise = null;
@@ -65,6 +77,9 @@ class RoanuzClient {
 
     try {
       const token = await this.getAuthToken();
+      if (!token) {
+        throw new Error('Roanuz auth token unavailable (backoff active)');
+      }
       const res = await axios({
         url,
         method: options.method || 'GET',
@@ -81,8 +96,8 @@ class RoanuzClient {
       return res.data;
     } catch (err) {
       const status = err.response?.status;
-      if ((status === 401 || status === 403) && retries > 0) {
-        console.warn(`[Roanuz] Token rejected (HTTP ${status}). Refreshing token and retrying...`);
+      if (status === 401 && retries > 0) {
+        console.warn(`[Roanuz] Token expired (HTTP 401). Refreshing token and retrying...`);
         this.authToken = null;
         await this.getAuthToken(true);
         return this.request(endpoint, options, retries - 1);

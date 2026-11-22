@@ -311,7 +311,11 @@ router.get('/:id', async (req, res) => {
             response.isCompleted = false;
             // For live matches, ensure marketStatus and bookmakerMarketStatus are properly maintained
             if (isMatchLive) {
-                const isStumps = Boolean(response.score?.statusText?.toLowerCase()?.includes('stump'));
+                const isStumps = Boolean(
+                    response.score?.statusText?.toLowerCase()?.includes('stump') ||
+                    response.statusText?.toLowerCase()?.includes('stump') ||
+                    response.bookmakerMarketStatus === 'SUSPENDED'
+                );
                 if (response.marketStatus === 'SUSPENDED' && !isStumps && (response.backOddsA || response.score?.overs)) {
                     response.marketStatus = 'OPEN';
                     Match.updateOne({ _id: match._id }, { $set: { marketStatus: 'OPEN' } }).catch(() => {});
