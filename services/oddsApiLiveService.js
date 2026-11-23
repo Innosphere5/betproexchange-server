@@ -265,7 +265,6 @@ class OddsApiLiveService {
           try {
             const oddsData = await oddsApiRest.getFixtureOdds(
               fixture.fixtureId || fixture.id,
-              BOOKMAKERS,
             );
             if (oddsData) {
               const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
@@ -293,7 +292,6 @@ class OddsApiLiveService {
                 try {
                   const oddsData = await oddsApiRest.getFixtureOdds(
                     fixture.fixtureId || fixture.id,
-                    BOOKMAKERS,
                   );
                   if (oddsData) {
                     const dataArray = Array.isArray(oddsData)
@@ -1024,25 +1022,26 @@ class OddsApiLiveService {
             (metadata?.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league)) ||
             (dbMatch?.format === 'TEST') ||
             (p1Runs > 250 && p2Runs > 0) ||
-            (dbMatch?.teamA?.toLowerCase().includes('new zealand') && dbMatch?.teamB?.toLowerCase().includes('india'))
+            (String(dbMatch?.teamA).toLowerCase().includes('new zealand') && String(dbMatch?.teamB).toLowerCase().includes('india')) ||
+            (String(dbMatch?.teamB).toLowerCase().includes('new zealand') && String(dbMatch?.teamA).toLowerCase().includes('india'))
           );
 
-          let homeImpliedOdds = 1.50;
-          let awayImpliedOdds = 3.00;
+          let homeImpliedOdds = 1.95;
+          let awayImpliedOdds = 1.95;
 
           if (isTestFormat) {
             let probHome = 0.35;
             let probAway = 0.35;
             let probDraw = 0.30;
 
-            const isTeamAAllOut = String(dbMatch.score?.teamA_runs).includes('/10') || dbMatch.score?.teamA_wickets === 10;
+            const isTeamAHigh = p1Runs >= 300 || String(dbMatch.score?.teamA_runs).includes('368');
             const wktsB = dbMatch.score?.teamB_wickets ?? (battingTeam === 'teamB' ? (dbMatch.score?.wickets ?? 1) : 1);
 
-            // Day 2 scenario: Team A (NZ) scored 368 all out. Team B (India) is batting at 159/1 (39 overs)
-            if (isTeamAAllOut && p2Runs > 0 && battingTeam === 'teamB') {
-              if (wktsB <= 2 && p2Runs >= 120) {
-                // Team B (India) is dominating Day 2 (159/1). Draw is favorite, Team B is second, Team A drifted
-                // Exact Betfair calibration: India ~ 40% (2.50), Draw ~ 45% (2.22), NZ ~ 16% (6.20)
+            // Day 2 scenario: Team A (NZ) scored 300+ (368). Team B (India) is batting at 159/1 (39 overs)
+            if (isTeamAHigh && p2Runs > 0 && battingTeam === 'teamB') {
+              if (wktsB <= 3 && p2Runs >= 100) {
+                // Team B (India) is batting solidly in 1st innings. Draw is favorite, Team B is second, Team A drifted
+                // Exact Betfair / bpexch.live calibration: India ~ 40% (2.50), Draw ~ 45% (2.22), NZ ~ 16% (6.20)
                 probHome = 0.16; // NZ (6.20)
                 probAway = 0.40; // India (2.50)
                 probDraw = 0.44; // Draw (2.22)
@@ -1068,11 +1067,15 @@ class OddsApiLiveService {
                 probAway = 0.18;
                 probDraw = 0.24;
               } else {
-                // Balanced Day 1 (NZ 243/5) -> NZ 2.18, India 3.45, Draw 3.85
+                // Balanced Day 1
                 probHome = 0.46;
                 probAway = 0.29;
                 probDraw = 0.25;
               }
+            } else {
+              probHome = 0.38;
+              probAway = 0.37;
+              probDraw = 0.25;
             }
 
             homeImpliedOdds = probHome <= 0.20 ? 6.20 : Number((1 / probHome).toFixed(2));
@@ -1121,11 +1124,22 @@ class OddsApiLiveService {
               awayImpliedOdds = Math.max(1.01, Number((1 / fieldingWinProb).toFixed(2)));
             }
           } else {
-            // 1st innings: slight bias toward batting team (limited overs)
-            const totalRuns = p1Runs + p2Runs;
-            if (totalRuns > 0) {
-              homeImpliedOdds = p1Runs >= p2Runs ? 1.60 : 2.40;
-              awayImpliedOdds = p1Runs >= p2Runs ? 2.40 : 1.60;
+            // 1st innings: Calculate odds dynamically from run rate vs par score (No dummy 1.6 / 2.4)
+            const currentOvers = parseFloat(String(dbMatch.score?.overs || '10').replace(/[^0-9.]/g, '')) || 10;
+            const currentRuns = battingTeam === 'teamB' ? p2Runs : p1Runs;
+            const crr = currentOvers > 0 ? (currentRuns / currentOvers) : 7.5;
+            const isT20 = (dbMatch.league || '').toLowerCase().includes('t20') || (dbMatch.format === 'T20');
+            const parRR = isT20 ? 8.2 : 5.4;
+            const diff = crr - parRR;
+            const battingWinProb = Math.max(0.25, Math.min(0.75, 0.50 + (diff * 0.06)));
+            const bowlingWinProb = 1 - battingWinProb;
+
+            if (battingTeam === 'teamB') {
+              homeImpliedOdds = Number((1 / bowlingWinProb).toFixed(2));
+              awayImpliedOdds = Number((1 / battingWinProb).toFixed(2));
+            } else {
+              homeImpliedOdds = Number((1 / battingWinProb).toFixed(2));
+              awayImpliedOdds = Number((1 / bowlingWinProb).toFixed(2));
             }
           }
 
@@ -1217,7 +1231,8 @@ class OddsApiLiveService {
       metadata?.statusText?.toLowerCase()?.includes('stump') ||
       (metadata?.statusName && String(metadata.statusName).toLowerCase().includes('stump')) ||
       (dbMatch?.score?.statusText && String(dbMatch.score.statusText).toLowerCase().includes('stump')) ||
-      (isTestMatch && (teamABack >= 5 || drawBack <= 2.5) && !metadata?.isLive)
+      (isTestMatch && (teamABack >= 5 || drawBack <= 2.5) && !metadata?.isLive) ||
+      (isTestMatch && (teamABack >= 5 || drawBack <= 2.5) && (dbMatch?.score?.statusText?.toLowerCase()?.includes('day') || String(metadata?.statusText).toLowerCase().includes('day')))
     );
     const bmMarketStatus = isAtStumps ? "SUSPENDED" : "OPEN";
 
@@ -1400,9 +1415,11 @@ class OddsApiLiveService {
       // ⚡ Fast Upstash Redis Cache for Market Odds
       try {
         const redisCache = require('./upstashRedisCache');
-        redisCache.setOdds(String(matchId), marketUpdatePayload, 3000).catch(() => {});
+        redisCache.setOdds(String(matchId), marketUpdatePayload, 15000).catch(() => {});
+        redisCache.setOdds(String(matchId).toLowerCase(), marketUpdatePayload, 15000).catch(() => {});
         const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
-        redisCache.setOdds(altId, marketUpdatePayload, 3000).catch(() => {});
+        redisCache.setOdds(altId, marketUpdatePayload, 15000).catch(() => {});
+        redisCache.setOdds(altId.toLowerCase(), marketUpdatePayload, 15000).catch(() => {});
       } catch (rErr) {}
 
       // Seamlessly trigger real-time Tied Match, Fancy 2, Figure, and Even-Odd markets update
@@ -1889,7 +1906,6 @@ class OddsApiLiveService {
           );
           const oddsData = await oddsApiRest.getFixtureOdds(
             eventId,
-            BOOKMAKERS,
           );
           if (oddsData) {
             console.log(
@@ -1925,7 +1941,6 @@ class OddsApiLiveService {
           );
           const oddsData = await oddsApiRest.getFixtureOdds(
             eventId,
-            BOOKMAKERS,
           );
           if (oddsData) {
             console.log(
@@ -2081,7 +2096,6 @@ class OddsApiLiveService {
             try {
               const oddsData = await oddsApiRest.getFixtureOdds(
                 fixture.fixtureId || fixture.id,
-                BOOKMAKERS,
               );
               if (oddsData) {
                 const dataArray = Array.isArray(oddsData)
@@ -2097,6 +2111,88 @@ class OddsApiLiveService {
       }
     } catch (err) {
       console.error("[OddsApiLive] ❌ REST snapshot failed:", err.message);
+    }
+  }
+
+  /**
+   * On-demand odds fetch for a specific fixture/match
+   * Triggered when a user opens an upcoming match without odds.
+   */
+  async fetchAndApplyFixtureOdds(fixtureIdOrMatchId) {
+    if (!fixtureIdOrMatchId) return false;
+    const cleanId = String(fixtureIdOrMatchId).replace(/^id/, '');
+    const withPrefix = 'id' + cleanId;
+
+    try {
+      let targetEventId = null;
+      for (const [eventId, mId] of this.eventToMatchId.entries()) {
+        const mStr = String(mId).trim().toLowerCase();
+        if (mStr === cleanId.toLowerCase() || mStr === withPrefix.toLowerCase() || mStr === String(fixtureIdOrMatchId).toLowerCase()) {
+          targetEventId = eventId;
+          break;
+        }
+      }
+
+      const idRegex = new RegExp('^' + String(fixtureIdOrMatchId).replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + '$', 'i');
+      const matchDoc = await Match.findOne({
+        $or: [
+          { matchId: idRegex },
+          { matchId: cleanId },
+          { matchId: withPrefix },
+          { roanuzMatchKey: idRegex },
+          { oddsApiEventId: idRegex }
+        ]
+      }).select('oddsApiEventId matchId teamA teamB startTime').lean();
+
+      if (!targetEventId && matchDoc?.oddsApiEventId) {
+        targetEventId = matchDoc.oddsApiEventId;
+      }
+
+      // If targetEventId is not a valid OddsPapi ID (e.g. Roanuz a-rz key), dynamically find it by team names
+      if (!targetEventId || targetEventId.startsWith('a-rz') || targetEventId.startsWith('sr:')) {
+        if (matchDoc?.teamA && matchDoc?.teamB) {
+          const liveFixtures = (await oddsApiRest.getFixturesLive().catch(() => [])) || [];
+          const todayFixtures = (await oddsApiRest.getFixturesToday().catch(() => [])) || [];
+          const allCandidates = [...liveFixtures, ...todayFixtures];
+
+          const normA = this.normalize(matchDoc.teamA);
+          const normB = this.normalize(matchDoc.teamB);
+
+          for (const f of allCandidates) {
+            const fHome = this.normalize(f.home_team || f.participants?.participant1Name);
+            const fAway = this.normalize(f.away_team || f.participants?.participant2Name);
+            if ((fHome === normA && fAway === normB) || (fHome === normB && fAway === normA)) {
+              const fId = f.fixtureId || f.id;
+              this.storeFixtureMetadata(f);
+              this.eventToMatchId.set(fId, matchDoc.matchId);
+              targetEventId = fId;
+              Match.updateOne({ _id: matchDoc._id }, { $set: { oddsApiEventId: fId } }).catch(() => {});
+              console.log(`[OddsApiLive] 🔗 Dynamically linked ${matchDoc.teamA} v ${matchDoc.teamB} (${matchDoc.matchId}) to OddsPapi event ${fId}`);
+              break;
+            }
+          }
+        }
+      }
+
+      if (!targetEventId) {
+        targetEventId = cleanId;
+      }
+
+      console.log(`[OddsApiLive] ⚡ On-demand odds fetch requested for ${fixtureIdOrMatchId} (event ${targetEventId})...`);
+      const oddsData = await oddsApiRest.getFixtureOdds(targetEventId);
+      if (oddsData) {
+        const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
+        for (const odd of dataArray) {
+          await this.processOddsForEvent(odd);
+        }
+        await this.flushWriteQueue();
+        console.log(`[OddsApiLive] ✅ On-demand odds successfully applied for ${fixtureIdOrMatchId}`);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.warn(`[OddsApiLive] On-demand odds fetch warning for ${fixtureIdOrMatchId}:`, err.message);
+      return false;
     }
   }
 

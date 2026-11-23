@@ -210,6 +210,64 @@ function extractMatchOdds(oddsResponse) {
 }
 
 /**
+ * 1-Day Completed Matches Cleanup Algorithm:
+ * Tracks and deletes matches that have completed/resulted after 1 day (24 hours).
+ * Purges associated MarketOdds, OddsMarket, and Redis caches so completed matches
+ * never clutter the database or UI.
+ */
+async function cleanupCompletedMatches() {
+  try {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const thirtySixHoursAgo = new Date(Date.now() - 36 * 60 * 60 * 1000);
+
+    const staleQuery = {
+      $and: [
+        { status: { $ne: 'live' } },
+        {
+          $or: [
+            { status: 'completed' },
+            { winner: { $ne: null } },
+            { isCompleted: true },
+            { 'score.statusText': { $regex: /finished|completed|result/i } }
+          ]
+        },
+        {
+          $or: [
+            { lastUpdated: { $lt: oneDayAgo } },
+            { startTime: { $lt: thirtySixHoursAgo } }
+          ]
+        }
+      ]
+    };
+
+    const staleMatches = await Match.find(staleQuery).select('matchId').lean();
+    if (staleMatches.length === 0) return { deletedCount: 0 };
+
+    const staleIds = staleMatches.map(m => m.matchId).filter(Boolean);
+
+    const deleteRes = await Match.deleteMany({ matchId: { $in: staleIds } });
+    await MarketOdds.deleteMany({ matchId: { $in: staleIds } }).catch(() => {});
+    await OddsMarket.deleteMany({ dbMatchId: { $in: staleIds } }).catch(() => {});
+
+    try {
+      const redisCache = require('./upstashRedisCache');
+      await redisCache.invalidateMatchCatalogs();
+      for (const id of staleIds) {
+        await redisCache.del(`bpx:odds:${id}`).catch(() => {});
+        await redisCache.del(`bpx:score:${id}`).catch(() => {});
+        await redisCache.del(`bpx:match:${id}`).catch(() => {});
+      }
+    } catch (rErr) {}
+
+    console.log(`[MatchService] 🧹 1-Day Cleanup: Permanently deleted ${deleteRes.deletedCount} old completed match(es) from DB.`);
+    return deleteRes;
+  } catch (err) {
+    console.error('[MatchService] ❌ Error in cleanupCompletedMatches:', err.message);
+    return { deletedCount: 0 };
+  }
+}
+
+/**
  * fetchUpcomingMatches
  *
  * Fetches cricket fixtures from oddspapi REST API for the next 7 days.
@@ -219,6 +277,9 @@ function extractMatchOdds(oddsResponse) {
 const fetchUpcomingMatches = async (io) => {
   try {
     console.log("[MatchService] Syncing cricket fixtures with international priority from oddspapi...");
+
+    // Run 1-day completed matches cleanup algorithm
+    await cleanupCompletedMatches();
 
     // 1. Clean previous matches from previous days (except LIVE) and purge any virtual/SRL matches
     const todayStart = new Date();
@@ -470,15 +531,21 @@ const fetchUpcomingMatches = async (io) => {
       `[MatchService] ✅ Sync complete. Total synced matches: ${activeIds.length}`,
     );
 
+    // Invalidate Redis match catalog cache so fresh active matches are immediately served
+    try {
+      const redisCache = require('./upstashRedisCache');
+      await redisCache.invalidateMatchCatalogs();
+    } catch (rErr) {}
+
     if (io) {
-      // ⚡ PERF: .lean() returns plain JS objects — no Mongoose hydration, faster emit
-      const allMatches = await Match.find().sort({ startTime: 1 }).lean();
-      io.emit("matches_updated", allMatches);
+      // ⚡ PERF: .lean() returns plain JS objects — only emit active live/upcoming matches for UI
+      const activeMatches = await Match.find({ status: { $in: ["live", "upcoming"] } }).sort({ startTime: 1 }).lean();
+      io.emit("matches_updated", activeMatches);
     }
   } catch (error) {
     console.error("[MatchService] Error during sync:", error.message);
   }
 };
 
-module.exports = { fetchUpcomingMatches, extractMatchOdds };
+module.exports = { fetchUpcomingMatches, extractMatchOdds, cleanupCompletedMatches };
 

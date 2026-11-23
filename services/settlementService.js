@@ -217,6 +217,24 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
         }
         
         console.log(`[SETTLEMENT] Finished resolving ${activeBets.length} bets for matchId: ${matchId}`);
+
+        // Purge Redis caches and run 1-day completed match cleanup
+        try {
+            const redisCache = require('./upstashRedisCache');
+            await redisCache.invalidateMatchCatalogs();
+            const altId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+            await Promise.all([
+                redisCache.del(`bpx:odds:${matchId}`).catch(() => {}),
+                redisCache.del(`bpx:odds:${altId}`).catch(() => {}),
+                redisCache.del(`bpx:score:${matchId}`).catch(() => {}),
+                redisCache.del(`bpx:score:${altId}`).catch(() => {}),
+                redisCache.del(`bpx:match:${matchId}`).catch(() => {}),
+                redisCache.del(`bpx:match:${altId}`).catch(() => {})
+            ]);
+
+            const { cleanupCompletedMatches } = require('./matchService');
+            cleanupCompletedMatches().catch(() => {});
+        } catch (rErr) {}
     } catch (error) {
         console.error(`[SETTLEMENT ERROR] Failed to settle matchId ${matchId}:`, error);
     }

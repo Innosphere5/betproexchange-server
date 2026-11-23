@@ -14,9 +14,10 @@ function deduplicateMatches(matches) {
     const uniqueMap = new Map();
     for (const m of matches) {
         const mObj = m.toObject ? m.toObject() : m;
+        if (!mObj.teamA || !mObj.teamB) continue;
         // Group by normalized teams and date (YYYY-MM-DD) so different matches in a series are preserved
         const dateKey = mObj.startTime ? new Date(mObj.startTime).toISOString().slice(0, 10) : 'nodate';
-        const teamsKey = [mObj.teamA, mObj.teamB].sort().join('-').toLowerCase();
+        const teamsKey = [mObj.teamA.trim().toLowerCase(), mObj.teamB.trim().toLowerCase()].sort().join('-');
         const key = `${teamsKey}_${dateKey}`;
         
         if (uniqueMap.has(key)) {
@@ -112,12 +113,16 @@ router.get('/', async (req, res) => {
             return res.json(cached);
         }
 
-        const matches = await Match.find({ status: { $ne: 'cancelled' } }).sort({ startTime: 1 });
+        // Only fetch active live and upcoming matches for the betting catalog
+        const matches = await Match.find({ 
+            status: { $in: ['live', 'upcoming'] },
+            $or: [{ winner: null }, { winner: { $exists: false } }, { status: 'live' }]
+        }).sort({ startTime: 1 });
         const now = new Date();
         const { getCricketPriority } = require('../services/fixtureFilter');
 
         const deduped = deduplicateMatches(matches)
-            .filter((match) => shouldIncludeFixture(match, now));
+            .filter((match) => shouldIncludeFixture(match, now) && match.status !== 'completed' && !match.winner);
 
         // Sort: Live first, then by cricket priority (International Tier 1 > Tier 2 > Franchise > other), then by start time
         deduped.sort((a, b) => {
@@ -146,11 +151,39 @@ router.get('/', async (req, res) => {
             }
         }
 
-        // Cache full catalog in Redis for 10 seconds
+        // Cache full active catalog in Redis for 10 seconds
         redisCache.setAllMatches(deduped, 10000).catch(() => {});
         res.json(deduped);
     } catch (error) {
         res.status(500).json({ message: error.message });
+    }
+});
+
+// Get recently completed matches for results / history
+router.get('/results', async (req, res) => {
+    try {
+        const redisCache = require('../services/upstashRedisCache');
+        const cached = await redisCache.get('bpx:matches:results');
+        if (cached && Array.isArray(cached) && cached.length > 0) {
+            return res.json(cached);
+        }
+
+        const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const completed = await Match.find({
+            $or: [
+                { status: 'completed' },
+                { winner: { $ne: null } }
+            ],
+            $or: [
+                { lastUpdated: { $gte: oneDayAgo } },
+                { startTime: { $gte: oneDayAgo } }
+            ]
+        }).sort({ startTime: -1 }).limit(40).lean();
+
+        redisCache.set('bpx:matches:results', completed, 30000).catch(() => {});
+        res.json(completed);
+    } catch (err) {
+        res.status(500).json({ message: err.message });
     }
 });
 
@@ -160,15 +193,68 @@ router.get('/:id', async (req, res) => {
         const lookupId = req.params.id;
         const altMatchId = String(lookupId).startsWith('id') ? String(lookupId).replace(/^id/, '') : ('id' + String(lookupId));
         const numId = Number(String(lookupId).replace(/^id/, ''));
+
+        const redisCache = require('../services/upstashRedisCache');
+
+        // ⚡ Tier 1: Check Upstash Redis cache (<5ms instant response)
+        const cached = await redisCache.get(`bpx:match:${lookupId}`) ||
+          await redisCache.get(`bpx:match:${lookupId.toLowerCase()}`) ||
+          await redisCache.get(`bpx:match:${altMatchId}`);
+        if (cached && typeof cached === 'object') {
+            try {
+                const [hotOdds, hotScore] = await Promise.all([
+                    redisCache.getOdds(lookupId) || redisCache.getOdds(lookupId.toLowerCase()) || redisCache.getOdds(altMatchId),
+                    redisCache.getScore(lookupId) || redisCache.getScore(lookupId.toLowerCase()) || redisCache.getScore(altMatchId)
+                ]);
+                if (hotOdds) {
+                    if (hotOdds.runners && hotOdds.runners.length >= 2) {
+                        cached.backOddsA = hotOdds.runners[0]?.back ?? cached.backOddsA;
+                        cached.layOddsA = hotOdds.runners[0]?.lay ?? cached.layOddsA;
+                        cached.backOddsB = hotOdds.runners[1]?.back ?? cached.backOddsB;
+                        cached.layOddsB = hotOdds.runners[1]?.lay ?? cached.layOddsB;
+                        if (hotOdds.runners[2]) {
+                            cached.backOddsDraw = hotOdds.runners[2]?.back ?? cached.backOddsDraw;
+                            cached.layOddsDraw = hotOdds.runners[2]?.lay ?? cached.layOddsDraw;
+                        }
+                    }
+                    if (hotOdds.bookmakerRunners && hotOdds.bookmakerRunners.length >= 2) {
+                        cached.bookmakerBackA = hotOdds.bookmakerRunners[0]?.back ?? cached.bookmakerBackA;
+                        cached.bookmakerLayA = hotOdds.bookmakerRunners[0]?.lay ?? cached.bookmakerLayA;
+                        cached.bookmakerBackB = hotOdds.bookmakerRunners[1]?.back ?? cached.bookmakerBackB;
+                        cached.bookmakerLayB = hotOdds.bookmakerRunners[1]?.lay ?? cached.bookmakerLayB;
+                        if (hotOdds.bookmakerRunners[2]) {
+                            cached.bookmakerBackDraw = hotOdds.bookmakerRunners[2]?.back ?? cached.bookmakerBackDraw;
+                            cached.bookmakerLayDraw = hotOdds.bookmakerRunners[2]?.lay ?? cached.bookmakerLayDraw;
+                        }
+                    }
+                    if (hotOdds.bookmakerMarketStatus) cached.bookmakerMarketStatus = hotOdds.bookmakerMarketStatus;
+                }
+                if (hotScore) {
+                    cached.score = { ...(cached.score || {}), ...hotScore };
+                }
+            } catch (mergeErr) {}
+
+            return res.json(cached);
+        }
+
+        const lookupRegex = new RegExp('^' + String(lookupId).replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + '$', 'i');
+        const altRegex = new RegExp('^' + String(altMatchId).replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&') + '$', 'i');
+
         let match = await Match.findOne({
             $or: [
                 { matchId: lookupId },
                 { matchId: altMatchId },
+                { matchId: lookupRegex },
+                { matchId: altRegex },
                 ...(!isNaN(numId) ? [{ sportmonksFixtureId: numId }] : []),
                 { roanuzMatchKey: lookupId },
                 { roanuzMatchKey: altMatchId },
+                { roanuzMatchKey: lookupRegex },
+                { roanuzMatchKey: altRegex },
                 { oddsApiEventId: lookupId },
-                { oddsApiEventId: altMatchId }
+                { oddsApiEventId: altMatchId },
+                { oddsApiEventId: lookupRegex },
+                { oddsApiEventId: altRegex }
             ]
         });
         if (!match && mongoose.Types.ObjectId.isValid(lookupId)) {
@@ -338,6 +424,20 @@ router.get('/:id', async (req, res) => {
                 if (!response.tossLayB) response.tossLayB = 2.02;
                 response.tossMarketStatus = match.tossMarketStatus === 'SUSPENDED' ? 'SUSPENDED' : 'OPEN';
             }
+        }
+
+        // Cache compiled match in Redis (5s for live, 15s for upcoming, 60s for completed)
+        const ttlMs = response.status === 'live' ? 5000 : (response.status === 'completed' ? 60000 : 15000);
+        redisCache.set(`bpx:match:${lookupId}`, response, ttlMs).catch(() => {});
+        redisCache.set(`bpx:match:${lookupId.toLowerCase()}`, response, ttlMs).catch(() => {});
+        redisCache.set(`bpx:match:${altMatchId}`, response, ttlMs).catch(() => {});
+
+        // On-demand odds fetch if upcoming/live match has no odds and is not completed
+        if ((response.backOddsA == null || response.backOddsB == null) && response.status !== 'completed') {
+            try {
+                const oddsApiLiveService = require('../services/oddsApiLiveService');
+                oddsApiLiveService.fetchAndApplyFixtureOdds(lookupId).catch(() => {});
+            } catch (odErr) {}
         }
 
         res.json(response);

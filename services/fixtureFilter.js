@@ -66,6 +66,16 @@ const TIER1_FRANCHISE_LEAGUES = [
   "women's hundred",
   "sa20",
   "ilt20",
+  "il t20",
+  "international league t20",
+  "international league",
+  "bpl",
+  "bangladesh premier league",
+  "lpl",
+  "lanka premier league",
+  "acc asia cup",
+  "asia cup",
+  "rising stars",
   "major league cricket",
   "mlc",
   "womens premier league",
@@ -220,6 +230,24 @@ function isTargetBPExchFixture(fixture) {
     if (pattern.test(combined)) {
       return false;
     }
+  }
+
+  // Live matches or existing active DB matches that pass the blacklist are always eligible
+  const isLive = Boolean(
+    fixture?.status?.live ||
+      fixture?.status === "live" ||
+      fixture?.inplay === true ||
+      /live|in play|in-play/i.test(
+        normalizeText(
+          fixture?.status?.statusName || fixture?.status?.shortName || "",
+        ),
+      ),
+  );
+  if (isLive) {
+    return true;
+  }
+  if (fixture?.matchId && (fixture?.status === 'live' || fixture?.status === 'upcoming')) {
+    return true;
   }
 
   // 2. T10 Match / Tournaments check (Abu Dhabi T10, Zim Afro, ECS, ECL, etc.)
