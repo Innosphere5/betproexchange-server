@@ -218,11 +218,17 @@ async function settleToss(matchId, tossWinner, io) {
     console.log(`[TossSettlement] Toss Winner: ${tossWinner}`);
 
     const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
-    const matchIdList = [matchId, altMatchId];
+    const matchIdRegex = new RegExp(`^${matchId}$`, 'i');
+    const altMatchIdRegex = new RegExp(`^${altMatchId}$`, 'i');
+    const matchIdList = [matchId, altMatchId, String(matchId).toLowerCase(), String(altMatchId).toLowerCase()];
 
     // Find all active toss bets for this match (both pending and MATCHED)
     const tossBets = await Bet.find({
-      matchId: { $in: matchIdList },
+      $or: [
+        { matchId: { $in: matchIdList } },
+        { matchId: matchIdRegex },
+        { matchId: altMatchIdRegex }
+      ],
       marketType: 'toss',
       status: { $in: ['pending', 'MATCHED'] }
     });
@@ -313,11 +319,20 @@ async function settleToss(matchId, tossWinner, io) {
 
     // Close the toss market and nullify live odds
     await Match.updateMany(
-      { matchId: { $in: matchIdList } },
+      {
+        $or: [
+          { matchId: { $in: matchIdList } },
+          { matchId: matchIdRegex },
+          { matchId: altMatchIdRegex },
+          { roanuzMatchKey: matchIdRegex }
+        ]
+      },
       {
         $set: {
           tossMarketStatus: 'CLOSED',
           tossWinner,
+          tossSettled: true,
+          tossSettledAt: new Date(),
           tossBackA: null,
           tossLayA: null,
           tossBackB: null,
@@ -331,18 +346,49 @@ async function settleToss(matchId, tossWinner, io) {
       }
     );
 
+    // Update Upstash Redis Cache so any cached match/odds has tossSettled = true
+    try {
+      const redisCache = require('./upstashRedisCache');
+      const tossSettledCachePayload = {
+        tossMarketStatus: 'CLOSED',
+        tossWinner,
+        tossSettled: true,
+        tossSettledAt: new Date().toISOString(),
+        tossBackA: null,
+        tossLayA: null,
+        tossBackB: null,
+        tossLayB: null
+      };
+      matchIdList.forEach(id => {
+        redisCache.setOdds(String(id), tossSettledCachePayload, 30000).catch(() => {});
+        redisCache.setOdds(String(id).toLowerCase(), tossSettledCachePayload, 30000).catch(() => {});
+      });
+    } catch (rErr) {}
+
     // Emit toss market closed with winner to UI
     if (io) {
+      const tossPayload = {
+        matchId: String(matchId),
+        tossMarketStatus: 'CLOSED',
+        tossWinner,
+        tossSettled: true,
+        tossSettledAt: new Date().toISOString(),
+        tossBackA: null,
+        tossLayA: null,
+        tossBackB: null,
+        tossLayB: null
+      };
+
       matchIdList.forEach(id => {
-        io.emit('toss_odds_update', {
-          matchId: String(id),
-          tossMarketStatus: 'CLOSED',
-          tossWinner,
-          tossBackA: null,
-          tossLayA: null,
-          tossBackB: null,
-          tossLayB: null
-        });
+        const itemPayload = { ...tossPayload, matchId: String(id) };
+        io.emit('toss_odds_update', itemPayload);
+        io.emit('toss_settled', itemPayload);
+        if (io.to) {
+          io.to(`match:${id}`).emit('toss_odds_update', itemPayload);
+          io.to(`match:${id}`).emit('toss_settled', itemPayload);
+          io.to(`match:${String(id).toLowerCase()}`).emit('toss_odds_update', itemPayload);
+          io.to(`match:${String(id).toLowerCase()}`).emit('toss_settled', itemPayload);
+        }
       });
     }
 

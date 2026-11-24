@@ -3036,10 +3036,19 @@ router.post('/declare-toss-winner', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Missing matchId or tossWinner' });
     }
 
-    const match = await Match.findOne({ matchId });
+    const altMatchId = String(matchId).startsWith('id') ? String(matchId).replace(/^id/, '') : ('id' + String(matchId));
+    const match = await Match.findOne({
+      $or: [
+        { matchId },
+        { matchId: altMatchId },
+        { matchId: new RegExp(`^${matchId}$`, 'i') },
+        { matchId: new RegExp(`^${altMatchId}$`, 'i') },
+        { roanuzMatchKey: new RegExp(`^${matchId}$`, 'i') }
+      ]
+    });
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
-    if (match.tossWinner) {
+    if (match.tossWinner || match.tossSettled) {
       return res.status(400).json({ error: `Toss already settled. Winner: ${match.tossWinner}` });
     }
 

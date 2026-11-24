@@ -65,6 +65,8 @@ const matchSchema = new mongoose.Schema({
   tossDepthLayB: { type: String, default: null },
   tossMarketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
   tossWinner: { type: String, default: null }, // Team name that won the toss
+  tossSettled: { type: Boolean, default: false }, // Explicit toss settled flag
+  tossSettledAt: { type: Date, default: null },
 
   // ─── Bookmaker Market Fields ──────────────────────────────────────────────
   bookmakerBackA: { type: Number, default: null },
