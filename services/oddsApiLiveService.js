@@ -642,6 +642,41 @@ class OddsApiLiveService {
       unitedtigers: "unitedtigers",
       emirateseagles: "emirateseagles",
       yaslions: "yaslions",
+      // ILT20 Teams
+      sharjahwarriors: "sharjahwarriors",
+      sharjahwarriorz: "sharjahwarriors",
+      desertvipers: "desertvipers",
+      gulfgiants: "gulfgiants",
+      miemirates: "miemirates",
+      dubaicapitals: "dubaicapitals",
+      abudhabiknightriders: "adkr",
+      // BBL Teams
+      perthscorchers: "perthscorchers",
+      hobarthurricanes: "hobarthurricanes",
+      melbournerenegades: "melbournerenegades",
+      sydneythunder: "sydneythunder",
+      adelaidestrikers: "adelaidestrikers",
+      sydneysixers: "sydneysixers",
+      melbournestars: "melbournestars",
+      brisbaneheat: "brisbaneheat",
+      // SA20 Teams
+      micapetown: "micapetown",
+      durbansupergiants: "durbansupergiants",
+      paarl: "paarlroyals",
+      paarlroyals: "paarlroyals",
+      pretoriacapitals: "pretoriacapitals",
+      sunriserseasterncape: "sunriserseasterncape",
+      joburgsuperkings: "joburgsuperkings",
+      // CPL Teams
+      trinbagoknight: "trinbagoknightriders",
+      barbaroyals: "barbadosroyals",
+      barbadosroyals: "barbadosroyals",
+      guyanawarriors: "guyanawarriors",
+      guyaanazonwarriors: "guyanawarriors",
+      jamaicakings: "jamaicakingsmen",
+      jamaicatallawahs: "jamaicakingsmen",
+      stkittspatriots: "stkittspatriots",
+      antiguafalcons: "antiguafalcons",
     };
     for (const [key, value] of Object.entries(aliases)) {
       if (n.includes(key)) return value;
@@ -1884,8 +1919,8 @@ class OddsApiLiveService {
       if (unlinkedLive.length > 0) {
         if (!this.lastBootstrapAttempt) this.lastBootstrapAttempt = 0;
         const msSinceLastBootstrap = Date.now() - this.lastBootstrapAttempt;
-        if (msSinceLastBootstrap > 5 * 60 * 1000) {
-          // 5 minutes
+        if (msSinceLastBootstrap > 2 * 60 * 1000) {
+          // 2 minutes — faster re-link for live matches with missing odds
           this.lastBootstrapAttempt = Date.now();
           console.log(
             `[OddsApiLive] 🔄 Found ${unlinkedLive.length} unlinked live match(es). Re-bootstrapping...`,
@@ -2153,7 +2188,16 @@ class OddsApiLiveService {
         if (matchDoc?.teamA && matchDoc?.teamB) {
           const liveFixtures = (await oddsApiRest.getFixturesLive().catch(() => [])) || [];
           const todayFixtures = (await oddsApiRest.getFixturesToday().catch(() => [])) || [];
-          const allCandidates = [...liveFixtures, ...todayFixtures];
+          let allCandidates = [...liveFixtures, ...todayFixtures];
+
+          // Also search by match start date (covers recently started / yesterday matches)
+          if (matchDoc.startTime) {
+            try {
+              const matchDate = new Date(matchDoc.startTime).toISOString().split('T')[0];
+              const dateFixtures = (await oddsApiRest.getFixturesForDate(matchDate).catch(() => [])) || [];
+              allCandidates = [...allCandidates, ...dateFixtures];
+            } catch (e) {}
+          }
 
           const normA = this.normalize(matchDoc.teamA);
           const normB = this.normalize(matchDoc.teamB);
@@ -2161,7 +2205,11 @@ class OddsApiLiveService {
           for (const f of allCandidates) {
             const fHome = this.normalize(f.home_team || f.participants?.participant1Name);
             const fAway = this.normalize(f.away_team || f.participants?.participant2Name);
-            if ((fHome === normA && fAway === normB) || (fHome === normB && fAway === normA)) {
+            const homeMatch = fHome === normA || (fHome.length >= 3 && normA.length >= 3 && (fHome.includes(normA) || normA.includes(fHome)));
+            const awayMatch = fAway === normB || (fAway.length >= 3 && normB.length >= 3 && (fAway.includes(normB) || normB.includes(fAway)));
+            const homeMatchSwap = fHome === normB || (fHome.length >= 3 && normB.length >= 3 && (fHome.includes(normB) || normB.includes(fHome)));
+            const awayMatchSwap = fAway === normA || (fAway.length >= 3 && normA.length >= 3 && (fAway.includes(normA) || normA.includes(fAway)));
+            if ((homeMatch && awayMatch) || (homeMatchSwap && awayMatchSwap)) {
               const fId = f.fixtureId || f.id;
               this.storeFixtureMetadata(f);
               this.eventToMatchId.set(fId, matchDoc.matchId);
