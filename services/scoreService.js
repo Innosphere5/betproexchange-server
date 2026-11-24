@@ -220,6 +220,16 @@ const updateLiveScores = async (io) => {
                 }
             }
 
+            // ✅ GUARD: Never write live scores to a future match (startTime > now + 24h)
+            // Prevents cross-series contamination (e.g., live Test score onto future ODI)
+            if (matchInDb.startTime) {
+                const msUntilStart = new Date(matchInDb.startTime).getTime() - Date.now();
+                if (msUntilStart > 24 * 60 * 60 * 1000 && matchInDb.status !== 'live') {
+                    console.warn(`[ScoreService] ⚠️ Skipping score update for future match ${matchId} (starts in ${Math.round(msUntilStart / 3600000)}h)`);
+                    continue;
+                }
+            }
+
             const parsedScore = extractLiveScorePayload(liveData, matchInDb.score || {}, liveData._oddsHint || {});
             const teamA_score = parsedScore.teamA_runs;
             const teamB_score = parsedScore.teamB_runs;
@@ -438,6 +448,15 @@ const updateLiveScores = async (io) => {
                         const stillLive = Boolean(f.status?.live || f.status?.statusId === 1 || f.status?.statusName === 'Live');
                         const isFinished = !stillLive && (f.status?.statusName === 'Finished' || f.status?.statusId === 2);
                         if (stillLive) {
+                            // ✅ GUARD: Don't set a future match to 'live' from stale verification
+                            if (staleMatch.startTime) {
+                                const msUntilStart = new Date(staleMatch.startTime).getTime() - Date.now();
+                                if (msUntilStart > 24 * 60 * 60 * 1000) {
+                                    console.warn(`[ScoreService] ⚠️ Skipping stale-verify live write for future match ${staleMatch.matchId} (starts in ${Math.round(msUntilStart / 3600000)}h)`);
+                                    confirmedStaleIds.push(staleMatch.matchId);
+                                    continue;
+                                }
+                            }
                             // Match is still live — just not in the small /fixtures/live response. Process its score.
                             const parsedScore = extractLiveScorePayload(f, staleMatch.score || {});
                             const p1 = parseInt(String(parsedScore.teamA_runs).split('/')[0], 10) || 0;

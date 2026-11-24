@@ -482,83 +482,76 @@ class OddsApiLiveService {
         }
       }
 
-      // Pass 1: Exact normalized match
+      // Pass 1 & 2: Collect ALL candidates, then pick the BEST match
+      // This prevents linking a live fixture to the wrong match when multiple
+      // matches exist between the same teams (e.g., Test series + ODI series).
+      const candidates = [];
+
       for (const match of matches) {
         const dbHome = this.normalize(match.teamA);
         const dbAway = this.normalize(match.teamB);
         const dbTime = new Date(match.startTime).getTime();
 
-        const teamsMatch =
+        // Exact normalized match
+        const exactMatch =
           (dbHome === apiHome && dbAway === apiAway) ||
           (dbHome === apiAway && dbAway === apiHome);
 
-        if (teamsMatch) {
-          const isLive = match.status === 'live';
-          const isTest = Boolean(
-            match.isTestMatch ||
-            (match.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(match.league)) ||
-            (metadata.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
-          );
-          const maxAllowedHours = isLive ? 168 : (isTest ? 144 : 24);
-          const timeDiff =
-            apiTime > 0 ? Math.abs(dbTime - apiTime) / (1000 * 60 * 60) : 0;
-          if (timeDiff <= maxAllowedHours || apiTime === 0) {
-            this.eventToMatchId.set(eventId, match.matchId);
-            Match.updateOne({ _id: match._id }, { $set: { oddsApiEventId: eventId } }).catch(() => {});
-            console.log(
-              `[OddsApiLive] 🔗 Linked ${metadata.home} v ${metadata.away} → match ${match.matchId}`,
-            );
-            return match.matchId;
-          }
-        }
-      }
-
-      // Pass 2: Substring fallback — if normalized names are contained within each other
-      for (const match of matches) {
-        const dbHome = this.normalize(match.teamA);
-        const dbAway = this.normalize(match.teamB);
-        const dbTime = new Date(match.startTime).getTime();
-
+        // Substring fallback
         const homeContains =
           (dbHome.includes(apiHome) || apiHome.includes(dbHome)) &&
-          dbHome.length >= 3 &&
-          apiHome.length >= 3;
+          dbHome.length >= 3 && apiHome.length >= 3;
         const awayContains =
           (dbAway.includes(apiAway) || apiAway.includes(dbAway)) &&
-          dbAway.length >= 3 &&
-          apiAway.length >= 3;
+          dbAway.length >= 3 && apiAway.length >= 3;
         const homeContainsSwap =
           (dbHome.includes(apiAway) || apiAway.includes(dbHome)) &&
-          dbHome.length >= 3 &&
-          apiAway.length >= 3;
+          dbHome.length >= 3 && apiAway.length >= 3;
         const awayContainsSwap =
           (dbAway.includes(apiHome) || apiHome.includes(dbAway)) &&
-          dbAway.length >= 3 &&
-          apiHome.length >= 3;
-
-        const teamsMatch =
+          dbAway.length >= 3 && apiHome.length >= 3;
+        const fuzzyMatch =
           (homeContains && awayContains) ||
           (homeContainsSwap && awayContainsSwap);
 
-        if (teamsMatch) {
-          const isLive = match.status === 'live';
-          const isTest = Boolean(
-            match.isTestMatch ||
-            (match.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(match.league)) ||
-            (metadata.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
-          );
-          const maxAllowedHours = isLive ? 168 : (isTest ? 144 : 24);
-          const timeDiff =
-            apiTime > 0 ? Math.abs(dbTime - apiTime) / (1000 * 60 * 60) : 0;
-          if (timeDiff <= maxAllowedHours || apiTime === 0) {
-            this.eventToMatchId.set(eventId, match.matchId);
-            Match.updateOne({ _id: match._id }, { $set: { oddsApiEventId: eventId } }).catch(() => {});
-            console.log(
-              `[OddsApiLive] 🔗 Linked (fuzzy) ${metadata.home} v ${metadata.away} → match ${match.matchId}`,
-            );
-            return match.matchId;
-          }
+        if (!exactMatch && !fuzzyMatch) continue;
+
+        const isTest = Boolean(
+          match.isTestMatch ||
+          (match.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(match.league)) ||
+          (metadata.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
+        );
+        const maxAllowedHours = match.status === 'live' ? 168 : (isTest ? 144 : 24);
+        const timeDiff = apiTime > 0 ? Math.abs(dbTime - apiTime) / (1000 * 60 * 60) : 0;
+
+        if (timeDiff <= maxAllowedHours || apiTime === 0) {
+          // Scoring: higher = better match
+          let score = 0;
+          // Strongly prefer matching live API fixture to live DB match
+          if (metadata.isLive && match.status === 'live') score += 10000;
+          // Prefer upcoming-to-upcoming
+          if (!metadata.isLive && match.status === 'upcoming') score += 5000;
+          // Penalize live API fixture linking to upcoming DB match
+          if (metadata.isLive && match.status === 'upcoming') score += 0;
+          // Prefer exact match over fuzzy
+          if (exactMatch) score += 1000;
+          // Prefer closest start time
+          score -= timeDiff;
+
+          candidates.push({ match, score, exactMatch, timeDiff });
         }
+      }
+
+      if (candidates.length > 0) {
+        // Sort by score descending (best match first)
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0];
+        this.eventToMatchId.set(eventId, best.match.matchId);
+        Match.updateOne({ _id: best.match._id }, { $set: { oddsApiEventId: eventId } }).catch(() => {});
+        console.log(
+          `[OddsApiLive] 🔗 Linked${best.exactMatch ? '' : ' (fuzzy)'} ${metadata.home} v ${metadata.away} → match ${best.match.matchId} (score: ${best.score.toFixed(0)}, timeDiff: ${best.timeDiff.toFixed(1)}h, ${candidates.length} candidates)`,
+        );
+        return best.match.matchId;
       }
     } catch (err) {
       console.error(
@@ -1550,6 +1543,17 @@ class OddsApiLiveService {
       const { extractLiveScorePayload } = require('./scoreService');
       const matchInDb = await Match.findOne({ matchId });
       if (!matchInDb) return;
+
+      // ✅ GUARD: Never write live scores to a future match (startTime > now + 24h)
+      // This prevents leaking scores from a live match (e.g., SA v BAN Test) onto
+      // a future match between the same teams (e.g., SA v BAN ODI starting Dec 1).
+      if (matchInDb.status === 'upcoming' && matchInDb.startTime) {
+        const msUntilStart = new Date(matchInDb.startTime).getTime() - Date.now();
+        if (msUntilStart > 24 * 60 * 60 * 1000) {
+          console.warn(`[OddsApiLive] ⚠️ Skipping score update for future match ${matchId} (${matchInDb.teamA} v ${matchInDb.teamB}, starts in ${Math.round(msUntilStart / 3600000)}h)`);
+          return;
+        }
+      }
 
       const liveData = {
         fixtureId: eventId,

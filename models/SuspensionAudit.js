@@ -22,7 +22,11 @@ const suspensionAuditSchema = new mongoose.Schema({
     exposureRatio: Number,
     pEarlyEnd: Number
   },
-  createdAt: { type: Date, default: Date.now, index: true }
+  createdAt: { type: Date, default: Date.now }
 });
+
+// TTL index: auto-delete audits older than 3 days to prevent DB bloat
+// (742k docs / 360MB filled the 512MB Atlas free tier)
+suspensionAuditSchema.index({ createdAt: 1 }, { expireAfterSeconds: 3 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('SuspensionAudit', suspensionAuditSchema);
