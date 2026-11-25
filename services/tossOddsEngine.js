@@ -90,11 +90,18 @@ async function updateTossOdds() {
     });
 
     for (const match of startedOrLiveMatches) {
+      // In real cricket, the toss happens 30 minutes before match startTime.
+      // If a match has already started or is live, the toss is at least 30m old.
+      const matchStartMs = match.startTime ? new Date(match.startTime).getTime() : now.getTime();
+      const derivedTossTime = new Date(matchStartMs - (30 * 60 * 1000));
+      const effectiveTossSettledAt = match.tossSettledAt || derivedTossTime;
+
       await Match.updateOne(
         { matchId: match.matchId },
         {
           $set: {
             tossMarketStatus: 'CLOSED',
+            tossSettled: true,
             tossBackA: null,
             tossLayA: null,
             tossBackB: null,
@@ -103,6 +110,8 @@ async function updateTossOdds() {
             tossDepthLayA: '0',
             tossDepthBackB: '0',
             tossDepthLayB: '0',
+            // Set tossSettledAt to derivedTossTime (30m before start) so live matches are immediately expired (>20m)
+            ...(!match.tossSettledAt ? { tossSettledAt: derivedTossTime } : {}),
             lastUpdated: now
           }
         }
@@ -114,7 +123,9 @@ async function updateTossOdds() {
         ioInstance.emit('toss_odds_update', {
           matchId: String(match.matchId),
           tossMarketStatus: 'CLOSED',
+          tossSettled: true,
           tossWinner: match.tossWinner || null,
+          tossSettledAt: effectiveTossSettledAt.toISOString ? effectiveTossSettledAt.toISOString() : new Date(effectiveTossSettledAt).toISOString(),
           tossBackA: null,
           tossLayA: null,
           tossBackB: null,

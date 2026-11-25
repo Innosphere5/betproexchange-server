@@ -841,10 +841,13 @@ class SportmonksScoreService {
             }
 
             if (shouldCloseToss) {
+              const declaredTossWinner = parsed.tossWinner || matchInDb.tossWinner || null;
               this.io.emit('toss_odds_update', {
                 matchId: matchDbId,
                 tossMarketStatus: 'CLOSED',
-                tossWinner: parsed.tossWinner || matchInDb.tossWinner || null,
+                tossWinner: declaredTossWinner,
+                tossSettled: Boolean(matchInDb.tossSettled || declaredTossWinner),
+                tossSettledAt: matchInDb.tossSettledAt ? new Date(matchInDb.tossSettledAt).toISOString() : new Date().toISOString(),
                 isLive: true,
                 updatedAt: new Date()
               });
