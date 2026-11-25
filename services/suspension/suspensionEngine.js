@@ -14,6 +14,19 @@ import {
   REASON_PRIORITY,
 } from './suspension.reference.js';
 
+/**
+ * Production engine configuration:
+ * - 45s staleMs: prevents market fluttering/blinking between cricket deliveries (bowler walk-back)
+ * - freshStreakToReopen 1: reopens immediately upon fresh score delivery
+ * - pEarlyEndMax 0.65: prevents premature suspension of future overs
+ */
+const ENGINE_CONFIG = {
+  ...DEFAULT_CONFIG,
+  staleMs: 45000,
+  freshStreakToReopen: 1,
+  pEarlyEndMax: 0.65,
+};
+
 import Match from '../../models/Match.js';
 import Bet from '../../models/Bet.js';
 import SuspensionAudit from '../../models/SuspensionAudit.js';
@@ -291,7 +304,7 @@ export async function evaluateMatch(matchId, options = {}) {
           runsAtOverEndKnown,
         };
 
-        const res = step(sm, spec, ctx, DEFAULT_CONFIG);
+        const res = step(sm, spec, ctx, ENGINE_CONFIG);
         smMap.set(mKey, res.sm);
 
         const newStatus = res.status.toUpperCase(); // 'OPEN' or 'SUSPENDED'
@@ -323,7 +336,7 @@ export async function evaluateMatch(matchId, options = {}) {
               wickets,
               runs,
               innings,
-              feedStale: isStale(now, feedLastUpdateMs, DEFAULT_CONFIG.staleMs),
+              feedStale: isStale(now, feedLastUpdateMs, ENGINE_CONFIG.staleMs),
               exposureRatio,
               pEarlyEnd: 0,
             },

@@ -375,7 +375,7 @@ class FancyMarketsService {
           wicketN: wktN,
           backPrice: q ? Number(q.handicap || q.price) : null,
           backVol: q ? this.formatVolume(q.limit) : '100',
-          layPrice: q ? Number((q.handicap || q.price) + 1) : null,
+          layPrice: q ? Number((q.handicap || q.price) - 1) : null,
           layVol: q ? this.formatVolume(q.limit) : '100',
           status: q ? 'OPEN' : 'SUSPENDED',
           maxBet: 2000000
@@ -754,10 +754,15 @@ class FancyMarketsService {
         try {
           const se = await getSuspensionEngine();
           if (se && se.evaluateMatch) {
-            await se.evaluateMatch(match.matchId, {
+            const evaluated = await se.evaluateMatch(match.matchId, {
               match,
               statsMap: computed?.statsByMarket || null
             });
+            if (evaluated) {
+              if (evaluated.fancyMarkets) match.fancyMarkets = evaluated.fancyMarkets;
+              if (evaluated.figureMarkets) match.figureMarkets = evaluated.figureMarkets;
+              if (evaluated.evenOddMarkets) match.evenOddMarkets = evaluated.evenOddMarkets;
+            }
           }
         } catch (e) {
           console.error(`[FancyMarketsService] Suspension evaluation error:`, e.message);

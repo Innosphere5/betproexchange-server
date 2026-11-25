@@ -177,7 +177,7 @@ export function computeMatchOdds(match, options = {}) {
     const overRes = getOverStats(ov);
     const ballsLeft = ov * 6 - st.legalBalls;
 
-    if (!overRes || ballsLeft <= 0) {
+    if (!overRes || !overRes.stats || ballsLeft <= 0) {
       // Completed / Awaiting Settlement
       fancyMarkets.push({
         name: label,
@@ -254,18 +254,31 @@ export function computeMatchOdds(match, options = {}) {
           lambda
         });
         const wktStats = O.distStats(wktSim.samples);
-        const spread = O.fancySpread(wktStats, { margin: 0.02 });
-        fancyMarkets.push({
-          name: wItem.label,
-          wicketN: wItem.n,
-          backPrice: spread.yesLine,
-          backVol: '100',
-          layPrice: spread.noLine,
-          layVol: '100',
-          status: isLive ? 'OPEN' : 'SUSPENDED',
-          maxBet: 2000000
-        });
-        statsByMarket.set(wItem.label, { stats: wktStats, pEarlyEnd: wktSim.pEarlyEnd });
+        if (!wktStats) {
+          fancyMarkets.push({
+            name: wItem.label,
+            wicketN: wItem.n,
+            backPrice: null,
+            backVol: '100',
+            layPrice: null,
+            layVol: '100',
+            status: 'SUSPENDED',
+            maxBet: 2000000
+          });
+        } else {
+          const spread = O.fancySpread(wktStats, { margin: 0.02 });
+          fancyMarkets.push({
+            name: wItem.label,
+            wicketN: wItem.n,
+            backPrice: spread.yesLine,
+            backVol: '100',
+            layPrice: spread.noLine,
+            layVol: '100',
+            status: isLive ? 'OPEN' : 'SUSPENDED',
+            maxBet: 2000000
+          });
+          statsByMarket.set(wItem.label, { stats: wktStats, pEarlyEnd: wktSim.pEarlyEnd });
+        }
       } catch (e) {
         fancyMarkets.push({
           name: wItem.label,
@@ -310,7 +323,7 @@ export function computeMatchOdds(match, options = {}) {
   const figBallsLeft = figureTargetOver * 6 - st.legalBalls;
 
   let figureMarkets = [];
-  if (!figOverRes || figBallsLeft <= 3) {
+  if (!figOverRes || !figOverRes.stats || figBallsLeft <= 3) {
     figureMarkets = [{
       name: figMarketName,
       maxBet: 100000,
@@ -366,7 +379,7 @@ export function computeMatchOdds(match, options = {}) {
     const eoRes = getOverStats(eoOv);
     const eoBallsLeft = eoOv * 6 - st.legalBalls;
 
-    if (!eoRes || eoBallsLeft <= 3) {
+    if (!eoRes || !eoRes.stats || eoBallsLeft <= 3) {
       evenOddMarkets.push({
         name: eoName,
         backPrice: null,

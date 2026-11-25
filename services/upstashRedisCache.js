@@ -1,105 +1,189 @@
-const { Redis } = require('@upstash/redis');
+const { Redis: RestRedis } = require('@upstash/redis');
+let IORedis = null;
+try {
+  IORedis = require('ioredis');
+} catch (e) {
+  // ioredis optional fallback
+}
 require('dotenv').config();
 
 /**
- * Upstash Redis Cache Layer for BetPro Exchange
+ * Upstash Redis Dual-Mode Cache Layer for BetPro Exchange
  *
- * Ultra-low-latency (~5ms) serverless Redis cache that:
- * - Persists across server restarts (unlike in-memory Map)
- * - Works from Vercel Edge/Serverless (HTTP-based, no TCP needed)
- * - Provides sub-second TTLs for live scores
- * - Falls back gracefully to in-memory when Upstash is not configured
+ * Supports:
+ * 1. Low-latency TCP connection via ioredis (when REDIS_URL is provided)
+ * 2. Serverless HTTP REST via @upstash/redis (when UPSTASH_REDIS_REST_URL is provided)
+ * 3. Sub-millisecond L1 in-memory Map cache (0ms instant response)
  *
  * Keys:
+ *   bpx:matches:live        → active live matches array (TTL 4s-10s)
+ *   bpx:matches:all         → full cricket catalog (TTL 10s-30s)
  *   bpx:score:<matchId>     → parsed live score payload (TTL 500ms–2s)
- *   bpx:fixture:<fixtureId> → raw Sportmonks fixture (TTL 1s)
- *   bpx:pool:status         → API key pool health metrics (TTL 60s)
+ *   bpx:odds:<matchId>      → parsed real-time odds (TTL 2s–15s)
+ *   bpx:user:<userId>:wallet→ user wallet balances
  */
 
 class UpstashRedisCache {
   constructor() {
-    this.redis = null;
-    this.enabled = false;
-    this.fallbackCache = new Map(); // In-memory fallback when Upstash is not configured
-
-    const url = process.env.UPSTASH_REDIS_REST_URL;
-    const token = process.env.UPSTASH_REDIS_REST_TOKEN;
-
-    if (url && token) {
-      try {
-        this.redis = new Redis({ url, token });
-        this.enabled = true;
-        console.log('[UpstashRedis] ✅ Connected to Upstash Redis');
-      } catch (err) {
-        console.warn('[UpstashRedis] ⚠️ Failed to connect:', err.message, '— falling back to in-memory');
-      }
-    } else {
-      console.warn('[UpstashRedis] ⚠️ UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN not set. Using in-memory fallback.');
-    }
+    this.tcpClient = null;
+    this.restClient = null;
+    this.tcpEnabled = false;
+    this.restEnabled = false;
+    this.fallbackCache = new Map(); // L1 In-Memory Cache (sub-millisecond)
 
     // Stats
     this.stats = { hits: 0, misses: 0, sets: 0, errors: 0 };
+
+    // 1. Try TCP connection via ioredis if REDIS_URL is configured
+    const redisUrl = process.env.REDIS_URL;
+    if (redisUrl && IORedis) {
+      try {
+        this.tcpClient = new IORedis(redisUrl, {
+          lazyConnect: true,
+          maxRetriesPerRequest: 1,
+          connectTimeout: 2500,
+          commandTimeout: 1500,
+          enableReadyCheck: false,
+          autoResubscribe: false,
+          autoResendUnfulfilledCommands: false,
+          retryStrategy: (times) => (times > 2 ? null : Math.min(times * 500, 2000)),
+        });
+
+        this.tcpClient.on('connect', () => {
+          this.tcpEnabled = true;
+          console.log('[UpstashRedis] ✅ Connected via TCP (ioredis)');
+        });
+
+        this.tcpClient.on('error', (err) => {
+          this.stats.errors++;
+          // Non-fatal warning — application continues via L1 memory & REST
+          if (this.tcpEnabled) {
+            console.warn('[UpstashRedis] ⚠️ TCP connection error:', err.message);
+          }
+          this.tcpEnabled = false;
+        });
+
+        this.tcpClient.on('close', () => {
+          this.tcpEnabled = false;
+        });
+
+        // Trigger non-blocking connection
+        this.tcpClient.connect().then(() => {
+          this.tcpEnabled = true;
+        }).catch((err) => {
+          this.tcpEnabled = false;
+          console.warn('[UpstashRedis] ℹ️ TCP initial connection notice:', err.message, '— active on L1 memory cache');
+        });
+      } catch (tcpErr) {
+        console.warn('[UpstashRedis] ⚠️ Failed to initialize ioredis TCP:', tcpErr.message);
+      }
+    }
+
+    // 2. Try Upstash REST client
+    const restUrl = process.env.UPSTASH_REDIS_REST_URL;
+    const restToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+    if (restUrl && restToken) {
+      try {
+        this.restClient = new RestRedis({ url: restUrl, token: restToken });
+        this.restEnabled = true;
+        console.log('[UpstashRedis] ✅ Connected via Upstash REST');
+      } catch (err) {
+        console.warn('[UpstashRedis] ⚠️ REST init notice:', err.message);
+      }
+    }
+
+    if (!this.tcpClient && !this.restClient) {
+      console.log('[UpstashRedis] ⚡ Operating on high-speed In-Memory L1 Cache (<0.1ms latency)');
+    }
   }
 
   /**
-   * Get a cached value
+   * Get a cached value.
+   * Priority: L1 in-memory cache (0.01ms) -> TCP Redis (<5ms) -> REST Redis (~20ms).
    * @param {string} key - Cache key
    * @returns {any|null} - Cached value or null
    */
   async get(key) {
-    try {
-      if (this.enabled) {
-        const val = await this.redis.get(key);
+    // ⚡ Tier 0: Instant L1 In-Memory Check (<0.1ms)
+    const memEntry = this.fallbackCache.get(key);
+    if (memEntry) {
+      if (Date.now() < memEntry.expiresAt) {
+        this.stats.hits++;
+        return memEntry.data;
+      }
+      this.fallbackCache.delete(key);
+    }
+
+    // ⚡ Tier 1: TCP Redis (ioredis)
+    if (this.tcpClient && this.tcpEnabled) {
+      try {
+        const valPromise = this.tcpClient.get(key);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 250));
+        const val = await Promise.race([valPromise, timeoutPromise]);
         if (val !== null && val !== undefined) {
           this.stats.hits++;
-          return typeof val === 'string' ? JSON.parse(val) : val;
+          const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+          // Populate L1 cache for subsequent fast reads
+          this.fallbackCache.set(key, { data: parsed, expiresAt: Date.now() + 2000 });
+          return parsed;
         }
-        this.stats.misses++;
-        return null;
+      } catch (err) {
+        this.stats.errors++;
+        // Continue to fallback
       }
-
-      // In-memory fallback
-      const entry = this.fallbackCache.get(key);
-      if (entry && Date.now() < entry.expiresAt) {
-        this.stats.hits++;
-        return entry.data;
-      }
-      if (entry) this.fallbackCache.delete(key);
-      this.stats.misses++;
-      return null;
-    } catch (err) {
-      this.stats.errors++;
-      // Silent fallback to in-memory on Upstash error
-      const entry = this.fallbackCache.get(key);
-      if (entry && Date.now() < entry.expiresAt) return entry.data;
-      return null;
     }
+
+    // ⚡ Tier 2: Upstash REST Redis
+    if (this.restClient && this.restEnabled) {
+      try {
+        const valPromise = this.restClient.get(key);
+        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 350));
+        const val = await Promise.race([valPromise, timeoutPromise]);
+        if (val !== null && val !== undefined) {
+          this.stats.hits++;
+          const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+          this.fallbackCache.set(key, { data: parsed, expiresAt: Date.now() + 2000 });
+          return parsed;
+        }
+      } catch (err) {
+        this.stats.errors++;
+      }
+    }
+
+    this.stats.misses++;
+    return null;
   }
 
   /**
-   * Set a cached value with TTL
+   * Set a cached value with TTL.
+   * Writes to L1 memory cache instantly (0ms), then updates remote Redis in background.
    * @param {string} key - Cache key
    * @param {any} value - Value to cache
    * @param {number} ttlMs - Time-to-live in milliseconds
    */
-  async set(key, value, ttlMs = 1000) {
-    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+  async set(key, value, ttlMs = 2000) {
     this.stats.sets++;
 
-    // Always update in-memory fallback
+    // ⚡ 1. Always update L1 in-memory cache immediately (0ms)
     this.fallbackCache.set(key, {
       data: value,
       expiresAt: Date.now() + ttlMs
     });
 
-    if (this.enabled) {
-      try {
-        // Upstash px = millisecond TTL
-        await this.redis.set(key, serialized, { px: ttlMs });
-      } catch (err) {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+
+    // ⚡ 2. Asynchronously update TCP Redis in background (non-blocking)
+    if (this.tcpClient && this.tcpEnabled) {
+      this.tcpClient.set(key, serialized, 'PX', ttlMs).catch((e) => {
         this.stats.errors++;
-        // Silent — in-memory fallback is already set
-      }
+      });
+    }
+
+    // ⚡ 3. Asynchronously update REST Redis in background (non-blocking)
+    if (this.restClient && this.restEnabled && !this.tcpEnabled) {
+      this.restClient.set(key, serialized, { px: ttlMs }).catch((e) => {
+        this.stats.errors++;
+      });
     }
   }
 
@@ -108,12 +192,11 @@ class UpstashRedisCache {
    */
   async del(key) {
     this.fallbackCache.delete(key);
-    if (this.enabled) {
-      try {
-        await this.redis.del(key);
-      } catch (err) {
-        this.stats.errors++;
-      }
+    if (this.tcpClient && this.tcpEnabled) {
+      this.tcpClient.del(key).catch(() => {});
+    }
+    if (this.restClient && this.restEnabled) {
+      this.restClient.del(key).catch(() => {});
     }
   }
 
@@ -126,12 +209,27 @@ class UpstashRedisCache {
     const results = {};
     if (!keys || keys.length === 0) return results;
 
-    if (this.enabled) {
+    const missingKeys = [];
+    for (const k of keys) {
+      const memEntry = this.fallbackCache.get(k);
+      if (memEntry && Date.now() < memEntry.expiresAt) {
+        results[k] = memEntry.data;
+        this.stats.hits++;
+      } else {
+        missingKeys.push(k);
+      }
+    }
+
+    if (missingKeys.length === 0) return results;
+
+    if (this.tcpClient && this.tcpEnabled) {
       try {
-        const vals = await this.redis.mget(...keys);
-        keys.forEach((k, i) => {
+        const vals = await this.tcpClient.mget(...missingKeys);
+        missingKeys.forEach((k, i) => {
           if (vals[i] !== null && vals[i] !== undefined) {
-            results[k] = typeof vals[i] === 'string' ? JSON.parse(vals[i]) : vals[i];
+            const parsed = typeof vals[i] === 'string' ? JSON.parse(vals[i]) : vals[i];
+            results[k] = parsed;
+            this.fallbackCache.set(k, { data: parsed, expiresAt: Date.now() + 2000 });
             this.stats.hits++;
           } else {
             this.stats.misses++;
@@ -140,98 +238,50 @@ class UpstashRedisCache {
         return results;
       } catch (err) {
         this.stats.errors++;
-        // Fall through to in-memory
       }
     }
 
-    // In-memory fallback
-    for (const k of keys) {
-      const entry = this.fallbackCache.get(k);
-      if (entry && Date.now() < entry.expiresAt) {
-        results[k] = entry.data;
-        this.stats.hits++;
-      } else {
-        this.stats.misses++;
-      }
-    }
     return results;
   }
 
   // ─── Score-specific helpers ──────────────────────────
 
-  /**
-   * Cache a live score payload
-   * @param {string} matchId
-   * @param {Object} scoreData - Parsed score payload
-   * @param {number} ttlMs - Default 2000ms for live, 30000ms for completed
-   */
   async setScore(matchId, scoreData, ttlMs = 2000) {
     return this.set(`bpx:score:${matchId}`, scoreData, ttlMs);
   }
 
-  /**
-   * Get cached live score
-   * @param {string} matchId
-   * @returns {Object|null}
-   */
   async getScore(matchId) {
     return this.get(`bpx:score:${matchId}`);
   }
 
-  // ─── Odds-specific helpers (OddsPapi 1X2, Bookmaker, Even/Odd, Draw, Tied) ─
+  // ─── Odds-specific helpers ──────────────────────────
 
-  /**
-   * Cache real-time odds payload (OddsPapi)
-   * @param {string} matchId
-   * @param {Object} oddsData
-   * @param {number} ttlMs - Default 2000ms
-   */
   async setOdds(matchId, oddsData, ttlMs = 2000) {
     return this.set(`bpx:odds:${matchId}`, oddsData, ttlMs);
   }
 
-  /**
-   * Get cached market odds
-   * @param {string} matchId
-   * @returns {Object|null}
-   */
   async getOdds(matchId) {
     return this.get(`bpx:odds:${matchId}`);
   }
 
-  // ─── Match Catalog Caching (Fast dashboard listing) ───────────────────
+  // ─── Match Catalog Caching (Instant dashboard listing) ─────────────
 
-  /**
-   * Cache live in-play matches list
-   */
   async setLiveMatches(matches, ttlMs = 5000) {
     return this.set('bpx:matches:live', matches, ttlMs);
   }
 
-  /**
-   * Get cached live in-play matches list
-   */
   async getLiveMatches() {
     return this.get('bpx:matches:live');
   }
 
-  /**
-   * Cache full cricket catalog
-   */
-  async setAllMatches(matches, ttlMs = 30000) {
+  async setAllMatches(matches, ttlMs = 15000) {
     return this.set('bpx:matches:all', matches, ttlMs);
   }
 
-  /**
-   * Get cached full cricket catalog
-   */
   async getAllMatches() {
     return this.get('bpx:matches:all');
   }
 
-  /**
-   * Invalidate match list caches (e.g. on new match created or status changed)
-   */
   async invalidateMatchCatalogs() {
     await Promise.all([
       this.del('bpx:matches:live'),
@@ -241,85 +291,53 @@ class UpstashRedisCache {
 
   // ─── User Account & Wallet Fast Cache ────────────────────────────────
 
-  /**
-   * Cache user balance & credit
-   */
   async setUserWallet(userId, walletData, ttlMs = 15000) {
     return this.set(`bpx:user:${userId}:wallet`, walletData, ttlMs);
   }
 
-  /**
-   * Get cached user balance & credit
-   */
   async getUserWallet(userId) {
     return this.get(`bpx:user:${userId}:wallet`);
   }
 
-  /**
-   * Invalidate user wallet on bet, deposit, settlement
-   */
   async invalidateUserWallet(userId) {
     return this.del(`bpx:user:${userId}:wallet`);
   }
 
-  /**
-   * Cache user betting limits
-   */
   async setUserLimits(userId, limitsData, ttlMs = 60000) {
     return this.set(`bpx:user:${userId}:limits`, limitsData, ttlMs);
   }
 
-  /**
-   * Get cached user betting limits
-   */
   async getUserLimits(userId) {
     return this.get(`bpx:user:${userId}:limits`);
   }
 
-  /**
-   * Invalidate user limits
-   */
   async invalidateUserLimits(userId) {
     return this.del(`bpx:user:${userId}:limits`);
   }
 
-  /**
-   * Cache raw Sportmonks fixture response
-   */
   async setFixture(fixtureId, fixtureData, ttlMs = 1000) {
     return this.set(`bpx:fixture:${fixtureId}`, fixtureData, ttlMs);
   }
 
-  /**
-   * Get cached raw fixture
-   */
   async getFixture(fixtureId) {
     return this.get(`bpx:fixture:${fixtureId}`);
   }
 
-  /**
-   * Cache API pool health status
-   */
   async setPoolStatus(statusData) {
     return this.set('bpx:pool:status', statusData, 60000);
   }
 
-  /**
-   * Get cache health stats
-   */
   getStats() {
     const total = this.stats.hits + this.stats.misses;
     return {
       ...this.stats,
       hitRate: total > 0 ? ((this.stats.hits / total) * 100).toFixed(1) + '%' : '0%',
-      upstashEnabled: this.enabled,
+      tcpEnabled: this.tcpEnabled,
+      restEnabled: this.restEnabled,
       fallbackEntries: this.fallbackCache.size
     };
   }
 
-  /**
-   * Periodic cleanup of expired in-memory entries
-   */
   cleanup() {
     const now = Date.now();
     let cleaned = 0;
@@ -336,8 +354,7 @@ class UpstashRedisCache {
 // Singleton
 const cache = new UpstashRedisCache();
 
-// Cleanup expired in-memory entries every 30 seconds
+// Periodic cleanup of expired in-memory entries every 30 seconds
 setInterval(() => cache.cleanup(), 30000);
 
 module.exports = cache;
-

@@ -57,7 +57,8 @@ export function decidedProbability(market, stats, quote) {
     case 'evenodd': return Math.max(stats.pOdd, stats.pEven);
     case 'lastfigure': return Math.max(...stats.pDigit);
     case 'line':
-    case 'fancy2': return quote && Number.isFinite(quote.yesLine) && Number.isFinite(quote.noLine)
+    case 'fancy2':
+    case 'fall_of_wicket': return quote && Number.isFinite(quote.yesLine) && Number.isFinite(quote.noLine)
       ? Math.max(stats.pAtLeast(quote.yesLine), stats.pLess(quote.noLine)) : 0;
     default: return 0;
   }
@@ -65,7 +66,7 @@ export function decidedProbability(market, stats, quote) {
 
 export function isQuoteValid(market, quote) {
   if (!quote) return false;
-  if (market.type === 'fancy2' || market.type === 'line')
+  if (market.type === 'fancy2' || market.type === 'line' || market.type === 'fall_of_wicket')
     return Number.isFinite(quote.yesLine) && Number.isFinite(quote.noLine) && quote.noLine <= quote.yesLine;
   if (market.type === 'evenodd')
     return [quote.backOdd, quote.layOdd, quote.backEven, quote.layEven].every((x) => Number.isFinite(x) && x >= 1.01);
