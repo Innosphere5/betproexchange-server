@@ -729,6 +729,7 @@ class SportmonksScoreService {
 
           const isCompleted = parsed.status === 'completed';
           if (isCompleted) {
+            updatePayload.completedAt = matchInDb?.completedAt || new Date();
             updatePayload.marketStatus = 'CLOSED';
             updatePayload.bookmakerMarketStatus = 'CLOSED';
             updatePayload.tossMarketStatus = 'CLOSED';
@@ -768,18 +769,21 @@ class SportmonksScoreService {
 
           if (isCompleted) {
             const { settleMatch } = require('./settlementService');
+            const { broadcastActiveCatalog } = require('./matchCatalogService');
+            const supabaseService = require('./supabaseService');
+            const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
+            supabaseService.archiveCompletedMatchResult({ ...updatedDoc, ...updatePayload }).catch(() => {});
             settleMatch(matchDbId, parsed.winner || 'VOID', this.io).catch(err => {
               console.error('[Sportmonks] Settlement error:', err.message);
             });
             if (this.io) {
-              const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
               this.io.emit('match_updated', { ...updatedDoc, ...updatePayload });
               this.io.emit('match_settled', {
                 matchId: matchDbId,
                 winner: parsed.winner,
                 score: updatePayload.score
               });
-              Match.find().sort({ startTime: 1 }).then(all => this.io.emit('matches_updated', all)).catch(() => {});
+              broadcastActiveCatalog(this.io).catch(() => {});
             }
           }
 

@@ -1,5 +1,7 @@
 const Match = require('../models/Match');
 const { settleMatch } = require('./settlementService');
+const { broadcastActiveCatalog } = require('./matchCatalogService');
+const supabaseService = require('./supabaseService');
 
 /**
  * Detect format to establish duration ceilings and rules
@@ -149,8 +151,9 @@ const updateMatchStatuses = async (io) => {
                     match.tossDepthLayB = '0';
                 }
 
-                // When match completes: close all markets and clear active odds
+                // When match completes: close all markets, stamp completedAt (24h TTL), and clear active odds
                 if (newStatus === 'completed') {
+                    match.completedAt = match.completedAt || now;
                     match.marketStatus = 'CLOSED';
                     match.bookmakerMarketStatus = 'CLOSED';
                     match.tossMarketStatus = 'CLOSED';
@@ -205,6 +208,8 @@ const updateMatchStatuses = async (io) => {
                     }
 
                     if (newStatus === 'completed') {
+                        supabaseService.archiveCompletedMatchResult(match).catch(() => {});
+
                         // Settle bets and refund unmatched open bets immediately
                         settleMatch(match.matchId, match.winner || 'VOID', io).catch(err => {
                             console.error('[StatusService] Settlement trigger error:', err.message);
@@ -221,10 +226,9 @@ const updateMatchStatuses = async (io) => {
             }
         }
 
-        // If any status updated, broadcast fresh matches list to immediately refresh UI
+        // Broadcast active-only match list so completed matches vanish from active dashboard immediately
         if (matchChanged && io) {
-            const allMatches = await Match.find().sort({ startTime: 1 });
-            io.emit('matches_updated', allMatches);
+            await broadcastActiveCatalog(io);
         }
     } catch (error) {
         console.error('Error updating match statuses:', error.message);

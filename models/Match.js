@@ -53,6 +53,7 @@ const matchSchema = new mongoose.Schema({
   marketStatus: { type: String, enum: ['OPEN', 'SUSPENDED', 'CLOSED'], default: null },
   isPriority: { type: Boolean, default: false },
   lastUpdated: { type: Date, default: Date.now },
+  completedAt: { type: Date, default: null },
 
   // ─── Toss Market Fields ──────────────────────────────────────────────────────
   tossBackA: { type: Number, default: null },
@@ -165,5 +166,8 @@ const matchSchema = new mongoose.Schema({
   }
 
 });
+
+// Native MongoDB TTL index: automatically purge completed matches 24 hours (86400s) after completedAt
+matchSchema.index({ completedAt: 1 }, { expireAfterSeconds: 86400 });
 
 module.exports = mongoose.model('Match', matchSchema);

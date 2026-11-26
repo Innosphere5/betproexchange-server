@@ -1,6 +1,6 @@
 const Match = require('../models/Match');
 const redisCache = require('./upstashRedisCache');
-const { shouldIncludeFixture, getCricketPriority } = require('./fixtureFilter');
+const { shouldIncludeFixture, getCricketPriority, getMatchScheduleWindow } = require('./fixtureFilter');
 
 /**
  * Projection excluding heavy per-market nested arrays (`fancyMarkets`, `figureMarkets`,
@@ -113,18 +113,23 @@ async function getAllMatchesList({ bypassCache = false } = {}) {
     }
   }
 
+  const now = new Date();
+  const { windowStartDate, windowEndDate } = getMatchScheduleWindow(now);
+
   const matches = await Match.find({
     status: { $in: ['live', 'upcoming'] },
-    $or: [{ winner: null }, { winner: { $exists: false } }, { status: 'live' }]
+    $and: [
+      { $or: [{ winner: null }, { winner: { $exists: false } }] },
+      { $or: [{ status: 'live' }, { startTime: { $gte: windowStartDate, $lte: windowEndDate } }] }
+    ]
   })
     .select(SLIM_CATALOG_PROJECTION)
     .sort({ startTime: 1 })
     .lean();
 
-  const now = new Date();
   const deduped = sortCatalogMatches(
     deduplicateMatches(matches)
-      .filter((match) => shouldIncludeFixture(match, now) && match.status !== 'completed' && !match.winner)
+      .filter((match) => shouldIncludeFixture(match, now) && match.status !== 'completed' && match.status !== 'resulted' && !match.winner)
   );
 
   for (let i = 0; i < deduped.length; i++) {
@@ -168,6 +173,16 @@ async function warmMatchCatalog({ forceAll = false } = {}) {
   }
 }
 
+/** Invalidate match caches, fetch active-only list, and broadcast `matches_updated` to clients. */
+async function broadcastActiveCatalog(io) {
+  await redisCache.invalidateMatchCatalogs().catch(() => {});
+  const activeMatches = await getAllMatchesList({ bypassCache: true });
+  if (io) {
+    io.emit('matches_updated', activeMatches);
+  }
+  return activeMatches;
+}
+
 /** Start background catalog cache warmer (every 3s for live, every 9s for full catalog). */
 function startCatalogWarmer() {
   if (warmerInterval) return;
@@ -185,6 +200,7 @@ module.exports = {
   sortCatalogMatches,
   getLiveMatchesList,
   getAllMatchesList,
+  broadcastActiveCatalog,
   warmMatchCatalog,
   startCatalogWarmer,
 };

@@ -345,6 +345,7 @@ const updateLiveScores = async (io) => {
                 }
 
                 if (isFinished) {
+                    updatePayload.completedAt = matchInDb?.completedAt || new Date();
                     updatePayload.marketStatus = 'CLOSED';
                     updatePayload.bookmakerMarketStatus = 'CLOSED';
                     updatePayload.tossMarketStatus = 'CLOSED';
@@ -367,19 +368,21 @@ const updateLiveScores = async (io) => {
 
                 if (isFinished) {
                     const { settleMatch } = require('./settlementService');
+                    const { broadcastActiveCatalog } = require('./matchCatalogService');
+                    const supabaseService = require('./supabaseService');
+                    const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
+                    supabaseService.archiveCompletedMatchResult({ ...updatedDoc, ...updatePayload }).catch(() => {});
                     settleMatch(matchId, winner || 'VOID', io).catch(err => {
                         console.error('[ScoreService] Settlement error:', err.message);
                     });
                     if (io) {
-                        const updatedDoc = matchInDb?.toObject ? matchInDb.toObject() : matchInDb;
                         io.emit('match_updated', { ...updatedDoc, ...updatePayload });
                         io.emit('match_settled', {
                             matchId: matchId,
                             winner: winner,
                             score: updatePayload.score
                         });
-                        // ⚡ PERF: .lean() avoids Mongoose document hydration overhead for broadcast
-                        Match.find().sort({ startTime: 1 }).lean().then(all => io.emit('matches_updated', all)).catch(() => {});
+                        broadcastActiveCatalog(io).catch(() => {});
                     }
                 }
 

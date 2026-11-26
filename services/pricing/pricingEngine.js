@@ -45,11 +45,17 @@ export function detectFormat(match) {
 
   // 4. Text matching on league, tournament, team names, match title
   const str = `${match?.league || ''} ${match?.tournament?.name || ''} ${match?.name || ''} ${match?.teamA || ''} ${match?.teamB || ''}`.toLowerCase();
-  if (Boolean(match?.isTestMatch || match?.backOddsDraw != null || /\b(test|ashes|border gavaskar|wtc|sheffield|ranji|first class|first-class)\b/i.test(str))) {
-    return 'TEST';
+  if (/\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl|max 60|max60|abu dhabi t10|zim afro)\b/i.test(str)) {
+    return 'T20'; // T10 uses short limited-overs pricing curve (never TEST)
   }
-  if (/\b(odi|one day|one-day|cwc|world cup|champions trophy|50 overs?|league two)\b/i.test(str)) {
+  if (/\b(odi|one day|one-day|list a|list-a|cwc|world cup|champions trophy|50 overs?|league two)\b/i.test(str)) {
     return 'ODI';
+  }
+  if (/\b(t20|t20i|d20|twenty20|twenty-20|twenty 20|ipl|psl|bbl|wbbl|cpl|the hundred|sa20|ilt20|international league|mlc|wpl|blast|super smash)\b/i.test(str)) {
+    return 'T20';
+  }
+  if (Boolean(match?.isTestMatch || match?.backOddsDraw != null || /\b(test|ashes|border gavaskar|wtc|sheffield|ranji|quaid|first class|first-class|4-day|5-day)\b/i.test(str))) {
+    return 'TEST';
   }
   return 'T20';
 }

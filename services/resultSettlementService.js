@@ -2,6 +2,8 @@ const Match = require('../models/Match');
 const Bet = require('../models/Bet');
 const { getData } = require('./apiManager');
 const { settleMatch } = require('./settlementService');
+const { broadcastActiveCatalog } = require('./matchCatalogService');
+const supabaseService = require('./supabaseService');
 
 /**
  * processMatchResults
@@ -163,9 +165,10 @@ const processMatchResults = async (io) => {
 
                 if (hoursSinceStart > 12) {
                     console.log(`[ResultSettlement] ⛔ Permanent cancellation confirmed for ${matchId}. Refunding bets.`);
+                    const nowTs = new Date();
                     await Match.updateMany(
                         { matchId: { $in: [matchId, altId] } },
-                        { $set: { status: 'completed', winner: 'REFUND', marketStatus: 'CLOSED', lastUpdated: new Date() } }
+                        { $set: { status: 'completed', winner: 'REFUND', marketStatus: 'CLOSED', completedAt: nowTs, lastUpdated: nowTs } }
                     );
                     await settleMatch(matchId, 'REFUND', io);
                 }
@@ -225,7 +228,9 @@ const processMatchResults = async (io) => {
 
                 console.log(`[ResultSettlement] Identified winner for ${matchId}: "${winningTeam}" (Scores: ${p1Name} ${p1Score} - ${p2Name} ${p2Score})`);
 
-                // Upsert Match record in DB so it permanently shows completed with winner
+                // Upsert Match record in DB with completedAt so 24h TTL auto-deletes it after 1 day
+                const completedAt = dbMatch?.completedAt || new Date();
+                const resolvedStartTime = dbMatch?.startTime || (apiMatch.startTime ? new Date(apiMatch.startTime * 1000) : new Date());
                 const updatedMatch = await Match.findOneAndUpdate(
                     { matchId: { $in: [matchId, altId] } },
                     {
@@ -235,8 +240,10 @@ const processMatchResults = async (io) => {
                             teamA: p1Name,
                             teamB: p2Name,
                             league: apiMatch.tournament?.tournamentName || dbMatch?.league || 'Cricket',
+                            startTime: resolvedStartTime,
                             status: 'completed',
                             winner: winningTeam,
+                            completedAt,
                             score: {
                                 teamA_runs: `${p1Score}`,
                                 teamB_runs: `${p2Score}`,
@@ -259,6 +266,8 @@ const processMatchResults = async (io) => {
                     { upsert: true, new: true }
                 );
 
+                supabaseService.archiveCompletedMatchResult(updatedMatch).catch(() => {});
+
                 // Trigger Bet Settlement for this match across all parent hierarchies
                 await settleMatch(matchId, winningTeam, io);
 
@@ -273,10 +282,9 @@ const processMatchResults = async (io) => {
             }
         }
 
-        // Notify UI about match list updates
+        // Notify UI with active-only catalog (excludes completed matches)
         if (io) {
-            const allMatches = await Match.find().sort({ startTime: 1 });
-            io.emit('matches_updated', allMatches);
+            await broadcastActiveCatalog(io);
         }
 
     } catch (error) {

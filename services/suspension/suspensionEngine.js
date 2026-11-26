@@ -30,6 +30,7 @@ const ENGINE_CONFIG = {
 import Match from '../../models/Match.js';
 import Bet from '../../models/Bet.js';
 import SuspensionAudit from '../../models/SuspensionAudit.js';
+import supabaseService from '../supabaseService.js';
 
 /**
  * In-memory state machine tracking per match and market.
@@ -379,11 +380,8 @@ export async function evaluateMatch(matchId, options = {}) {
       );
 
       if (auditRows.length > 0) {
-        try {
-          await SuspensionAudit.insertMany(auditRows, { ordered: false });
-        } catch (e) {
-          // ignore duplicate key or non-fatal audit insert errors
-        }
+        // Offload high-volume suspension audit logs to Supabase PostgreSQL instead of bloating MongoDB Atlas
+        supabaseService.archiveSuspensionAudits(auditRows).catch(() => {});
       }
 
       // Broadcast changes via Socket.IO

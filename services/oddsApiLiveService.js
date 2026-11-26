@@ -3,7 +3,7 @@ const Match = require("../models/Match");
 const MarketOdds = require("../models/MarketOdds");
 const OddsMarket = require("../models/OddsMarket");
 const oddsApiRest = require("./oddsApiRest");
-const { shouldIncludeFixture } = require("./fixtureFilter");
+const { shouldIncludeFixture, isTestMatchFormat } = require("./fixtureFilter");
 const fancyMarketsService = require("./fancyMarketsService");
 require("dotenv").config();
 
@@ -226,13 +226,14 @@ class OddsApiLiveService {
       if (activeMatches.length === 0) return;
 
       const datesToFetch = new Set();
-      for (let i = 0; i <= 2; i++) {
+      // Fetch yesterday (-1), today (0), and tomorrow (+1, within <2 days out)
+      for (let i = -1; i <= 1; i++) {
         const d = new Date(Date.now() + i * 24 * 60 * 60 * 1000);
         datesToFetch.add(d.toISOString().split("T")[0]);
       }
-      // Add start dates of all active matches to ensure we don't miss Test matches that started days ago
+      // Also include start dates of active matches (e.g. live multi-day Test matches)
       for (const match of activeMatches) {
-        if (match.startTime) {
+        if (match.status === 'live' && match.startTime) {
           const d = new Date(match.startTime);
           datesToFetch.add(d.toISOString().split("T")[0]);
         }
@@ -1227,12 +1228,21 @@ class OddsApiLiveService {
     const depthBackB = needsSwap ? homeBackVol : awayBackVol;
     const depthLayB = needsSwap ? homeLayVol : awayLayVol;
 
-    const isTestMatch = Boolean(
-      drawOutcome ||
-      (drawBack > 0) ||
-      (metadata?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league)) ||
-      (this.eventMetadata.get(eventId)?.league && /\b(test|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(this.eventMetadata.get(eventId).league))
-    );
+    const isTestMatch = isTestMatchFormat({
+      league: metadata?.league || this.eventMetadata.get(eventId)?.league || dbMatch?.league,
+      teamA: metadata?.home || dbMatch?.teamA,
+      teamB: metadata?.away || dbMatch?.teamB,
+      format: dbMatch?.format,
+      isTestMatch: dbMatch?.isTestMatch,
+    });
+
+    if (!isTestMatch) {
+      // Non-Test formats (T10, T20, ODI) NEVER expose The Draw in Match Odds / Bookmaker
+      drawBack = null;
+      drawLay = null;
+      drawBackVol = "0";
+      drawLayVol = "0";
+    }
 
     // If Test match has no explicit Draw runner from Oddspapi (since Oddspapi maps market 271 as 2-way moneyline),
     // derive the accurate exchange-implied Draw Back and Lay odds directly from Team A & Team B market rates:
@@ -1252,8 +1262,8 @@ class OddsApiLiveService {
     const bmLayA = teamALay ? Number(Math.max(teamALay, (teamABack || 0) + 0.01).toFixed(2)) : (bmBackA ? Number((bmBackA + 0.02).toFixed(2)) : null);
     const bmBackB = teamBBack ? Number((teamBBack >= 2 ? teamBBack - 0.02 : teamBBack).toFixed(2)) : null;
     const bmLayB = teamBLay ? Number((teamBLay >= 2 ? teamBLay + 0.02 : teamBLay + 0.01).toFixed(2)) : (bmBackB ? Number((bmBackB + 0.02).toFixed(2)) : null);
-    const bmBackDraw = drawBack ? Number(drawBack.toFixed(2)) : null;
-    const bmLayDraw = drawLay ? Number(Math.max(drawLay, (drawBack || 0) + 0.01).toFixed(2)) : (bmBackDraw ? Number((bmBackDraw + 0.02).toFixed(2)) : null);
+    const bmBackDraw = isTestMatch && drawBack ? Number(drawBack.toFixed(2)) : null;
+    const bmLayDraw = isTestMatch && drawLay ? Number(Math.max(drawLay, (drawBack || 0) + 0.01).toFixed(2)) : (bmBackDraw ? Number((bmBackDraw + 0.02).toFixed(2)) : null);
 
     const isAtStumps = Boolean(
       metadata?.statusText?.toLowerCase()?.includes('stump') ||
@@ -1384,7 +1394,7 @@ class OddsApiLiveService {
           depthLay: depthLayB,
         },
       ];
-      if (isTestMatch || drawBack > 0) {
+      if (isTestMatch) {
         runnersList.push({
           name: "The Draw",
           back: drawBack || null,
@@ -1410,7 +1420,7 @@ class OddsApiLiveService {
           depthLay: "100",
         },
       ];
-      if (isTestMatch || bmBackDraw) {
+      if (isTestMatch && bmBackDraw) {
         bmRunnersList.push({
           name: "The Draw",
           back: bmBackDraw,

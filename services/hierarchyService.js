@@ -1,6 +1,7 @@
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const { findUserByKey } = require('./hierarchyHelper');
+const supabaseService = require('./supabaseService');
 
 /**
  * DYNAMIC SHARE SPLIT (per SuperAdmin):
@@ -58,6 +59,8 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             desc = `${matchDetails.matchName}${matchDetails.selection ? ` (${matchDetails.selection})` : ''}`;
         }
 
+        const createdTransactions = [];
+
         // ──────────────────────────────────────────────
         // 1. 1.5% PLATFORM FEE (Deducted FIRST, only on PROFIT)
         // ──────────────────────────────────────────────
@@ -70,7 +73,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
             distributableAmount = Math.round((amount - platformCommission) * 100) / 100;
             console.log(`[HIERARCHY] Platform Fee (1.5% on Profit of ${amount}): ${platformCommission.toFixed(2)}, Distributable: ${distributableAmount.toFixed(2)}`);
 
-            await Transaction.create({
+            const feeTx = await Transaction.create({
                 userId: superAdmin.username,
                 amount: platformCommission,
                 type: 'PLATFORM_COMMISSION',
@@ -83,6 +86,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                 downline: 'PLATFORM',
                 performedBy: 'SYSTEM'
             });
+            createdTransactions.push(feeTx);
         }
 
         console.log(`[HIERARCHY] Starting ${isCasino ? 'CASINO' : 'CRICKET'} Distribution of ${distributableAmount.toFixed(2)} for ${username} (SuperAdmin: ${superAdmin.username}, HierarchyShare: ${SUPERADMIN_TOTAL_PERCENT}%, BookShare: ${BOOK_SHARE_PERCENT}%)`);
@@ -92,7 +96,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
         // ──────────────────────────────────────────────
         const bookAmount = Math.round((BOOK_SHARE_PERCENT / 100) * distributableAmount * 100) / 100;
         if (bookAmount !== 0 && BOOK_SHARE_PERCENT > 0) {
-            await Transaction.create({
+            const bookTx = await Transaction.create({
                 userId: superAdmin.username,
                 amount: bookAmount,
                 type: 'BOOK_SHARE',
@@ -105,6 +109,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                 downline: 'BOOK',
                 performedBy: 'SYSTEM'
             });
+            createdTransactions.push(bookTx);
 
             console.log(`[HIERARCHY] Book Share (${BOOK_SHARE_PERCENT}%): ${bookAmount.toFixed(2)}`);
         }
@@ -151,7 +156,7 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     }
                 }
 
-                await Transaction.create({
+                const shareTx = await Transaction.create({
                     userId: user.username,
                     amount: earnings,
                     type: 'COMMISSION_SHARE',
@@ -164,10 +169,15 @@ async function distributePL(username, amount, isCasino = false, matchDetails = n
                     downline: downlineName,
                     performedBy: 'SYSTEM'
                 });
+                createdTransactions.push(shareTx);
 
                 console.log(`[HIERARCHY] Distributed ${earnings.toFixed(2)} to ${user.role} ${user.username} (${sharePercent}% direct share)`);
                 distributedSoFar += earnings;
             }
+        }
+
+        if (createdTransactions.length > 0) {
+            supabaseService.archiveFinancialTransactions(createdTransactions).catch(() => {});
         }
 
         console.log(`[HIERARCHY] Distribution complete for ${username}. Total Hierarchy: ${distributedSoFar.toFixed(2)}, Book: ${bookAmount.toFixed(2)}, PlatformFee: ${platformCommission.toFixed(2)}`);

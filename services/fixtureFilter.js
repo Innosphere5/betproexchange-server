@@ -318,15 +318,23 @@ function getMatchFormat(fixture) {
     fixture?.participants?.participant2Name || fixture?.away_team || fixture?.teamB || "",
   );
   const sport = normalizeText(
-    fixture?.sport?.sportName || fixture?.sport || fixture?.sportKey || "",
+    fixture?.sport?.sportName || fixture?.sport || fixture?.sportKey || fixture?.format || "",
   );
   const combined = `${tName} ${p1} ${p2} ${sport}`;
 
   if (/\b(t10|ten10|t-10|10 overs|10-over|ecs|ecl|max 60|max60|abu dhabi t10|zim afro)\b/i.test(combined)) return 'T10';
-  if (/\b(test|test match|test matches|test series|the ashes|ashes|border gavaskar|wtc|world test championship|sheffield shield|county championship|ranji trophy|first class|first-class|4-day|5-day)\b/i.test(combined)) return 'TEST';
-  if (/\b(t20|t20i|twenty20|twenty-20|twenty 20|indian premier league|ipl|pakistan super league|psl|big bash|bbl|wbbl|womens big bash|caribbean premier|cpl|wcpl|the hundred|hundred|sa20|ilt20|major league cricket|mlc|womens premier league|wpl|wpsl|vitality blast|blast|super smash|smash)\b/i.test(combined)) return 'T20';
-  if (/\b(odi|one day|one-day|cwc|world cup|champions trophy|asia cup|league 2)\b/i.test(combined)) return 'ODI';
+  if (/\b(test|test match|test matches|test series|the ashes|ashes|border gavaskar|wtc|world test championship|sheffield shield|county championship|ranji trophy|quaid e azam|quaid azam|duleep|irani|plunket|first class|first-class|4-day|5-day|4 day|5 day)\b/i.test(combined)) return 'TEST';
+  if (/\b(t20|t20i|d20|twenty20|twenty-20|twenty 20|indian premier league|ipl|pakistan super league|psl|big bash|bbl|wbbl|womens big bash|caribbean premier|cpl|wcpl|the hundred|hundred|sa20|ilt20|international league|major league cricket|mlc|womens premier league|wpl|wpsl|vitality blast|blast|super smash|smash)\b/i.test(combined)) return 'T20';
+  if (/\b(odi|one day|one-day|list a|list-a|cwc|world cup|champions trophy|league 2)\b/i.test(combined)) return 'ODI';
   return 'OTHER';
+}
+
+function isTestMatchFormat(fixture) {
+  if (!fixture) return false;
+  const fmt = getMatchFormat(fixture);
+  if (fmt === 'TEST') return true;
+  if (fmt === 'T10' || fmt === 'T20' || fmt === 'ODI') return false;
+  return Boolean(fixture?.isTestMatch);
 }
 
 function isInternationalFixture(fixture) {
@@ -481,12 +489,41 @@ function hasOddsMarket(fixture) {
   });
 }
 
+function getMatchScheduleWindow(now = new Date(), offsetMinutes) {
+  const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
+  const configuredOffset = Number(
+    offsetMinutes !== undefined
+      ? offsetMinutes
+      : (process.env.APP_TIMEZONE_OFFSET_MINUTES ?? 300)
+  );
+  const tzOffsetMs = (Number.isFinite(configuredOffset) ? configuredOffset : 300) * 60 * 1000;
+
+  // Compute local calendar midnight in configured timezone (default PKT UTC+5)
+  const localNow = new Date(nowMs + tzOffsetMs);
+  const localMidnightUtcMs = Date.UTC(
+    localNow.getUTCFullYear(),
+    localNow.getUTCMonth(),
+    localNow.getUTCDate(),
+    0, 0, 0, 0
+  ) - tzOffsetMs;
+
+  const windowStartMs = localMidnightUtcMs - 24 * 60 * 60 * 1000; // Start of yesterday 00:00
+  // End of tomorrow 23:59:59.999 (<2 days after today: shows upcoming matches while blocking 2-3+ days out)
+  const windowEndMs = localMidnightUtcMs + 48 * 60 * 60 * 1000 - 1;
+
+  return {
+    windowStartMs,
+    windowEndMs,
+    windowStartDate: new Date(windowStartMs),
+    windowEndDate: new Date(windowEndMs),
+  };
+}
+
 function shouldIncludeFixture(fixture, now = new Date()) {
   if (!fixture) return false;
   if (!isCricketFixture(fixture)) return false;
   if (!isTargetBPExchFixture(fixture)) return false;
 
-  const startTimeMs = getFixtureStartTimeMs(fixture);
   const isLive = Boolean(
     fixture?.status?.live ||
       fixture?.status === "live" ||
@@ -497,18 +534,28 @@ function shouldIncludeFixture(fixture, now = new Date()) {
       ),
   );
 
+  // Exclude finished/completed/resulted matches from active catalog
+  const isCompleted = !isLive && Boolean(
+    fixture?.status === "completed" ||
+      fixture?.status === "resulted" ||
+      fixture?.isCompleted ||
+      fixture?.winner ||
+      /finished|completed|ended/i.test(
+        normalizeText(
+          fixture?.status?.statusName || fixture?.status?.shortName || "",
+        ),
+      ),
+  );
+  if (isCompleted) return false;
+
+  const startTimeMs = getFixtureStartTimeMs(fixture);
+
   if (startTimeMs !== null) {
-    const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
-    // Allow up to 30 days in advance for international cricket & major T20 franchises (BBL, WBBL, IPL, PSL, etc.)
-    // and up to 7 days for other leagues
-    const isInternational = isInternationalFixture(fixture);
-    const isMajorFranchise = isTopFranchiseLeague(fixture);
-    const maxWindowMs = (isInternational || isMajorFranchise)
-      ? 30 * 24 * 60 * 60 * 1000
-      : 7 * 24 * 60 * 60 * 1000;
+    // Only allow yesterday + today scheduled matches (unless match is actively LIVE)
+    const { windowStartMs, windowEndMs } = getMatchScheduleWindow(now);
     const isWithinWindow =
-      startTimeMs >= nowMs - 24 * 60 * 60 * 1000 &&
-      startTimeMs <= nowMs + maxWindowMs;
+      startTimeMs >= windowStartMs &&
+      startTimeMs <= windowEndMs;
     if (!isWithinWindow && !isLive) return false;
   }
 
@@ -543,6 +590,8 @@ function selectDisplayableFixtures(fixtures, options = {}) {
 
 module.exports = {
   shouldIncludeFixture,
+  getMatchScheduleWindow,
+  isTestMatchFormat,
   normalizeText,
   hasOddsMarket,
   selectDisplayableFixtures,

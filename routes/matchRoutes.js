@@ -5,7 +5,7 @@ const jwt = require('jsonwebtoken');
 const Match = require('../models/Match');
 const Bet = require('../models/Bet');
 const User = require('../models/User');
-const { shouldIncludeFixture } = require('../services/fixtureFilter');
+const { shouldIncludeFixture, isTestMatchFormat } = require('../services/fixtureFilter');
 const { SIDE, FANCY, oddsBet, oddsBook, fancyBet, fancyBook, accountSummary } = require('../utils/betCalc');
 const { getViewerNetShare, getAllDescendantUsernames, findUserByKey } = require('../services/hierarchyHelper');
 const {
@@ -13,6 +13,7 @@ const {
     getLiveMatchesList,
     getAllMatchesList,
 } = require('../services/matchCatalogService');
+const supabaseService = require('../services/supabaseService');
 
 // Get only live matches (Slim payload from pre-warmed L1 / Redis Cache)
 router.get('/live', async (req, res) => {
@@ -73,7 +74,7 @@ router.get('/', async (req, res) => {
     }
 });
 
-// Get recently completed matches for results / history
+// Get recently completed matches (<24h) from MongoDB + Supabase 24h archive
 router.get('/results', async (req, res) => {
     try {
         const redisCache = require('../services/upstashRedisCache');
@@ -82,17 +83,33 @@ router.get('/results', async (req, res) => {
             return res.json(cached);
         }
 
+        // Trigger non-blocking 24h purge (important on serverless deployments without cron)
+        const { cleanupCompletedMatches } = require('../services/matchService');
+        cleanupCompletedMatches().catch(() => {});
+
         const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const completed = await Match.find({
-            $or: [
-                { status: 'completed' },
-                { winner: { $ne: null } }
-            ],
-            $or: [
-                { lastUpdated: { $gte: oneDayAgo } },
-                { startTime: { $gte: oneDayAgo } }
-            ]
-        }).sort({ startTime: -1 }).limit(40).lean();
+        const [mongoCompleted, supaCompleted] = await Promise.all([
+            Match.find({
+                $and: [
+                    { status: { $ne: 'live' } },
+                    { $or: [{ status: 'completed' }, { winner: { $ne: null } }] },
+                    {
+                        $or: [
+                            { completedAt: { $gte: oneDayAgo } },
+                            { completedAt: null, lastUpdated: { $gte: oneDayAgo } }
+                        ]
+                    }
+                ]
+            }).sort({ completedAt: -1, lastUpdated: -1 }).limit(40).lean(),
+            supabaseService.getActiveMatchResults({ limit: 40 }).catch(() => [])
+        ]);
+
+        const mergedMap = new Map();
+        for (const item of [...supaCompleted, ...mongoCompleted]) {
+            const key = String(item.matchId || '').replace(/^id/, '');
+            if (key) mergedMap.set(key, item);
+        }
+        const completed = Array.from(mergedMap.values()).slice(0, 40);
 
         redisCache.set('bpx:matches:results', completed, 30000).catch(() => {});
         res.json(completed);
@@ -121,14 +138,18 @@ router.get('/:id', async (req, res) => {
                     redisCache.getScore(lookupId) || redisCache.getScore(lookupId.toLowerCase()) || redisCache.getScore(altMatchId)
                 ]);
                 if (hotOdds) {
+                    const isTestCached = isTestMatchFormat(cached);
                     if (hotOdds.runners && hotOdds.runners.length >= 2) {
                         cached.backOddsA = hotOdds.runners[0]?.back ?? cached.backOddsA;
                         cached.layOddsA = hotOdds.runners[0]?.lay ?? cached.layOddsA;
                         cached.backOddsB = hotOdds.runners[1]?.back ?? cached.backOddsB;
                         cached.layOddsB = hotOdds.runners[1]?.lay ?? cached.layOddsB;
-                        if (hotOdds.runners[2]) {
+                        if (isTestCached && hotOdds.runners[2]) {
                             cached.backOddsDraw = hotOdds.runners[2]?.back ?? cached.backOddsDraw;
                             cached.layOddsDraw = hotOdds.runners[2]?.lay ?? cached.layOddsDraw;
+                        } else if (!isTestCached) {
+                            cached.backOddsDraw = null;
+                            cached.layOddsDraw = null;
                         }
                     }
                     if (hotOdds.bookmakerRunners && hotOdds.bookmakerRunners.length >= 2) {
@@ -136,9 +157,12 @@ router.get('/:id', async (req, res) => {
                         cached.bookmakerLayA = hotOdds.bookmakerRunners[0]?.lay ?? cached.bookmakerLayA;
                         cached.bookmakerBackB = hotOdds.bookmakerRunners[1]?.back ?? cached.bookmakerBackB;
                         cached.bookmakerLayB = hotOdds.bookmakerRunners[1]?.lay ?? cached.bookmakerLayB;
-                        if (hotOdds.bookmakerRunners[2]) {
+                        if (isTestCached && hotOdds.bookmakerRunners[2]) {
                             cached.bookmakerBackDraw = hotOdds.bookmakerRunners[2]?.back ?? cached.bookmakerBackDraw;
                             cached.bookmakerLayDraw = hotOdds.bookmakerRunners[2]?.lay ?? cached.bookmakerLayDraw;
+                        } else if (!isTestCached) {
+                            cached.bookmakerBackDraw = null;
+                            cached.bookmakerLayDraw = null;
                         }
                     }
                     if (hotOdds.bookmakerMarketStatus) cached.bookmakerMarketStatus = hotOdds.bookmakerMarketStatus;
@@ -178,6 +202,12 @@ router.get('/:id', async (req, res) => {
             match = await Match.findById(altMatchId);
         }
         if (!match) {
+            // Check 24h Supabase completed match archive before falling back to Bet reconstruction
+            const archivedResult = await supabaseService.getMatchResultById(lookupId).catch(() => null);
+            if (archivedResult) {
+                return res.json(archivedResult);
+            }
+
             // Check if bets exist for this matchId
             const sampleBet = await Bet.findOne({ matchId: req.params.id }).lean();
             if (sampleBet) {
@@ -256,6 +286,19 @@ router.get('/:id', async (req, res) => {
             };
             if (hotScore.tossWinner && !response.tossWinner) response.tossWinner = hotScore.tossWinner;
             if (hotScore.tossDecision && !response.tossDecision) response.tossDecision = hotScore.tossDecision;
+        }
+
+        const isTrueTest = isTestMatchFormat(response);
+        response.isTestMatch = isTrueTest;
+        if (!isTrueTest) {
+            response.backOddsDraw = null;
+            response.layOddsDraw = null;
+            response.depthBackDraw = "0";
+            response.depthLayDraw = "0";
+            response.bookmakerBackDraw = null;
+            response.bookmakerLayDraw = null;
+        } else {
+            response.tiedMatchMarket = null;
         }
 
         // Ensure wickets and run strings are fully formed (e.g. 321/8, 225/6)

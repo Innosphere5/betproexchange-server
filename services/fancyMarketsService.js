@@ -505,8 +505,15 @@ class FancyMarketsService {
       hasChanges = true;
     }
 
-    // 4. Tied Match (Others)
-    if (!match.tiedMatchMarket) {
+    // 4. Tied Match (Others) — ONLY for T10 / T20 / ODI (Test matches use The Draw)
+    const { isTestMatchFormat } = require('./fixtureFilter');
+    const isTestFmt = isTestMatchFormat(match);
+    if (isTestFmt) {
+      if (match.tiedMatchMarket) {
+        match.tiedMatchMarket = null;
+        hasChanges = true;
+      }
+    } else if (!match.tiedMatchMarket) {
       match.tiedMatchMarket = this.extractTiedMatch(null);
       hasChanges = true;
     }
@@ -703,8 +710,10 @@ class FancyMarketsService {
 
       const isActuallyLive = isLive || match.status === 'live' || match.inplay === true;
 
-      // 1. Extract real Tied Match from Betfair Exchange quotes
-      const tiedMatchMarket = this.extractTiedMatch(normalizedOdds);
+      // 1. Tied Match (Others) is ONLY for T10, T20, ODI matches (Test matches use The Draw in Match Odds)
+      const { isTestMatchFormat } = require('./fixtureFilter');
+      const isTestFmt = isTestMatchFormat(match);
+      const tiedMatchMarket = isTestFmt ? null : this.extractTiedMatch(normalizedOdds);
 
       // 2. Compute calculated odds via pricingEngine (cached & throttled)
       const computed = this.getCalibratedOdds(match);

@@ -3,17 +3,23 @@ const assert = require('node:assert/strict');
 const { shouldIncludeFixture, isTopFranchiseLeague } = require('../services/fixtureFilter');
 const { parseRoanuzMatch } = require('../services/roanuzScoreService');
 
-test('isTopFranchiseLeague matches Big Bash League & WBBL and shouldIncludeFixture keeps 30d BBL fixtures', () => {
-  const bblMenFixture = {
+test('isTopFranchiseLeague matches Big Bash League & WBBL and shouldIncludeFixture keeps yesterday/today BBL fixtures while excluding 2+ days ahead', () => {
+  const bblTodayFixture = {
     fixtureId: 'id2700247874770652',
     sport: { sportName: 'Cricket' },
     tournament: { tournamentId: 2478, tournamentName: 'Big Bash League' },
     participants: { participant1Name: 'Melbourne Renegades', participant2Name: 'Perth Scorchers' },
-    startTime: Math.floor((Date.now() + 16 * 24 * 3600 * 1000) / 1000),
+    startTime: Math.floor((Date.now() + 2 * 3600 * 1000) / 1000),
     status: { live: false, statusName: 'Pre-Game' }
   };
-  assert.equal(isTopFranchiseLeague(bblMenFixture), true);
-  assert.equal(shouldIncludeFixture(bblMenFixture, new Date()), true);
+  assert.equal(isTopFranchiseLeague(bblTodayFixture), true);
+  assert.equal(shouldIncludeFixture(bblTodayFixture, new Date()), true);
+
+  const bblFarFutureFixture = {
+    ...bblTodayFixture,
+    startTime: Math.floor((Date.now() + 16 * 24 * 3600 * 1000) / 1000),
+  };
+  assert.equal(shouldIncludeFixture(bblFarFutureFixture, new Date()), false);
 
   const bblSrlFixture = {
     fixtureId: 'id2703320776111224',

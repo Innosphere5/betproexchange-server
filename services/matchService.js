@@ -1,8 +1,12 @@
 const Match = require("../models/Match");
 const MarketOdds = require("../models/MarketOdds");
+const OddsMarket = require("../models/OddsMarket");
+const supabaseService = require("./supabaseService");
 const { getData } = require("./apiManager");
 const {
   shouldIncludeFixture,
+  getMatchScheduleWindow,
+  isTestMatchFormat,
   selectDisplayableFixtures,
   getCricketPriority,
   getMatchFormat,
@@ -15,7 +19,7 @@ const {
  * Extracts Match Odds (h2h / winner) from oddspapi odds response.
  * Prefers Betfair Exchange quotes with full back/lay market depth.
  */
-function extractMatchOdds(oddsResponse) {
+function extractMatchOdds(oddsResponse, fixtureHint = null) {
   if (!oddsResponse || !oddsResponse.odds) return null;
 
   const bookmakers = oddsResponse.odds;
@@ -181,8 +185,14 @@ function extractMatchOdds(oddsResponse) {
     }
   }
 
-  const isTest = Boolean(drawQ || (oddsResponse?.tournament?.tournamentName && /\b(test|sheffield|ranji|first-class)\b/i.test(oddsResponse.tournament.tournamentName)));
-  if (isTest && (!backOddsDraw || backOddsDraw === 0) && backOddsA > 1 && backOddsB > 1) {
+  const isTest = isTestMatchFormat(fixtureHint || oddsResponse);
+  if (!isTest) {
+    // Only Test / First-Class matches display The Draw; T10 / T20 / ODI use Tied Match in footer
+    backOddsDraw = null;
+    layOddsDraw = null;
+    depthBackDraw = "0";
+    depthLayDraw = "0";
+  } else if ((!backOddsDraw || backOddsDraw === 0) && backOddsA > 1 && backOddsB > 1) {
     const probA = 1 / backOddsA;
     const probB = 1 / backOddsB;
     const probDraw = Math.max(0.01, 1.02 - (probA + probB));
@@ -212,14 +222,16 @@ function extractMatchOdds(oddsResponse) {
 
 /**
  * 1-Day Completed Matches Cleanup Algorithm:
- * Tracks and deletes matches that have completed/resulted after 1 day (24 hours).
- * Purges associated MarketOdds, OddsMarket, and Redis caches so completed matches
- * never clutter the database or UI.
+ * Purges completed/resulted matches older than 24 hours from MongoDB, MarketOdds,
+ * OddsMarket, Redis caches, and Supabase `match_results`.
  */
 async function cleanupCompletedMatches() {
   try {
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const thirtySixHoursAgo = new Date(Date.now() - 36 * 60 * 60 * 1000);
+
+    // Always sweep Supabase 24h archive in parallel
+    await supabaseService.purgeExpiredMatchResults().catch(() => {});
 
     const staleQuery = {
       $and: [
@@ -227,6 +239,7 @@ async function cleanupCompletedMatches() {
         {
           $or: [
             { status: 'completed' },
+            { status: 'resulted' },
             { winner: { $ne: null } },
             { isCompleted: true },
             { 'score.statusText': { $regex: /finished|completed|result/i } }
@@ -234,8 +247,18 @@ async function cleanupCompletedMatches() {
         },
         {
           $or: [
-            { lastUpdated: { $lt: oneDayAgo } },
-            { startTime: { $lt: thirtySixHoursAgo } }
+            { completedAt: { $ne: null, $lt: oneDayAgo } },
+            {
+              $and: [
+                { $or: [{ completedAt: null }, { completedAt: { $exists: false } }] },
+                {
+                  $or: [
+                    { lastUpdated: { $lt: oneDayAgo } },
+                    { startTime: { $lt: thirtySixHoursAgo } }
+                  ]
+                }
+              ]
+            }
           ]
         }
       ]
@@ -271,20 +294,19 @@ async function cleanupCompletedMatches() {
 /**
  * fetchUpcomingMatches
  *
- * Fetches cricket fixtures from oddspapi REST API for the next 7 days.
- * Strictly prioritizes real international cricket matches over domestic leagues.
- * Removes simulated reality leagues (SRL) and maps live & upcoming matches to DB.
+ * Fetches real cricket fixtures from oddspapi REST API strictly for yesterday + today
+ * (plus actively live events), removes SRL/virtuals, and prunes out-of-window future/old fixtures.
  */
 const fetchUpcomingMatches = async (io) => {
   try {
-    console.log("[MatchService] Syncing cricket fixtures with international priority from oddspapi...");
+    console.log("[MatchService] Syncing cricket fixtures (yesterday + today + live) from oddspapi...");
 
-    // Run 1-day completed matches cleanup algorithm
+    // Run 1-day completed matches cleanup algorithm (MongoDB + Supabase)
     await cleanupCompletedMatches();
 
-    // 1. Clean previous matches from previous days (except LIVE) and purge any virtual/SRL matches
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    // 1. Prune SRL/virtuals and any non-live, non-completed upcoming matches outside [yesterday .. today]
+    const now = new Date();
+    const { windowStartMs, windowEndMs, windowStartDate, windowEndDate } = getMatchScheduleWindow(now);
 
     await Match.deleteMany({
       $or: [
@@ -295,22 +317,23 @@ const fetchUpcomingMatches = async (io) => {
       ],
     });
 
-    const prunedOldCount = await Match.deleteMany({
-      startTime: { $lt: todayStart },
-      status: { $ne: "live" },
+    const prunedWindowCount = await Match.deleteMany({
+      status: 'upcoming',
+      $or: [
+        { startTime: { $lt: windowStartDate } },
+        { startTime: { $gt: windowEndDate } },
+      ],
     });
 
-    if (prunedOldCount.deletedCount > 0) {
+    if (prunedWindowCount.deletedCount > 0) {
       console.log(
-        `[MatchService] 🗑️ Midnight Reset: Cleaned ${prunedOldCount.deletedCount} previous matches.`,
+        `[MatchService] 🗑️ Window Reset: Cleaned ${prunedWindowCount.deletedCount} out-of-window match(es) outside yesterday..today.`,
       );
     }
 
-    // 2. Fetch upcoming fixtures from oddspapi (next 30 days) and live fixtures
-    const now = new Date();
-    const nowTs = Math.floor(now.getTime() / 1000);
-    const windowStartTs = nowTs - 24 * 3600; // include matches from the last 24h
-    const windowEndTs = nowTs + 30 * 24 * 3600; // 30 days in advance for international tours and series
+    // 2. Fetch fixtures ONLY for yesterday + today window and live fixtures
+    const windowStartTs = Math.floor(windowStartMs / 1000);
+    const windowEndTs = Math.floor(windowEndMs / 1000);
 
     const [upcomingFixtures, liveFixtures] = await Promise.all([
       getData("fixtures", {
@@ -382,7 +405,7 @@ const fetchUpcomingMatches = async (io) => {
           });
 
           if (oddsResponse) {
-            parsedOdds = extractMatchOdds(oddsResponse);
+            parsedOdds = extractMatchOdds(oddsResponse, fixture);
           }
         } catch (err) {
           console.warn(`[MatchService] Could not fetch odds for fixture ${fixtureId}:`, err.message);
@@ -409,6 +432,7 @@ const fetchUpcomingMatches = async (io) => {
     // 5. Map fixtures to Match model format
     const topMatches = fixturePool.map((f) => {
       const odds = f.oddsData;
+      const isTest = isTestMatchFormat(f);
       return {
         matchId: f.fixtureId || f.id,
         tournamentId: f.tournament?.tournamentId || null,
@@ -432,11 +456,11 @@ const fetchUpcomingMatches = async (io) => {
         layOddsB: odds ? odds.layOddsB : null,
         depthBackB: odds ? odds.depthBackB : "0",
         depthLayB: odds ? odds.depthLayB : "0",
-        backOddsDraw: odds ? odds.backOddsDraw : null,
-        layOddsDraw: odds ? odds.layOddsDraw : null,
-        depthBackDraw: odds ? odds.depthBackDraw : "0",
-        depthLayDraw: odds ? odds.depthLayDraw : "0",
-        isTestMatch: Boolean(odds?.isTestMatch || getMatchFormat(f) === 'TEST'),
+        backOddsDraw: isTest && odds ? odds.backOddsDraw : null,
+        layOddsDraw: isTest && odds ? odds.layOddsDraw : null,
+        depthBackDraw: isTest && odds ? odds.depthBackDraw : "0",
+        depthLayDraw: isTest && odds ? odds.depthLayDraw : "0",
+        isTestMatch: isTest,
         marketStatus: "OPEN",
         lastUpdated: new Date(),
       };
@@ -455,20 +479,27 @@ const fetchUpcomingMatches = async (io) => {
       // don't overwrite the odds/marketStatus — preserve what OddsApiLiveService set.
       if (syncHasNoOdds && existingHasOdds) {
         // Only update non-odds fields (teams, league, startTime, status, etc.)
+        const patch = {
+          teamA: m.teamA,
+          teamB: m.teamB,
+          league: m.league,
+          startTime: m.startTime,
+          status: m.status,
+          sportKey: m.sportKey,
+          isTestMatch: Boolean(m.isTestMatch),
+          lastUpdated: m.lastUpdated,
+        };
+        if (!m.isTestMatch) {
+          patch.backOddsDraw = null;
+          patch.layOddsDraw = null;
+          patch.depthBackDraw = "0";
+          patch.depthLayDraw = "0";
+          patch.bookmakerBackDraw = null;
+          patch.bookmakerLayDraw = null;
+        }
         await Match.findOneAndUpdate(
           { matchId: m.matchId },
-          {
-            $set: {
-              teamA: m.teamA,
-              teamB: m.teamB,
-              league: m.league,
-              startTime: m.startTime,
-              status: m.status,
-              sportKey: m.sportKey,
-              isTestMatch: Boolean(m.isTestMatch || existingMatch.isTestMatch),
-              lastUpdated: m.lastUpdated,
-            },
-          },
+          { $set: patch },
         );
       } else {
         await Match.findOneAndUpdate(
@@ -511,21 +542,24 @@ const fetchUpcomingMatches = async (io) => {
       }
     }
 
-    // 7. Prune stale completed or obsolete matches
+    // 7. Prune inactive matches outside the yesterday..today schedule window (preserve completed matches for 24h TTL)
     const staleLiveTime = new Date(Date.now() - 12 * 60 * 60 * 1000);
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     const deleteResult = await Match.deleteMany({
       matchId: { $nin: activeIds },
       $or: [
-        { startTime: { $lt: todayStart } },
-        { status: "completed" },
+        { status: "upcoming", startTime: { $lt: windowStartDate } },
+        { status: "upcoming", startTime: { $gt: windowEndDate } },
+        { status: "completed", completedAt: { $lt: oneDayAgo } },
+        { status: "completed", completedAt: null, lastUpdated: { $lt: oneDayAgo } },
         { status: "live", startTime: { $lt: staleLiveTime } },
       ],
     });
 
     if (deleteResult.deletedCount > 0) {
       console.log(
-        `[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} old or inactive matches.`,
+        `[MatchService] 🗑️ Pruned ${deleteResult.deletedCount} old or out-of-window matches.`,
       );
     }
 
@@ -533,17 +567,11 @@ const fetchUpcomingMatches = async (io) => {
       `[MatchService] ✅ Sync complete. Total synced matches: ${activeIds.length}`,
     );
 
-    // Invalidate Redis match catalog cache so fresh active matches are immediately served
+    // Invalidate Redis match catalog cache & broadcast strictly active matches
     try {
-      const redisCache = require('./upstashRedisCache');
-      await redisCache.invalidateMatchCatalogs();
+      const { broadcastActiveCatalog } = require('./matchCatalogService');
+      await broadcastActiveCatalog(io);
     } catch (rErr) {}
-
-    if (io) {
-      // ⚡ PERF: .lean() returns plain JS objects — only emit active live/upcoming matches for UI
-      const activeMatches = await Match.find({ status: { $in: ["live", "upcoming"] } }).sort({ startTime: 1 }).lean();
-      io.emit("matches_updated", activeMatches);
-    }
   } catch (error) {
     console.error("[MatchService] Error during sync:", error.message);
   }

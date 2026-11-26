@@ -647,9 +647,16 @@ class RoanuzScoreService {
             winner: parsed.winner,
             lastUpdated: new Date()
           };
+          if (parsed.status === 'completed') {
+            dbPayload.completedAt = matchInDb?.completedAt || new Date();
+          }
           if (parsed.tossWinner) dbPayload.tossWinner = parsed.tossWinner;
           if (parsed.tossDecision) dbPayload.tossDecision = parsed.tossDecision;
           this._scheduledDbWrite(matchDbId, dbPayload);
+          if (parsed.status === 'completed') {
+            const supabaseService = require('./supabaseService');
+            supabaseService.archiveCompletedMatchResult({ ...(matchInDb?.toObject ? matchInDb.toObject() : matchInDb), ...dbPayload, matchId: matchDbId }).catch(() => {});
+          }
 
           // Emit real-time Socket.IO events to clients
           if (this.io) {

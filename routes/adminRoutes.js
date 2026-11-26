@@ -3148,9 +3148,12 @@ router.post('/declare-match-winner', auth, isAuthorized, async (req, res) => {
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
     const normDeclared = winningTeam.trim();
+    const nowTs = new Date();
     
     match.status = 'completed';
     match.winner = normDeclared;
+    match.completedAt = match.completedAt || nowTs;
+    match.lastUpdated = nowTs;
     match.marketStatus = 'CLOSED';
     match.bookmakerMarketStatus = 'CLOSED';
     match.backOddsA = null;
@@ -3163,12 +3166,17 @@ router.post('/declare-match-winner', auth, isAuthorized, async (req, res) => {
     match.bookmakerLayB = null;
     await match.save();
 
+    const supabaseService = require('../services/supabaseService');
+    const { broadcastActiveCatalog } = require('../services/matchCatalogService');
+    supabaseService.archiveCompletedMatchResult(match).catch(() => {});
+
     const io = req.app.get('io');
     await settleMatch(matchId, normDeclared, io);
 
     if (io) {
       io.emit('match_updated', match);
       io.emit('match_settled', { matchId, winner: normDeclared });
+      await broadcastActiveCatalog(io);
     }
 
     console.log(`[Admin] 🏆 Match winner declared and bets settled for ${match.teamA} v ${match.teamB}: ${normDeclared}`);
@@ -3227,9 +3235,26 @@ router.post('/settle-match', auth, isAuthorized, async (req, res) => {
     }
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
+    const nowTs = new Date();
     match.status = 'completed';
     match.winner = finalWinner.trim();
+    match.completedAt = match.completedAt || nowTs;
+    match.lastUpdated = nowTs;
+    match.marketStatus = 'CLOSED';
+    match.bookmakerMarketStatus = 'CLOSED';
+    match.backOddsA = null;
+    match.layOddsA = null;
+    match.backOddsB = null;
+    match.layOddsB = null;
+    match.bookmakerBackA = null;
+    match.bookmakerLayA = null;
+    match.bookmakerBackB = null;
+    match.bookmakerLayB = null;
     await match.save();
+
+    const supabaseService = require('../services/supabaseService');
+    const { broadcastActiveCatalog } = require('../services/matchCatalogService');
+    supabaseService.archiveCompletedMatchResult(match).catch(() => {});
 
     const io = req.app.get('io');
     await settleMatch(matchId, finalWinner.trim(), io);
@@ -3237,6 +3262,7 @@ router.post('/settle-match', auth, isAuthorized, async (req, res) => {
     if (io) {
       io.emit('match_updated', match);
       io.emit('match_settled', { matchId, winner: finalWinner.trim() });
+      await broadcastActiveCatalog(io);
     }
 
     res.json({

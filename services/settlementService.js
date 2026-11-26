@@ -5,6 +5,7 @@ const Match = require('../models/Match');
 const { distributeProfitLoss } = require('./hierarchyService');
 const { capProfitByLimit } = require('./limitService');
 const { expireAndRefundOpenBets } = require('./openBetMatcher');
+const supabaseService = require('./supabaseService');
 
 /**
  * Numberline Rate Adjustment Algorithm:
@@ -72,6 +73,7 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
 
         const normWinning = String(winningTeam || '').trim().toLowerCase();
         const isRefund = ['refund', 'void'].includes(normWinning) || (normWinning === 'tie' && !activeBets.some(b => b.marketType === 'tied_match'));
+        const settledForArchive = [];
 
         for (const bet of activeBets) {
             // Idempotency check (extra safety)
@@ -117,6 +119,7 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
+                settledForArchive.push(bet);
 
                 console.log(`[BET REFUND] User: ${bet.userId} refunded ${liability} for ${bet.matchName}.`);
 
@@ -170,6 +173,7 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
+                settledForArchive.push(bet);
 
                 // House Loss = (Net Payout for user) - (Initial Liability already deducted)
                 const houseLoss = -(netPayout - liability);
@@ -199,6 +203,7 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
                 bet.result = winningTeam;
                 bet.settledAt = new Date();
                 await bet.save();
+                settledForArchive.push(bet);
 
                 // House Profit = Initial Liability
                 await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner }, io);
@@ -217,6 +222,10 @@ const settleMatch = async (matchId, winningTeam, io, options = {}) => {
         }
         
         console.log(`[SETTLEMENT] Finished resolving ${activeBets.length} bets for matchId: ${matchId}`);
+
+        if (settledForArchive.length > 0) {
+            supabaseService.archiveSettledBets(settledForArchive).catch(() => {});
+        }
 
         // Purge Redis caches and run 1-day completed match cleanup
         try {

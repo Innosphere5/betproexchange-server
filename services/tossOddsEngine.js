@@ -245,6 +245,7 @@ async function settleToss(matchId, tossWinner, io) {
     });
 
     const isRefund = tossWinner === 'REFUND' || tossWinner === 'VOID';
+    const settledTossForArchive = [];
 
     for (const bet of tossBets) {
       if (!['pending', 'MATCHED'].includes(bet.status)) continue;
@@ -263,6 +264,7 @@ async function settleToss(matchId, tossWinner, io) {
         bet.result = tossWinner;
         bet.settledAt = new Date();
         await bet.save();
+        settledTossForArchive.push(bet);
 
         console.log(`[TossSettlement] REFUND: User ${bet.userId} refunded ${liability}`);
 
@@ -301,6 +303,7 @@ async function settleToss(matchId, tossWinner, io) {
         bet.result = tossWinner;
         bet.settledAt = new Date();
         await bet.save();
+        settledTossForArchive.push(bet);
 
         const houseLoss = -(profit - commission);
         await distributeProfitLoss(bet.userId, houseLoss, { matchName: bet.matchName, selection: bet.runner });
@@ -317,6 +320,7 @@ async function settleToss(matchId, tossWinner, io) {
         bet.result = tossWinner;
         bet.settledAt = new Date();
         await bet.save();
+        settledTossForArchive.push(bet);
 
         await distributeProfitLoss(bet.userId, liability, { matchName: bet.matchName, selection: bet.runner });
 
@@ -326,6 +330,11 @@ async function settleToss(matchId, tossWinner, io) {
           io.emit('bet_settled', { betId: bet._id, status: 'lost', payout: 0, matchName: bet.matchName });
         }
       }
+    }
+
+    if (settledTossForArchive.length > 0) {
+      const supabaseService = require('./supabaseService');
+      supabaseService.archiveSettledBets(settledTossForArchive).catch(() => {});
     }
 
     // Close the toss market and nullify live odds

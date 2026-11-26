@@ -148,6 +148,7 @@ const connectDB = () => {
   })
     .then(async () => {
       console.log('✅ MongoDB connected successfully');
+      Match.syncIndexes().catch(err => console.warn('[MongoDB] Index sync warning:', err.message));
 
       // Only run polling loops and background jobs when not in a serverless environment (e.g. Vercel)
       if (!process.env.VERCEL) {
@@ -332,27 +333,33 @@ app.get('/', (req, res) => {
 });
 
 // Production & Render Health Check Endpoint
-app.get(['/health', '/api/health'], (req, res) => {
+app.get(['/health', '/api/health'], async (req, res) => {
   const state = mongoose.connection.readyState;
   const stateMap = { 0: 'disconnected', 1: 'connected', 2: 'connecting', 3: 'disconnecting' };
+  const supabaseService = require('./services/supabaseService');
+  const supabase = await supabaseService.healthCheck().catch(e => ({ configured: supabaseService.isConfigured(), error: e.message }));
   res.json({
     status: 'ok',
     server: 'running',
     dbState: stateMap[state] || state,
     hasMongoUri: Boolean(process.env.MONGO_URI),
+    supabase,
     time: new Date().toISOString()
   });
 });
 
-// API Key Pool + Redis Cache Health Endpoint (admin/monitoring use)
-app.get('/api/pool-status', (req, res) => {
+// API Key Pool + Redis Cache + Supabase Health Endpoint (admin/monitoring use)
+app.get('/api/pool-status', async (req, res) => {
   try {
     const poolClient = require('./services/sportmonksPoolClient');
     const redisCache = require('./services/upstashRedisCache');
+    const supabaseService = require('./services/supabaseService');
+    const supabase = await supabaseService.healthCheck().catch(e => ({ configured: supabaseService.isConfigured(), error: e.message }));
     res.json({
       ok: true,
       pool: poolClient.getStatus(),
       cache: redisCache.getStats(),
+      supabase,
       uptime: Math.floor(process.uptime()) + 's',
       timestamp: new Date().toISOString()
     });
