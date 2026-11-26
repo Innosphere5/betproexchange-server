@@ -8,58 +8,17 @@ const User = require('../models/User');
 const { shouldIncludeFixture } = require('../services/fixtureFilter');
 const { SIDE, FANCY, oddsBet, oddsBook, fancyBet, fancyBook, accountSummary } = require('../utils/betCalc');
 const { getViewerNetShare, getAllDescendantUsernames, findUserByKey } = require('../services/hierarchyHelper');
+const {
+    deduplicateMatches,
+    getLiveMatchesList,
+    getAllMatchesList,
+} = require('../services/matchCatalogService');
 
-// Helper to deduplicate matches by team names on the same day
-function deduplicateMatches(matches) {
-    const uniqueMap = new Map();
-    for (const m of matches) {
-        const mObj = m.toObject ? m.toObject() : m;
-        if (!mObj.teamA || !mObj.teamB) continue;
-        // Group by normalized teams and date (YYYY-MM-DD) so different matches in a series are preserved
-        const dateKey = mObj.startTime ? new Date(mObj.startTime).toISOString().slice(0, 10) : 'nodate';
-        const teamsKey = [mObj.teamA.trim().toLowerCase(), mObj.teamB.trim().toLowerCase()].sort().join('-');
-        const key = `${teamsKey}_${dateKey}`;
-        
-        if (uniqueMap.has(key)) {
-            const existing = uniqueMap.get(key);
-            const mHasOdds = mObj.backOddsA != null || mObj.backOddsB != null;
-            const existingHasOdds = existing.backOddsA != null || existing.backOddsB != null;
-            
-            if (mObj.status === 'live' && existing.status !== 'live') {
-                uniqueMap.set(key, mObj);
-            } else if (mObj.status === existing.status) {
-                if (mHasOdds && !existingHasOdds) {
-                    uniqueMap.set(key, mObj);
-                } else if (!mHasOdds && existingHasOdds) {
-                    // keep existing with odds
-                } else {
-                    uniqueMap.set(key, mObj);
-                }
-            }
-        } else {
-            uniqueMap.set(key, mObj);
-        }
-    }
-    return Array.from(uniqueMap.values());
-}
-
-// Get only live matches (Fast Upstash Redis Cache)
+// Get only live matches (Slim payload from pre-warmed L1 / Redis Cache)
 router.get('/live', async (req, res) => {
     try {
-        const redisCache = require('../services/upstashRedisCache');
-        const cached = await redisCache.getLiveMatches();
-        if (cached && Array.isArray(cached) && cached.length > 0) {
-            return res.json(cached);
-        }
-
-        const liveMatches = await Match.find({ status: 'live' }).sort({ startTime: -1 });
-        const now = new Date();
-        const filtered = deduplicateMatches(liveMatches)
-            .filter((match) => shouldIncludeFixture(match, now));
-
-        // Cache live list in Redis for 4 seconds
-        redisCache.setLiveMatches(filtered, 4000).catch(() => {});
-        res.json(filtered);
+        const liveMatches = await getLiveMatchesList();
+        res.json(liveMatches);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -104,56 +63,11 @@ router.get('/odds-status', async (req, res) => {
     }
 });
 
-// Get all matches (Fast Upstash Redis Cache)
+// Get all matches (Slim payload from pre-warmed L1 / Redis Cache)
 router.get('/', async (req, res) => {
     try {
-        const redisCache = require('../services/upstashRedisCache');
-        const cached = await redisCache.getAllMatches();
-        if (cached && Array.isArray(cached) && cached.length > 0) {
-            return res.json(cached);
-        }
-
-        // Only fetch active live and upcoming matches for the betting catalog
-        const matches = await Match.find({ 
-            status: { $in: ['live', 'upcoming'] },
-            $or: [{ winner: null }, { winner: { $exists: false } }, { status: 'live' }]
-        }).sort({ startTime: 1 });
-        const now = new Date();
-        const { getCricketPriority } = require('../services/fixtureFilter');
-
-        const deduped = deduplicateMatches(matches)
-            .filter((match) => shouldIncludeFixture(match, now) && match.status !== 'completed' && !match.winner);
-
-        // Sort: Live first, then by cricket priority (International Tier 1 > Tier 2 > Franchise > other), then by start time
-        deduped.sort((a, b) => {
-            const isLiveA = a.status === 'live';
-            const isLiveB = b.status === 'live';
-            if (isLiveA !== isLiveB) return isLiveB ? 1 : -1;
-
-            const prioA = getCricketPriority(a);
-            const prioB = getCricketPriority(b);
-            if (prioB !== prioA) return prioB - prioA;
-
-            const timeA = new Date(a.startTime || 0).getTime();
-            const timeB = new Date(b.startTime || 0).getTime();
-            return timeA - timeB;
-        });
-
-        for (const match of deduped) {
-            const isMatchCompleted = match.status === 'completed' || match.status === 'resulted' || Boolean(match.winner);
-            const isMatchLive = match.status === 'live' || (match.startTime && now >= new Date(match.startTime));
-            if (!isMatchCompleted && !isMatchLive && !match.tossWinner && match.tossMarketStatus !== 'CLOSED') {
-                match.tossBackA = 1.98;
-                match.tossLayA = 2.02;
-                match.tossBackB = 1.98;
-                match.tossLayB = 2.02;
-                match.tossMarketStatus = 'OPEN';
-            }
-        }
-
-        // Cache full active catalog in Redis for 10 seconds
-        redisCache.setAllMatches(deduped, 10000).catch(() => {});
-        res.json(deduped);
+        const catalog = await getAllMatchesList();
+        res.json(catalog);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

@@ -182,6 +182,10 @@ const connectDB = () => {
         // Initialize Toss Odds Engine (synthetic toss market)
         const { initTossOddsEngine } = require('./services/tossOddsEngine');
         initTossOddsEngine(io);
+
+        // Pre-warm and maintain slim live/active match catalog in L1 + Redis cache
+        const { startCatalogWarmer } = require('./services/matchCatalogService');
+        startCatalogWarmer();
       }
     })
     .catch(err => {

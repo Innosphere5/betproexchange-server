@@ -1,6 +1,9 @@
 {
   "name": "betproexchange-server",
   "version": "1.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "description": "Real-time sports betting exchange backend engine, OddsPapi integration, and WebSocket server",
   "main": "server.js",
   "scripts": {

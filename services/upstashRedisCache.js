@@ -36,9 +36,10 @@ class UpstashRedisCache {
     // Stats
     this.stats = { hits: 0, misses: 0, sets: 0, errors: 0 };
 
-    // 1. Try TCP connection via ioredis if REDIS_URL is configured
+    // 1. Try TCP connection via ioredis if a valid unmasked REDIS_URL is configured
     const redisUrl = process.env.REDIS_URL;
-    if (redisUrl && IORedis) {
+    const isPlaceholder = (v) => !v || String(v).includes('********');
+    if (!isPlaceholder(redisUrl) && IORedis) {
       try {
         this.tcpClient = new IORedis(redisUrl, {
           lazyConnect: true,
@@ -84,7 +85,7 @@ class UpstashRedisCache {
     // 2. Try Upstash REST client
     const restUrl = process.env.UPSTASH_REDIS_REST_URL;
     const restToken = process.env.UPSTASH_REDIS_REST_TOKEN;
-    if (restUrl && restToken) {
+    if (!isPlaceholder(restUrl) && !isPlaceholder(restToken)) {
       try {
         this.restClient = new RestRedis({ url: restUrl, token: restToken });
         this.restEnabled = true;
@@ -357,6 +358,7 @@ class UpstashRedisCache {
 const cache = new UpstashRedisCache();
 
 // Periodic cleanup of expired in-memory entries every 30 seconds
-setInterval(() => cache.cleanup(), 30000);
+const cleanupTimer = setInterval(() => cache.cleanup(), 30000);
+if (typeof cleanupTimer.unref === 'function') cleanupTimer.unref();
 
 module.exports = cache;
