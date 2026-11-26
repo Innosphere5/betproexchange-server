@@ -6,12 +6,22 @@ const CasinoBet = require('../models/CasinoBet');
 const Transaction = require('../models/Transaction');
 const auth = require('../middleware/auth');
 const { resolveUserEffectiveLimits } = require('../services/limitService');
+const { isSuperAdminRole, getEffectiveWalletBalance, SUPERADMIN_DISPLAY_BALANCE } = require('../utils/superAdminWallet');
 
 // Get Current User's Wallet Balance & Credit (Fast Upstash Redis Cache)
 router.get('/wallet', auth, async (req, res) => {
   try {
     const userId = req.user.userId;
     const redisCache = require('../services/upstashRedisCache');
+
+    if (isSuperAdminRole(req.user?.role)) {
+      return res.json({
+        success: true,
+        balance: SUPERADMIN_DISPLAY_BALANCE,
+        credit: 0,
+        isUnlimited: true
+      });
+    }
 
     // ⚡ Fast Redis Cache Read (sub-5ms)
     const cachedWallet = await redisCache.getUserWallet(userId);
@@ -28,8 +38,8 @@ router.get('/wallet', auth, async (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     const walletData = {
-      balance: user.walletBalance || 0,
-      credit: user.credit || 0
+      balance: getEffectiveWalletBalance(user),
+      credit: isSuperAdminRole(user) ? 0 : (user.credit || 0)
     };
     // Cache for 15s in Upstash Redis
     redisCache.setUserWallet(userId, walletData, 15000).catch(() => {});

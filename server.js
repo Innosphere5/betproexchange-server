@@ -231,6 +231,7 @@ const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
+const { getEffectiveWalletBalance, isSuperAdminRole } = require('./utils/superAdminWallet');
 
 app.use(compression());
 app.use(express.json({ limit: '1mb' }));
@@ -365,8 +366,8 @@ app.get('/api/user/wallet', auth, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.userId });
     res.json({
-      balance: user ? user.walletBalance : 0,
-      credit: user ? (user.credit || 0) : 0
+      balance: getEffectiveWalletBalance(user),
+      credit: isSuperAdminRole(user) ? 0 : (user ? (user.credit || 0) : 0)
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });

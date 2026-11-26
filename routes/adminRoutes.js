@@ -26,6 +26,11 @@ const {
   applyLimitsToDownline,
   syncUserProfitLimitRecord
 } = require('../services/limitService');
+const {
+  SUPERADMIN_DISPLAY_BALANCE,
+  isSuperAdminRole,
+  getEffectiveWalletBalance,
+} = require('../utils/superAdminWallet');
 
 // Helper to reliably find a user from JWT req.user payload across username casing or ID
 const findUserFromReq = async (reqUser) => {
@@ -147,23 +152,29 @@ router.post('/create-user', auth, isAuthorized, async (req, res) => {
       return res.status(400).json({ error: 'Invalid initial balance' });
     }
 
-    let parentCurrentBalance = parent.walletBalance || 0;
+    let parentCurrentBalance = getEffectiveWalletBalance(parent);
 
     if (balance > 0) {
-      // Atomic deduction from parent's walletBalance for ALL roles (including SuperAdmin) for cash & credit
-      const updatedParent = await User.findOneAndUpdate(
-        { _id: parent._id, walletBalance: { $gte: balance } },
-        { $inc: { walletBalance: -balance } },
-        { new: true }
-      ).lean();
+      if (isSuperAdminRole(parent)) {
+        // SuperAdmin can spend unlimited while displaying fixed 100,000 wallet balance
+        await User.updateOne({ _id: parent._id }, { $set: { walletBalance: SUPERADMIN_DISPLAY_BALANCE, credit: 0 } });
+        parentCurrentBalance = SUPERADMIN_DISPLAY_BALANCE;
+      } else {
+        // Atomic deduction from parent's walletBalance for non-superadmin roles
+        const updatedParent = await User.findOneAndUpdate(
+          { _id: parent._id, walletBalance: { $gte: balance } },
+          { $inc: { walletBalance: -balance } },
+          { new: true }
+        ).lean();
 
-      if (!updatedParent) {
-        return res.status(400).json({ 
-          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${(parent.walletBalance || 0).toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
-        });
+        if (!updatedParent) {
+          return res.status(400).json({ 
+            error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${(parent.walletBalance || 0).toLocaleString('en-IN')}, requested: ₹${balance.toLocaleString('en-IN')}` 
+          });
+        }
+
+        parentCurrentBalance = updatedParent.walletBalance;
       }
-
-      parentCurrentBalance = updatedParent.walletBalance;
     }
 
     const txsToInsert = [];
@@ -413,8 +424,8 @@ router.get('/downline', auth, isAuthorized, async (req, res) => {
         username: targetParent.username,
         role: targetParent.role,
         _id: targetParent._id,
-        credit: targetParent.credit || 0,
-        walletBalance: targetParent.walletBalance || 0,
+        credit: isSuperAdminRole(targetParent) ? 0 : (targetParent.credit || 0),
+        walletBalance: getEffectiveWalletBalance(targetParent),
         share: targetParent.share || 0,
         clientPL: parentClientPL,
         balanceUpline: parentAvailableBalance,
@@ -450,20 +461,26 @@ router.post('/load-balance', auth, isAuthorized, async (req, res) => {
       return res.status(403).json({ error: 'Masters can only load balance for Bettors' });
     }
 
-    // Deduct from parent's wallet atomically for ALL roles (including SuperAdmin) for both cash & credit
-    const updatedParent = await User.findOneAndUpdate(
-      { _id: parent._id, walletBalance: { $gte: addAmount } },
-      { $inc: { walletBalance: -addAmount } },
-      { new: true }
-    );
+    if (isSuperAdminRole(parent)) {
+      // SuperAdmin can load unlimited cash/credit while wallet display stays fixed at 100,000
+      await User.updateOne({ _id: parent._id }, { $set: { walletBalance: SUPERADMIN_DISPLAY_BALANCE, credit: 0 } });
+      parent.walletBalance = SUPERADMIN_DISPLAY_BALANCE;
+    } else {
+      // Deduct from parent's wallet atomically for all non-superadmin roles
+      const updatedParent = await User.findOneAndUpdate(
+        { _id: parent._id, walletBalance: { $gte: addAmount } },
+        { $inc: { walletBalance: -addAmount } },
+        { new: true }
+      );
 
-    if (!updatedParent) {
-      return res.status(400).json({ 
-        error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${addAmount.toLocaleString('en-IN')}` 
-      });
+      if (!updatedParent) {
+        return res.status(400).json({ 
+          error: `Insufficient wallet balance in your account (${parent.username}). Available: ₹${parent.walletBalance.toLocaleString('en-IN')}, requested: ₹${addAmount.toLocaleString('en-IN')}` 
+        });
+      }
+
+      parent.walletBalance = updatedParent.walletBalance;
     }
-
-    parent.walletBalance = updatedParent.walletBalance;
 
     if (type === 'credit') {
       target.credit = (target.credit || 0) + addAmount;
@@ -552,16 +569,20 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
         });
       }
 
-      // Return credit back to parent's wallet balance
-      const updatedParent = await User.findByIdAndUpdate(
-        parent._id,
-        { $inc: { walletBalance: withdrawAmount } },
-        { new: true }
-      );
+      // Return credit back to non-superadmin parent's wallet; keep SuperAdmin fixed at display balance
+      if (isSuperAdminRole(parent)) {
+        parent.walletBalance = SUPERADMIN_DISPLAY_BALANCE;
+      } else {
+        const updatedParent = await User.findByIdAndUpdate(
+          parent._id,
+          { $inc: { walletBalance: withdrawAmount } },
+          { new: true }
+        );
+        parent.walletBalance = updatedParent.walletBalance;
+      }
 
       target.credit = updatedTarget.credit;
       target.walletBalance = updatedTarget.walletBalance;
-      parent.walletBalance = updatedParent.walletBalance;
     } else {
       // Cash Withdrawal: Check if target has enough walletBalance OR credit available
       const availableCash = Math.max(0, target.walletBalance || 0);
@@ -586,16 +607,20 @@ router.post('/withdraw-balance', auth, isAuthorized, async (req, res) => {
         });
       }
 
-      // Return cash back to parent's wallet for ALL roles (including SuperAdmin)
-      const updatedParent = await User.findByIdAndUpdate(
-        parent._id,
-        { $inc: { walletBalance: withdrawAmount } },
-        { new: true }
-      );
+      // Return cash back to non-superadmin parent's wallet; keep SuperAdmin fixed at display balance
+      if (isSuperAdminRole(parent)) {
+        parent.walletBalance = SUPERADMIN_DISPLAY_BALANCE;
+      } else {
+        const updatedParent = await User.findByIdAndUpdate(
+          parent._id,
+          { $inc: { walletBalance: withdrawAmount } },
+          { new: true }
+        );
+        parent.walletBalance = updatedParent.walletBalance;
+      }
 
       target.credit = updatedTarget.credit;
       target.walletBalance = updatedTarget.walletBalance;
-      parent.walletBalance = updatedParent.walletBalance;
     }
 
     await target.save();
@@ -755,17 +780,21 @@ router.post('/settle-account', auth, isAuthorized, async (req, res) => {
       { $inc: { walletBalance: targetWalletInc } },
       { new: true }
     );
-    const updatedParent = await User.findByIdAndUpdate(
-      directParent._id,
-      { $inc: { walletBalance: parentWalletInc } },
-      { new: true }
-    );
+    const updatedParent = isSuperAdminRole(directParent)
+      ? null
+      : await User.findByIdAndUpdate(
+          directParent._id,
+          { $inc: { walletBalance: parentWalletInc } },
+          { new: true }
+        );
 
     res.json({
       success: true,
       message: 'Account settled successfully',
       newTargetBalance: updatedTarget ? updatedTarget.walletBalance : target.walletBalance,
-      parentBalance: updatedParent ? updatedParent.walletBalance : directParent.walletBalance
+      parentBalance: isSuperAdminRole(directParent)
+        ? SUPERADMIN_DISPLAY_BALANCE
+        : (updatedParent ? updatedParent.walletBalance : directParent.walletBalance)
     });
   } catch (err) {
     console.error("Settle Account Error:", err);
@@ -2491,8 +2520,8 @@ router.post('/reset-system', auth, async (req, res) => {
     // 1. Delete all downline accounts
     const userRes = await User.deleteMany({ role: { $ne: 'superadmin' } });
 
-    // 2. Reset SuperAdmin balance to 1 Crore (₹10,000,000)
-    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: 10000000, credit: 0 } });
+    // 2. Reset SuperAdmin balance to display cap (₹100,000, unlimited spend)
+    await User.updateMany({ role: 'superadmin' }, { $set: { walletBalance: SUPERADMIN_DISPLAY_BALANCE, credit: 0 } });
 
     // 3. Clear transactions
     const txRes = await Transaction.deleteMany({});
@@ -2868,10 +2897,10 @@ router.post('/reset-all-accounts', auth, isAuthorized, async (req, res) => {
       message = `Account balances reset successfully for ${downlineUsers.length} downline accounts. All balances set to credit limit.`;
     }
 
-    // Reset superadmin balance and credit to 1 Crore (₹10,000,000)
+    // Reset superadmin balance and credit to display cap (₹100,000, unlimited spend)
     await User.updateMany(
       { role: 'superadmin' },
-      { $set: { credit: 0, walletBalance: 10000000 } }
+      { $set: { credit: 0, walletBalance: SUPERADMIN_DISPLAY_BALANCE } }
     );
 
     // Delete all transactions and bets

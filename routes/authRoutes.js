@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const { getEffectiveWalletBalance, isSuperAdminRole } = require('../utils/superAdminWallet');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'a7df1cecb1c78b4b7bab8261102f22ab98715c8877cccacc392786588d189e15';
 
@@ -62,7 +63,7 @@ router.post('/login', async (req, res) => {
     const payload = { userId: user.username, role: user.role };
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
-    res.json({ token, user: { username: user.username, balance: user.walletBalance, settings: user.settings, role: user.role, share: user.share || 0 } });
+    res.json({ token, user: { username: user.username, balance: getEffectiveWalletBalance(user), settings: user.settings, role: user.role, share: user.share || 0 } });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ error: 'Server error' });
@@ -73,6 +74,11 @@ router.post('/login', async (req, res) => {
 router.get('/me', auth, async (req, res) => {
   try {
     const user = await User.findOne({ username: req.user.userId }).select('-password');
+    if (user && isSuperAdminRole(user)) {
+      const obj = user.toObject ? user.toObject() : { ...user };
+      obj.walletBalance = getEffectiveWalletBalance(user);
+      return res.json(obj);
+    }
     res.json(user);
   } catch (err) {
     res.status(500).json({ error: 'Server error' });
