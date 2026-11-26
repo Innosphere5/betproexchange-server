@@ -427,6 +427,10 @@ function getCricketPriority(fixture) {
   prio += getFormatBonus(tName);
 
   // Time-window urgency bonus (matches happening in next 48h to 7 days get priority boost)
+  if (isTopFranchiseLeague(fixture)) {
+    prio += 300;
+  }
+
   const startTimeMs = getFixtureStartTimeMs(fixture);
   if (startTimeMs) {
     const diffHours = (startTimeMs - Date.now()) / (3600 * 1000);
@@ -440,6 +444,14 @@ function getCricketPriority(fixture) {
   }
 
   return prio;
+}
+
+function isTopFranchiseLeague(fixture) {
+  const tName = normalizeText(
+    fixture?.tournament?.tournamentName || fixture?.league || fixture?.tournament || "",
+  );
+  if (!tName) return false;
+  return /\b(big bash|bbl|wbbl|indian premier league|ipl|pakistan super league|psl|caribbean premier league|cpl|the hundred|sa20|ilt20|international league t20|major league cricket|mlc|womens premier league|wpl|bpl|bangladesh premier league|lpl|lanka premier league)\b/.test(tName);
 }
 
 function hasOddsMarket(fixture) {
@@ -487,10 +499,11 @@ function shouldIncludeFixture(fixture, now = new Date()) {
 
   if (startTimeMs !== null) {
     const nowMs = now instanceof Date ? now.getTime() : Number(now) || Date.now();
-    // Allow up to 30 days in advance for international cricket matches (bilateral tours, series, ICC events)
-    // and up to 7 days for franchise leagues
+    // Allow up to 30 days in advance for international cricket & major T20 franchises (BBL, WBBL, IPL, PSL, etc.)
+    // and up to 7 days for other leagues
     const isInternational = isInternationalFixture(fixture);
-    const maxWindowMs = isInternational
+    const isMajorFranchise = isTopFranchiseLeague(fixture);
+    const maxWindowMs = (isInternational || isMajorFranchise)
       ? 30 * 24 * 60 * 60 * 1000
       : 7 * 24 * 60 * 60 * 1000;
     const isWithinWindow =
@@ -537,6 +550,7 @@ module.exports = {
   getMatchFormat,
   getFormatBonus,
   isInternationalFixture,
+  isTopFranchiseLeague,
   isPakistanOrIndia,
   isTargetBPExchFixture,
   isVirtualOrSimulated,

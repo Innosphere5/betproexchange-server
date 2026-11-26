@@ -254,6 +254,8 @@ router.get('/:id', async (req, res) => {
                 ...hotScore,
                 lastUpdated: new Date()
             };
+            if (hotScore.tossWinner && !response.tossWinner) response.tossWinner = hotScore.tossWinner;
+            if (hotScore.tossDecision && !response.tossDecision) response.tossDecision = hotScore.tossDecision;
         }
 
         // Ensure wickets and run strings are fully formed (e.g. 321/8, 225/6)

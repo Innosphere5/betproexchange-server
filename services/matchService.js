@@ -7,6 +7,7 @@ const {
   getCricketPriority,
   getMatchFormat,
   isInternationalFixture,
+  isTopFranchiseLeague,
   isVirtualOrSimulated,
 } = require("./fixtureFilter");
 
@@ -355,15 +356,16 @@ const fetchUpcomingMatches = async (io) => {
       `[MatchService] Filtered candidates: ${validCandidates.length}. Processing top matches...`,
     );
 
-    // 4. Fetch odds for candidates (checking international fixtures first)
+    // 4. Fetch odds for candidates (checking international & top T20 franchises like BBL/WBBL)
     const fixturePool = [];
-    const maxFixturesToProcess = 60;
+    const maxFixturesToProcess = 120;
 
     for (const fixture of validCandidates) {
       const fixtureId = fixture.fixtureId || fixture.id;
       if (!fixtureId) continue;
 
       const isInternational = isInternationalFixture(fixture);
+      const isMajorFranchise = typeof isTopFranchiseLeague === "function" && isTopFranchiseLeague(fixture);
       const isLive = Boolean(fixture.status?.live || fixture.status === "live");
       const startMs = (fixture.startTime || 0) * 1000;
       const isWithin72Hours = startMs <= Date.now() + 72 * 3600 * 1000;
@@ -389,9 +391,9 @@ const fetchUpcomingMatches = async (io) => {
 
       const hasOdds = Boolean(parsedOdds && (parsedOdds.backOddsA !== null || parsedOdds.backOddsB !== null));
 
-      // For Tier 1 and Tier 2 international matches, include even if odds are pending
-      // For domestic matches, only include if they have active exchange odds
-      if (!isInternational && !hasOdds) {
+      // For Tier 1/2 international matches and top franchise leagues (BBL/WBBL/IPL/etc.), include even if odds are pending
+      // For other domestic matches, only include if they have active exchange odds
+      if (!isInternational && !isMajorFranchise && !hasOdds) {
         continue;
       }
 

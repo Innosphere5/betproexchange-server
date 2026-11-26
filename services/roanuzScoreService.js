@@ -172,21 +172,29 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
   const currentWickets = live.score?.wickets ?? (isTeamABatting ? teamA_wickets : teamB_wickets);
   const currentScore = live.score?.runs ?? (isTeamABatting ? scoreA1 : scoreB1);
 
+  const safeNum = (v, fallback = 0) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+
   // Overs
   let currentOvers = 0.0;
   if (Array.isArray(live.score?.overs)) {
-    currentOvers = Number(`${live.score.overs[0]}.${live.score.overs[1]}`);
-  } else if (live.score?.overs !== undefined) {
-    currentOvers = Number(live.score.overs);
+    const ovWhole = safeNum(live.score.overs[0], 0);
+    const ovBalls = safeNum(live.score.overs[1], 0);
+    currentOvers = safeNum(`${ovWhole}.${ovBalls}`, 0);
+  } else if (live.score?.overs !== undefined && live.score?.overs !== null) {
+    currentOvers = safeNum(live.score.overs, 0);
   }
 
   // Target and required run rate
-  let target = play.target?.runs || 0;
+  let target = safeNum(play.target?.runs, 0);
   let reqRunRate = "0.00";
   let remRuns = 0;
   let remBalls = 0;
 
-  const maxOvers = play.overs_per_innings || (
+  const maxOvers = safeNum(
+    play.overs_per_innings,
     matchData.format === 't20' ? 20 :
     matchData.format === 'oneday' ? 50 :
     matchData.format === 't10' ? 10 : 20
@@ -194,9 +202,10 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
   const totalBallsMax = maxOvers * 6;
 
   if (target > 0) {
-    remRuns = Math.max(0, target - currentScore);
-    const innBalls = live.score?.balls ?? (Math.floor(currentOvers) * 6 + Math.round((currentOvers % 1) * 10));
-    remBalls = Math.max(0, totalBallsMax - innBalls);
+    remRuns = Math.max(0, target - safeNum(currentScore, 0));
+    const derivedBalls = Math.floor(currentOvers) * 6 + Math.round((currentOvers % 1) * 10);
+    const innBalls = Number.isFinite(Number(live.score?.balls)) ? Number(live.score.balls) : derivedBalls;
+    remBalls = Math.max(0, safeNum(totalBallsMax - innBalls, 0));
     if (remBalls > 0 && remRuns > 0) {
       reqRunRate = ((remRuns / remBalls) * 6).toFixed(2);
     }
@@ -372,6 +381,7 @@ class RoanuzScoreService {
 
     this.dbWritePending = new Map();  // matchId -> { payload, timer }
     this.DB_WRITE_DEBOUNCE_MS = 4000; // Debounce Mongo writes to 4s
+    this.lastPreTossCheck = new Map(); // roanuzKey -> timestampMs
   }
 
   /**
@@ -464,13 +474,87 @@ class RoanuzScoreService {
       const fixturesData = await roanuzClient.getFixtures();
       const days = fixturesData?.data?.month?.days || [];
 
+      const nowSec = Math.floor(Date.now() / 1000);
       const activeMatches = [];
+      const preTossCandidates = [];
       for (const d of days) {
         for (const m of (d.matches || [])) {
           if (m.status === 'started' || m.status === 'live' || m.play_status === 'in_play') {
             activeMatches.push(m);
+          } else if (
+            m.status !== 'completed' &&
+            m.start_at &&
+            m.start_at >= nowSec - 45 * 60 &&
+            m.start_at <= nowSec + 45 * 60
+          ) {
+            const lastChk = this.lastPreTossCheck.get(m.key) || 0;
+            if (Date.now() - lastChk >= 15000) {
+              this.lastPreTossCheck.set(m.key, Date.now());
+              preTossCandidates.push(m);
+            }
           }
         }
+      }
+
+      // Check pre-match toss declarations (happens 10-30m before first ball)
+      for (const candMatch of preTossCandidates) {
+        try {
+          const matchDetail = await roanuzClient.getMatch(candMatch.key);
+          const matchData = matchDetail?.data;
+          if (!matchData?.toss?.winner) continue;
+          const matchInDb = await this.findMatchInDb(matchData);
+          if (!matchInDb) continue;
+
+          const parsedPre = parseRoanuzMatch(matchData, null, matchInDb);
+          if (!parsedPre?.tossWinner) continue;
+
+          const needsDbUpdate =
+            matchInDb.tossWinner !== parsedPre.tossWinner ||
+            matchInDb.tossDecision !== parsedPre.tossDecision ||
+            matchInDb.tossMarketStatus !== 'CLOSED';
+
+          if (needsDbUpdate) {
+            await Match.updateOne(
+              { matchId: matchInDb.matchId },
+              {
+                $set: {
+                  tossWinner: parsedPre.tossWinner,
+                  tossDecision: parsedPre.tossDecision || null,
+                  tossMarketStatus: 'CLOSED',
+                  tossBackA: null,
+                  tossLayA: null,
+                  tossBackB: null,
+                  tossLayB: null,
+                  lastUpdated: new Date()
+                }
+              }
+            ).catch(() => {});
+
+            if (this.io) {
+              const altId = String(matchInDb.matchId).startsWith('id')
+                ? String(matchInDb.matchId).replace(/^id/, '')
+                : ('id' + String(matchInDb.matchId));
+              for (const tid of [matchInDb.matchId, altId]) {
+                this.io.emit('toss_odds_update', {
+                  matchId: tid,
+                  tossMarketStatus: 'CLOSED',
+                  tossWinner: parsedPre.tossWinner,
+                  tossDecision: parsedPre.tossDecision || null,
+                  tossBackA: null,
+                  tossLayA: null,
+                  tossBackB: null,
+                  tossLayB: null
+                });
+                this.io.emit('live_score_update', {
+                  matchId: tid,
+                  status: matchInDb.status,
+                  tossWinner: parsedPre.tossWinner,
+                  tossDecision: parsedPre.tossDecision || null
+                });
+              }
+            }
+          }
+        } catch (_) {}
       }
 
       for (const activeMatch of activeMatches) {
@@ -526,12 +610,12 @@ class RoanuzScoreService {
           this.memoryCache.set(altDbId, parsed);
           this.memoryCache.set(String(matchData.key), parsed);
 
-          // Update Redis cache (12s TTL)
-          await redisCache.setScore(matchDbId, parsed, 12).catch(() => {});
-          await redisCache.setScore(altDbId, parsed, 12).catch(() => {});
+          // Update Redis cache (12s = 12000ms TTL)
+          await redisCache.setScore(matchDbId, parsed, 12000).catch(() => {});
+          await redisCache.setScore(altDbId, parsed, 12000).catch(() => {});
 
           // Debounced DB persistence
-          this._scheduledDbWrite(matchDbId, {
+          const dbPayload = {
             status: parsed.status,
             format: parsed.format,
             score: {
@@ -561,9 +645,11 @@ class RoanuzScoreService {
               lastUpdated: new Date()
             },
             winner: parsed.winner,
-            tossWinner: parsed.tossWinner,
             lastUpdated: new Date()
-          });
+          };
+          if (parsed.tossWinner) dbPayload.tossWinner = parsed.tossWinner;
+          if (parsed.tossDecision) dbPayload.tossDecision = parsed.tossDecision;
+          this._scheduledDbWrite(matchDbId, dbPayload);
 
           // Emit real-time Socket.IO events to clients
           if (this.io) {
