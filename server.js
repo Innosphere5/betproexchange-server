@@ -15,8 +15,18 @@ const Bet = require('./models/Bet');
 const CasinoBet = require('./models/CasinoBet');
 const { validateBetLimit } = require('./services/limitService');
 const { checkAndMatchOpenBets, expireAndRefundOpenBets, cancelUserOpenBet } = require('./services/openBetMatcher');
-const { initRoundManager, getCurrentRound, getCurrentState: getCasinoState, placeBet: placeCasinoBet } = require('./services/roundManager');
-const { initTeenPattiManager } = require('./services/teenPattiManager');
+const {
+  initRoundManager,
+  playerReady: casinoPlayerReady,
+  playerLeave: casinoPlayerLeave,
+  handleSocketDisconnect: casinoSocketDisconnect,
+} = require('./services/roundManager');
+const {
+  initTeenPattiManager,
+  playerReady: teenPattiPlayerReady,
+  playerLeave: teenPattiPlayerLeave,
+  handleSocketDisconnect: teenPattiSocketDisconnect,
+} = require('./services/teenPattiManager');
 
 const app = express();
 const server = http.createServer(app);
@@ -120,7 +130,54 @@ io.on('connection', (socket) => {
   });
 
   socket.on('join_user', (userId) => {
-    if (userId) socket.join(`user:${userId}`);
+    if (userId) {
+      const normalized = String(userId).trim();
+      socket.join(`user:${normalized}`);
+      socket.join(`user:${normalized.toLowerCase()}`);
+    }
+  });
+
+  // 🎰 Live Casino Room & Ready-to-Start lifecycle
+  socket.on('join_casino', () => {
+    socket.join('casino');
+  });
+
+  socket.on('casino_ready', (payload) => {
+    casinoPlayerReady({
+      socket,
+      userId: payload?.userId || null,
+    }).catch((err) => console.warn('[CASINO] Ready error:', err.message));
+  });
+
+  socket.on('leave_casino', (payload) => {
+    casinoPlayerLeave({
+      socket,
+      userId: payload?.userId || null,
+    });
+  });
+
+  // 🃏 Exchange Teen Patti Room & Ready-to-Start lifecycle
+  socket.on('join_teenpatti', () => {
+    socket.join('teenpatti');
+  });
+
+  socket.on('teenpatti_ready', (payload) => {
+    teenPattiPlayerReady({
+      socket,
+      userId: payload?.userId || null,
+    }).catch((err) => console.warn('[TEENPATTI] Ready error:', err.message));
+  });
+
+  socket.on('leave_teenpatti', (payload) => {
+    teenPattiPlayerLeave({
+      socket,
+      userId: payload?.userId || null,
+    });
+  });
+
+  socket.on('disconnect', () => {
+    casinoSocketDisconnect(socket);
+    teenPattiSocketDisconnect(socket);
   });
 });
 
@@ -149,6 +206,8 @@ const connectDB = () => {
     .then(async () => {
       console.log('✅ MongoDB connected successfully');
       Match.syncIndexes().catch(err => console.warn('[MongoDB] Index sync warning:', err.message));
+      require('./models/CasinoRound').syncIndexes().catch(() => {});
+      require('./models/TeenPattiHand').syncIndexes().catch(() => {});
 
       // Only run polling loops and background jobs when not in a serverless environment (e.g. Vercel)
       if (!process.env.VERCEL) {
@@ -222,14 +281,15 @@ app.use((req, res, next) => {
   next();
 });
 
-// Game loops and managers are disabled (games are under development to ensure 100% smooth cricket performance)
-// initRoundManager(io);
-// initTeenPattiManager(io);
+// On-demand Render Starter ($7 plan) safe game engines: start in 0-CPU IDLE until Ready-to-Start
+initRoundManager(io);
+initTeenPattiManager(io);
 
 const matchRoutes = require('./routes/matchRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const casinoRoutes = require('./routes/casinoRoutes');
 const teenPattiRoutes = require('./routes/teenPattiRoutes');
 const auth = require('./middleware/auth');
 const { getEffectiveWalletBalance, isSuperAdminRole } = require('./utils/superAdminWallet');
@@ -263,10 +323,10 @@ app.use(async (req, res, next) => {
 //   - Auth-sensitive routes → no-store (never cache)
 //   - Static / rarely-changing routes → short public cache (5s)
 app.use((req, res, next) => {
-  const noStore = ['/api/auth', '/api/user', '/api/admin', '/socket.io'];
+  const noStore = ['/api/auth', '/api/user', '/api/admin', '/api/casino', '/api/teenpatti', '/socket.io'];
   const isPrivate = noStore.some(prefix => req.path.startsWith(prefix));
   if (isPrivate) {
-    // Private data & socket polling — do not cache at any layer
+    // Private data & real-time game state — do not cache at any layer
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
   } else if (req.method === 'GET') {
     // Public GET routes (match list, odds, scores) — short 5s cache at CDN edge
@@ -279,6 +339,7 @@ app.use('/api/matches', matchRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/casino', casinoRoutes);
 app.use('/api/teenpatti', teenPattiRoutes);
 
 // Official GET /v4/scores endpoint as specified by oddsapi.io
@@ -728,30 +789,6 @@ app.post('/api/user/bets/:betId/cancel', auth, async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err.message || 'Failed to cancel open bet' });
   }
-});
-
-// Casino Endpoints (Games under development)
-app.post('/api/casino/bet', auth, async (req, res) => {
-  return res.status(503).json({
-    success: false,
-    status: 'UNDER_DEVELOPMENT',
-    message: 'Casino games are currently under development. Cricket Exchange is fully operational.'
-  });
-});
-
-app.get('/api/casino/active-bets', auth, async (req, res) => {
-  return res.json([]);
-});
-
-app.get('/api/casino/state', (req, res) => {
-  return res.json({
-    status: 'UNDER_DEVELOPMENT',
-    message: 'Casino games are currently under development. Cricket Exchange is fully operational.'
-  });
-});
-
-app.get('/api/casino/history', async (req, res) => {
-  return res.json([]);
 });
 
 // 404 Handler

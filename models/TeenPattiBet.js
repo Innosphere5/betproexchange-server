@@ -9,12 +9,14 @@ const teenPattiBetSchema = new mongoose.Schema({
     required: true
   },
   amount: { type: Number, required: true },
+  liability: { type: Number, default: null }, // For LAY bets = round2(amount * (odds - 1))
   odds: { type: Number, required: true },
+  payout: { type: Number, default: 0 },
   status: { type: String, enum: ['PENDING', 'WIN', 'LOSE'], default: 'PENDING' },
   createdAt: { type: Date, default: Date.now }
 });
 
 teenPattiBetSchema.index({ userId: 1, roundId: 1 });
-teenPattiBetSchema.index({ roundId: 1 });
+teenPattiBetSchema.index({ roundId: 1, status: 1 });
 
 module.exports = mongoose.model('TeenPattiBet', teenPattiBetSchema);

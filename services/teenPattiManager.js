@@ -1,658 +1,646 @@
-const crypto = require('crypto');
+const mongoose = require('mongoose');
 const TeenPattiHand = require('../models/TeenPattiHand');
 const TeenPattiBet = require('../models/TeenPattiBet');
-const User = require('../models/User');
-const mongoose = require('mongoose');
 const { distributeCasinoPL } = require('./hierarchyService');
 const { validateBetLimit, capProfitByLimit } = require('./limitService');
+const {
+  PAIR_PLUS_MULTIPLIERS,
+  round2,
+  getHandRank,
+  dealProvablyFairHands,
+  debitPlayerWallet,
+  creditPlayerWallet,
+} = require('./cardGameEngine');
 
-// ═══════════════════════════════════════════════════════════════════════════
-// CONFIGURATION
-// ═══════════════════════════════════════════════════════════════════════════
+const ROOM_NAME = 'teenpatti';
+const REST_PLAYER_TTL_MS = 45000;
+const MAX_HISTORY_ITEMS = 24;
+
 const ROUND_SETTINGS = {
-  DEALING_DURATION: 3,   // 3 seconds dealing phase to A & B
-  BETTING_DURATION: 8,   // 8 seconds betting window (5-8s requested by user)
-  SUSPENSE_DURATION: 4,  // 4 seconds progressive card reveal suspense (3-4s requested by user)
-  RESULT_DURATION: 4,    // 4 seconds result display & celebration
-  BACK_LAY_ODDS: 1.98,   // Exchange standard back/lay odds
+  DEALING_DURATION: 2,   // 2s card split animation
+  BETTING_DURATION: 10,  // 10s exchange Back/Lay & Pair Plus betting window
+  SUSPENSE_DURATION: 4,  // 4s progressive 3-card reveal
+  RESULT_DURATION: 3,    // 3s winner celebration before next round or IDLE
+  BACK_LAY_ODDS: 1.98,
 };
 
-// Pair Plus multipliers (standard 1 to X notation means payout multiplier = X + 1)
-const PAIR_PLUS_MULTIPLIERS = {
-  'TRAIL': 46.0,          // Trio: 1 to 45 (46x total payout)
-  'PURE SEQUENCE': 36.0,  // Straight Flush: 1 to 35 (36x)
-  'SEQUENCE': 7.0,        // Straight: 1 to 6 (7x)
-  'COLOR': 5.0,           // Flush: 1 to 4 (5x)
-  'PAIR': 2.0,            // Pair: 1 to 1 (2x)
-};
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MODULE STATE
-// ═══════════════════════════════════════════════════════════════════════════
 let io = null;
 let currentRound = null;
 let roundTimer = 0;
-let phase = 'INIT'; // INIT, OPEN, CLOSED, RESULT
+let phaseEndsAt = 0;
+let phase = 'IDLE'; // IDLE | DEALING | OPEN | CLOSED | RESULT
 let timerInterval = null;
-let isProcessing = false;
-let history = [];
-const activePlayers = new Set();
+let nextRoundTimeout = null;
+let isStartingRound = false;
+let isTickProcessing = false;
+let isSettling = false;
+let historyLoaded = false;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// DECK & SHUFFLE
-// ═══════════════════════════════════════════════════════════════════════════
-const SUITS = ['♠', '♥', '♦', '♣'];
-const VALUES = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+const activeSockets = new Map(); // socket.id -> userId | null
+const activeUsers = new Map();
+let roundBets = [];
+let history = []; // Capped array of { roundId, result, handA, handB, seedHash }
 
-function createDeck() {
-  const deck = [];
-  for (const suit of SUITS) {
-    for (let i = 0; i < VALUES.length; i++) {
-      deck.push({ value: VALUES[i], suit, rank: i });
-    }
-  }
-  return deck;
-}
-
-function secureShuffle(deck) {
-  const arr = [...deck];
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(0, i + 1);
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TEEN PATTI HAND EVALUATOR
-// ═══════════════════════════════════════════════════════════════════════════
-function getHandRank(cards) {
-  const sorted = [...cards].sort((a, b) => b.rank - a.rank);
-  const ranks = sorted.map(c => c.rank);
-  const suits = sorted.map(c => c.suit);
-
-  const isTrail = ranks[0] === ranks[1] && ranks[1] === ranks[2];
-  const isColor = suits[0] === suits[1] && suits[1] === suits[2];
-
-  // Sequence detection (A-2-3 sequence special case)
-  let isSequence = false;
-  let sequenceRanks = ranks;
-
-  if (ranks[0] - ranks[1] === 1 && ranks[1] - ranks[2] === 1) {
-    isSequence = true;
-    sequenceRanks = ranks;
-  } else if (ranks[0] === 12 && ranks[1] === 1 && ranks[2] === 0) {
-    isSequence = true;
-    sequenceRanks = [1, 0, -1]; // Lowest sequence ranking
-  }
-
-  const isPureSequence = isSequence && isColor;
-
-  let pairRank = -1;
-  let kicker = -1;
-  if (ranks[0] === ranks[1]) {
-    pairRank = ranks[0];
-    kicker = ranks[2];
-  } else if (ranks[1] === ranks[2]) {
-    pairRank = ranks[1];
-    kicker = ranks[0];
-  } else if (ranks[0] === ranks[2]) {
-    pairRank = ranks[0];
-    kicker = ranks[1];
-  }
-  const isPair = pairRank >= 0 && !isTrail;
-
-  if (isTrail) return { type: 'TRAIL', score: 50000 + ranks[0] };
-  if (isPureSequence) return { type: 'PURE SEQUENCE', score: 40000 + sequenceRanks[0] };
-  if (isSequence) return { type: 'SEQUENCE', score: 30000 + sequenceRanks[0] };
-  if (isColor) return { type: 'COLOR', score: 20000 + ranks[0] * 100 + ranks[1] * 10 + ranks[2] };
-  if (isPair) return { type: 'PAIR', score: 10000 + pairRank * 10 + kicker };
-  return { type: 'HIGH CARD', score: ranks[0] * 100 + ranks[1] * 10 + ranks[2] };
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// BROADCAST STATE
-// ═══════════════════════════════════════════════════════════════════════════
-function broadcastState() {
-  if (!io || !currentRound) return;
-
-  let sanitizedCards = null;
-  let sanitizedHandNames = null;
-
-  if (currentRound.status === 'RESULT_DECLARED' || currentRound.status === 'BETTING_CLOSED') {
-    sanitizedCards = currentRound.cards;
-    sanitizedHandNames = currentRound.status === 'RESULT_DECLARED' ? currentRound.handNames : null;
-  } else {
-    sanitizedCards = {
-      A: [null, null, null],
-      B: [null, null, null]
-    };
-    sanitizedHandNames = null;
-  }
-
-  io.to('teenpatti').emit('teenpatti_state', {
-    roundId: currentRound.roundId,
-    status: currentRound.status,
-    result: currentRound.status === 'RESULT_DECLARED' ? currentRound.result : 'PENDING',
-    timer: roundTimer,
-    cards: sanitizedCards,
-    handNames: sanitizedHandNames,
-    history,
-    startTime: currentRound.startTime,
-    endTime: currentRound.endTime,
-    serverTimestamp: Date.now()
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SOCKET ROOM BOOT
-// ═══════════════════════════════════════════════════════════════════════════
-async function loadHistory() {
-  try {
-    const pastRounds = await TeenPattiHand.find({ status: 'RESULT_DECLARED' })
-      .sort({ startTime: -1 })
-      .limit(15);
-    if (pastRounds && pastRounds.length > 0) {
-      history = pastRounds.map(r => r.result).reverse();
-    } else if (history.length === 0) {
-      history = ['A', 'B', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A'];
-    }
-  } catch (err) {
-    console.warn('[TEENPATTI] Error loading history (using fallback):', err.message);
-    if (history.length === 0) {
-      history = ['A', 'B', 'B', 'A', 'A', 'B', 'A', 'B', 'B', 'A'];
-    }
-  }
-}
-
-function initTeenPattiManager(socketIo) {
-  io = socketIo;
+function clearTimers() {
   if (timerInterval) {
     clearInterval(timerInterval);
     timerInterval = null;
   }
-  phase = 'IDLE';
-  console.log('[TEENPATTI] Teen Patti game engine is paused (under development).');
+  if (nextRoundTimeout) {
+    clearTimeout(nextRoundTimeout);
+    nextRoundTimeout = null;
+  }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GAME LOOP FLOW
-// ═══════════════════════════════════════════════════════════════════════════
-async function startNewRound() {
+function pruneStaleRestPlayers(now = Date.now()) {
+  for (const [userId, ts] of activeUsers.entries()) {
+    if (now - ts > REST_PLAYER_TTL_MS) {
+      activeUsers.delete(userId);
+    }
+  }
+}
+
+function getActivePlayerCount(now = Date.now()) {
+  pruneStaleRestPlayers(now);
+  const uniqueIds = new Set();
+  for (const userId of activeUsers.keys()) {
+    uniqueIds.add(`u:${userId}`);
+  }
+  for (const [sockId, userId] of activeSockets.entries()) {
+    uniqueIds.add(userId ? `u:${userId}` : `s:${sockId}`);
+  }
+  const roomSize = io?.sockets?.adapter?.rooms?.get(ROOM_NAME)?.size || 0;
+  return Math.max(uniqueIds.size, roomSize > 0 && uniqueIds.size === 0 ? roomSize : 0);
+}
+
+function hasActivePlayers(now = Date.now()) {
+  return getActivePlayerCount(now) > 0;
+}
+
+async function ensureHistoryLoaded() {
+  if (historyLoaded) return;
+  historyLoaded = true;
+  if (mongoose.connection.readyState !== 1) return;
   try {
-    clearInterval(timerInterval);
+    const past = await TeenPattiHand.find({ status: 'RESULT_DECLARED' })
+      .sort({ startTime: -1 })
+      .limit(MAX_HISTORY_ITEMS)
+      .select('roundId result handNames seedHash startTime')
+      .lean();
+    if (Array.isArray(past) && past.length > 0) {
+      history = past.map((r) => ({
+        roundId: r.roundId,
+        result: r.result,
+        handA: r.handNames?.A || '',
+        handB: r.handNames?.B || '',
+        seedHash: r.seedHash || null,
+      }));
+    }
+  } catch (err) {
+    console.warn('[TEENPATTI] History preload warning:', err.message);
+  }
+}
 
-    let cardsA, cardsB, rankA, rankB;
-    do {
-      const shuffledDeck = secureShuffle(createDeck());
-      cardsA = shuffledDeck.slice(0, 3);
-      cardsB = shuffledDeck.slice(3, 6);
-      rankA = getHandRank(cardsA);
-      rankB = getHandRank(cardsB);
-    } while (rankA.score === rankB.score);
+function sanitizeRoundForClient(round, now = Date.now()) {
+  if (!round || phase === 'IDLE') {
+    return {
+      roundId: null,
+      status: 'IDLE',
+      result: 'PENDING',
+      timer: 0,
+      maxTimer: 0,
+      cards: { A: [null, null, null], B: [null, null, null] },
+      handNames: null,
+      seedHash: null,
+      serverSeed: null,
+      history: history.map((h) => h.result),
+      detailedHistory: history,
+      activePlayers: getActivePlayerCount(now),
+      serverTimestamp: now,
+    };
+  }
 
-    const roundId = `TP-${Date.now()}`;
+  const revealCards = round.status === 'BETTING_CLOSED' || round.status === 'RESULT_DECLARED';
+  const revealResult = round.status === 'RESULT_DECLARED';
+  const liveRemaining = phaseEndsAt > 0
+    ? Math.max(0, Math.ceil((phaseEndsAt - now) / 1000))
+    : Math.max(0, roundTimer);
+
+  return {
+    roundId: round.roundId,
+    status: round.status,
+    result: revealResult ? round.result : 'PENDING',
+    timer: liveRemaining,
+    maxTimer:
+      round.status === 'DEALING'
+        ? ROUND_SETTINGS.DEALING_DURATION
+        : round.status === 'BETTING_OPEN'
+          ? ROUND_SETTINGS.BETTING_DURATION
+          : round.status === 'BETTING_CLOSED'
+            ? ROUND_SETTINGS.SUSPENSE_DURATION
+            : ROUND_SETTINGS.RESULT_DURATION,
+    cards: revealCards
+      ? round.cards
+      : { A: [null, null, null], B: [null, null, null] },
+    handNames: revealResult ? round.handNames : null,
+    seedHash: round.seedHash || null,
+    serverSeed: revealResult ? round.serverSeed : null,
+    history: history.map((h) => h.result),
+    detailedHistory: history,
+    activePlayers: getActivePlayerCount(now),
+    startTime: round.startTime,
+    endTime: round.endTime,
+    serverTimestamp: now,
+  };
+}
+
+function broadcastState(targetSocket = null) {
+  const payload = sanitizeRoundForClient(currentRound, Date.now());
+  if (targetSocket) {
+    targetSocket.emit('teenpatti_state', payload);
+    return;
+  }
+  if (io) {
+    io.to(ROOM_NAME).emit('teenpatti_state', payload);
+  }
+}
+
+function transitionToIdle() {
+  clearTimers();
+  phase = 'IDLE';
+  currentRound = null;
+  roundTimer = 0;
+  roundBets = [];
+  isTickProcessing = false;
+  broadcastState();
+}
+
+/**
+ * Computes settlement outcome & payout for one Teen Patti bet.
+ */
+function evaluateBetOutcome(bet, winningChoice, rankA, rankB) {
+  let isWin = false;
+  let finalOdds = bet.odds || ROUND_SETTINGS.BACK_LAY_ODDS;
+  const stake = bet.amount;
+  const risk = bet.liability != null
+    ? bet.liability
+    : (bet.betType === 'A_LAY' || bet.betType === 'B_LAY' ? round2(stake * (finalOdds - 1)) : stake);
+
+  if (bet.betType === 'A_BACK' && winningChoice === 'A') isWin = true;
+  else if (bet.betType === 'B_BACK' && winningChoice === 'B') isWin = true;
+  else if (bet.betType === 'A_LAY' && winningChoice === 'B') isWin = true;
+  else if (bet.betType === 'B_LAY' && winningChoice === 'A') isWin = true;
+  else if (bet.betType === 'A_PAIR_PLUS' && PAIR_PLUS_MULTIPLIERS[rankA?.type]) {
+    isWin = true;
+    finalOdds = PAIR_PLUS_MULTIPLIERS[rankA.type];
+  } else if (bet.betType === 'B_PAIR_PLUS' && PAIR_PLUS_MULTIPLIERS[rankB?.type]) {
+    isWin = true;
+    finalOdds = PAIR_PLUS_MULTIPLIERS[rankB.type];
+  }
+
+  if (!isWin) {
+    return { isWin: false, risk, grossProfit: 0, payout: 0, finalOdds };
+  }
+
+  const isLay = bet.betType === 'A_LAY' || bet.betType === 'B_LAY';
+  const grossProfit = isLay ? round2(stake) : round2(stake * (finalOdds - 1));
+  return { isWin: true, risk, grossProfit, finalOdds };
+}
+
+async function settleBets(round) {
+  if (!round || isSettling) return;
+  isSettling = true;
+
+  try {
+    const winResult = round.winResult;
+    const rankA = getHandRank(round.cards.A);
+    const rankB = getHandRank(round.cards.B);
+
+    round.result = winResult;
+    round.status = 'RESULT_DECLARED';
+
+    const entry = {
+      roundId: round.roundId,
+      result: winResult,
+      handA: round.handNames?.A || rankA.type,
+      handB: round.handNames?.B || rankB.type,
+      seedHash: round.seedHash || null,
+    };
+    history = [entry, ...history.filter((h) => h.roundId !== round.roundId)].slice(0, MAX_HISTORY_ITEMS);
+
+    if (io) {
+      io.to(ROOM_NAME).emit('teenpatti_result_declared', {
+        roundId: round.roundId,
+        status: 'RESULT_DECLARED',
+        result: winResult,
+        cards: round.cards,
+        handNames: round.handNames,
+        seedHash: round.seedHash,
+        serverSeed: round.serverSeed,
+        history: history.map((h) => h.result),
+        detailedHistory: history,
+      });
+    }
+
+    const betsToSettle = [...roundBets];
+    roundBets = [];
+
+    if (mongoose.connection.readyState === 1) {
+      const dbBets = await TeenPattiBet.find({ roundId: round.roundId, status: 'PENDING' });
+      for (const dbBet of dbBets) {
+        if (!betsToSettle.some((b) => String(b._id) === String(dbBet._id))) {
+          betsToSettle.push(dbBet);
+        }
+      }
+
+      if (betsToSettle.length > 0) {
+        await TeenPattiHand.findOneAndUpdate(
+          { roundId: round.roundId },
+          {
+            $set: {
+              status: 'RESULT_DECLARED',
+              result: winResult,
+              cards: round.cards,
+              handNames: round.handNames,
+              seedHash: round.seedHash,
+              startTime: new Date(round.startTime),
+            },
+          },
+          { upsert: true }
+        ).catch(() => {});
+      }
+    }
+
+    for (const bet of betsToSettle) {
+      const outcome = evaluateBetOutcome(bet, winResult, rankA, rankB);
+
+      if (outcome.isWin) {
+        const rawNetProfit = round2(outcome.grossProfit * 0.98); // 2% platform commission on profit
+        const { netProfit } = await capProfitByLimit(bet.userId, 'teenpatti', rawNetProfit);
+        const cappedNet = round2(netProfit);
+        const payout = round2(outcome.risk + cappedNet);
+
+        await creditPlayerWallet(bet.userId, payout, io);
+
+        distributeCasinoPL(bet.userId, -cappedNet, {
+          matchName: `TeenPatti Round ${round.roundId}`,
+          selection: bet.betType,
+        }).catch(() => {});
+
+        if (io) {
+          const payload = {
+            userId: bet.userId,
+            roundId: round.roundId,
+            amount: payout,
+            profit: cappedNet,
+            betType: bet.betType,
+            result: 'WIN',
+          };
+          io.to(`user:${bet.userId}`).emit('teenpatti_payout', payload);
+          io.to(`user:${String(bet.userId).toLowerCase()}`).emit('teenpatti_payout', payload);
+        }
+
+        if (mongoose.connection.readyState === 1 && bet._id) {
+          TeenPattiBet.findByIdAndUpdate(bet._id, { status: 'WIN', payout }).catch(() => {});
+        }
+      } else {
+        distributeCasinoPL(bet.userId, outcome.risk, {
+          matchName: `TeenPatti Round ${round.roundId}`,
+          selection: bet.betType,
+        }).catch(() => {});
+
+        if (io) {
+          const payload = {
+            userId: bet.userId,
+            roundId: round.roundId,
+            amount: outcome.risk,
+            profit: -outcome.risk,
+            betType: bet.betType,
+            result: 'LOSE',
+          };
+          io.to(`user:${bet.userId}`).emit('teenpatti_payout', payload);
+          io.to(`user:${String(bet.userId).toLowerCase()}`).emit('teenpatti_payout', payload);
+        }
+
+        if (mongoose.connection.readyState === 1 && bet._id) {
+          TeenPattiBet.findByIdAndUpdate(bet._id, { status: 'LOSE', payout: 0 }).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[TEENPATTI] Settlement error:', err.message);
+  } finally {
+    isSettling = false;
+  }
+}
+
+async function startNewRound() {
+  if (isStartingRound) {
+    return sanitizeRoundForClient(currentRound, Date.now());
+  }
+  if (!hasActivePlayers()) {
+    transitionToIdle();
+    return null;
+  }
+
+  isStartingRound = true;
+  clearTimers();
+
+  try {
+    await ensureHistoryLoaded();
+    if (!hasActivePlayers()) {
+      transitionToIdle();
+      return null;
+    }
+
     const startTime = Date.now();
-    const TOTAL_CYCLE = (ROUND_SETTINGS.DEALING_DURATION + ROUND_SETTINGS.BETTING_DURATION + ROUND_SETTINGS.SUSPENSE_DURATION + ROUND_SETTINGS.RESULT_DURATION) * 1000;
-    const endTime = startTime + TOTAL_CYCLE;
+    const roundId = `TP-${startTime}`;
+    const deal = dealProvablyFairHands(roundId);
+    const totalCycleMs =
+      (ROUND_SETTINGS.DEALING_DURATION +
+        ROUND_SETTINGS.BETTING_DURATION +
+        ROUND_SETTINGS.SUSPENSE_DURATION +
+        ROUND_SETTINGS.RESULT_DURATION) *
+      1000;
 
     currentRound = {
       roundId,
       status: 'DEALING',
       startTime,
-      endTime,
+      endTime: startTime + totalCycleMs,
       result: 'PENDING',
-      cards: { A: cardsA, B: cardsB },
-      handNames: { A: rankA.type, B: rankB.type }
+      cards: { A: deal.cardsA, B: deal.cardsB },
+      handNames: { A: deal.rankA.type, B: deal.rankB.type },
+      winResult: deal.winResult,
+      seedHash: deal.seedHash,
+      serverSeed: deal.serverSeed,
     };
 
-    TeenPattiHand.create({
-      roundId,
-      status: 'DEALING',
-      result: 'PENDING',
-      cards: { A: cardsA, B: cardsB },
-      handNames: { A: rankA.type, B: rankB.type }
-    }).then(doc => {
-      if (currentRound && currentRound.roundId === roundId) {
-        currentRound._id = doc._id;
-      }
-    }).catch(e => console.warn('[TEENPATTI] DB save warning:', e.message));
-
-    roundTimer = ROUND_SETTINGS.DEALING_DURATION || 5;
     phase = 'DEALING';
-    console.log(`[TEENPATTI] Starting round ${roundId} (DEALING phase)`);
+    roundTimer = ROUND_SETTINGS.DEALING_DURATION;
+    phaseEndsAt = startTime + ROUND_SETTINGS.DEALING_DURATION * 1000;
+    roundBets = [];
 
-    const sanitizedRound = {
-      roundId: currentRound.roundId,
-      status: 'DEALING',
-      result: 'PENDING',
-      cards: { A: [null, null, null], B: [null, null, null] },
-      handNames: null,
-      timer: roundTimer
-    };
-
-    io.to('teenpatti').emit('teenpatti_round_start', sanitizedRound);
+    clearTimers();
+    const payload = sanitizeRoundForClient(currentRound, startTime);
+    if (io) {
+      io.to(ROOM_NAME).emit('teenpatti_round_start', payload);
+    }
     broadcastState();
 
     timerInterval = setInterval(async () => {
-      if (isProcessing) return;
+      if (isTickProcessing || !currentRound) return;
+      isTickProcessing = true;
 
-      roundTimer--;
-      broadcastState();
+      try {
+        const now = Date.now();
+        roundTimer = Math.max(0, Math.ceil((phaseEndsAt - now) / 1000));
 
-      if (roundTimer <= 0) {
-        isProcessing = true;
-        try {
+        if (now >= phaseEndsAt) {
           if (phase === 'DEALING') {
-            // Transition to BETTING_OPEN
             phase = 'OPEN';
-            roundTimer = ROUND_SETTINGS.BETTING_DURATION;
             currentRound.status = 'BETTING_OPEN';
-            if (currentRound._id && mongoose.connection.readyState === 1) {
-              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_OPEN' } }).catch(e => console.warn('[TEENPATTI] DB update warning:', e.message));
-            }
+            roundTimer = ROUND_SETTINGS.BETTING_DURATION;
+            phaseEndsAt = now + ROUND_SETTINGS.BETTING_DURATION * 1000;
             broadcastState();
           } else if (phase === 'OPEN') {
-            // Transition to BETTING_CLOSED
             phase = 'CLOSED';
-            roundTimer = ROUND_SETTINGS.SUSPENSE_DURATION;
             currentRound.status = 'BETTING_CLOSED';
-            if (currentRound._id && mongoose.connection.readyState === 1) {
-              await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { status: 'BETTING_CLOSED' } }).catch(e => console.warn('[TEENPATTI] DB update warning:', e.message));
+            roundTimer = ROUND_SETTINGS.SUSPENSE_DURATION;
+            phaseEndsAt = now + ROUND_SETTINGS.SUSPENSE_DURATION * 1000;
+            const closedState = sanitizeRoundForClient(currentRound, now);
+            if (io) {
+              io.to(ROOM_NAME).emit('teenpatti_betting_closed', closedState);
             }
-            
-            const sanitizedClosedRound = {
-              roundId: currentRound.roundId,
-              status: currentRound.status,
-              result: 'PENDING',
-              cards: currentRound.cards,
-              handNames: null,
-              timer: roundTimer
-            };
-            io.to('teenpatti').emit('teenpatti_betting_closed', sanitizedClosedRound);
             broadcastState();
           } else if (phase === 'CLOSED') {
-            clearInterval(timerInterval);
-            timerInterval = null;
-            await declareResult();
+            clearTimers();
+            phase = 'RESULT';
+            currentRound.status = 'RESULT_DECLARED';
+            roundTimer = ROUND_SETTINGS.RESULT_DURATION;
+            phaseEndsAt = now + ROUND_SETTINGS.RESULT_DURATION * 1000;
+            await settleBets(currentRound);
+            broadcastState();
+
+            nextRoundTimeout = setTimeout(() => {
+              if (hasActivePlayers()) {
+                startNewRound().catch((err) => {
+                  console.error('[TEENPATTI] Next round start error:', err.message);
+                  transitionToIdle();
+                });
+              } else {
+                transitionToIdle();
+              }
+            }, ROUND_SETTINGS.RESULT_DURATION * 1000);
+            if (nextRoundTimeout.unref) nextRoundTimeout.unref();
           }
-        } catch (err) {
-          console.error('[TEENPATTI] Error during phase transition:', err);
-        } finally {
-          isProcessing = false;
+        } else {
+          broadcastState();
         }
+      } catch (err) {
+        console.error('[TEENPATTI] Ticker error:', err.message);
+      } finally {
+        isTickProcessing = false;
       }
     }, 1000);
+
     if (timerInterval.unref) timerInterval.unref();
-
-  } catch (err) {
-    console.error('[TEENPATTI] Error starting new round:', err);
-    setTimeout(startNewRound, 5000);
+    return payload;
+  } finally {
+    isStartingRound = false;
   }
 }
 
-async function declareResult() {
-  if (!currentRound) return;
-
-  try {
-    phase = 'RESULT';
-    
-    // Evaluate results from pre-dealt cards
-    const cardsA = currentRound.cards.A;
-    const cardsB = currentRound.cards.B;
-    const rankA = getHandRank(cardsA);
-    const rankB = getHandRank(cardsB);
-
-    const result = rankA.score > rankB.score ? 'A' : 'B';
-
-    currentRound.result = result;
-    currentRound.status = 'RESULT_DECLARED';
-    if (currentRound._id && mongoose.connection.readyState === 1) {
-      await TeenPattiHand.updateOne({ _id: currentRound._id }, { $set: { result, status: 'RESULT_DECLARED' } }).catch(e => console.warn('[TEENPATTI] DB result update warning:', e.message));
-    }
-
-    console.log(`[TEENPATTI] Round result: ${result} (A: ${rankA.type} vs B: ${rankB.type})`);
-    
-    // Update local history
-    history.push(result);
-    if (history.length > 15) history.shift();
-
-    io.to('teenpatti').emit('teenpatti_result_declared', currentRound);
-    broadcastState();
-
-    // Settle bets
-    await settleBets(result, rankA, rankB);
-
-    // Start next round after result display duration only if players are active!
-    setTimeout(() => {
-      if (activePlayers.size > 0) {
-        startNewRound();
-      } else {
-        console.log('[TEENPATTI] No active players. Pausing engine to IDLE.');
-        phase = 'IDLE';
-        currentRound = null;
-        clearInterval(timerInterval);
-        broadcastState();
-      }
-    }, ROUND_SETTINGS.RESULT_DURATION * 1000);
-
-  } catch (err) {
-    console.error('[TEENPATTI] Error declaring result:', err);
-    if (activePlayers.size > 0) {
-      setTimeout(startNewRound, 5000);
-    } else {
-      phase = 'IDLE';
-      currentRound = null;
-      broadcastState();
-    }
-  }
+function initTeenPattiManager(socketIo) {
+  io = socketIo;
+  clearTimers();
+  isStartingRound = false;
+  phase = 'IDLE';
+  currentRound = null;
+  roundTimer = 0;
+  phaseEndsAt = 0;
+  roundBets = [];
+  console.log('[TEENPATTI] Ready-to-Start on-demand engine initialized (IDLE, 0 background CPU).');
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// SETTLEMENT LOGIC
-// ═══════════════════════════════════════════════════════════════════════════
-async function settleBets(winningChoice, rankA, rankB) {
-  if (mongoose.connection.readyState !== 1) return;
-  try {
-    const bets = await TeenPattiBet.find({ roundId: currentRound.roundId, status: 'PENDING' });
-    if (bets.length === 0) return;
-
-    console.log(`[TEENPATTI AUDIT] Settling ${bets.length} bets for round ${currentRound.roundId}`);
-
-    for (const bet of bets) {
-      let isWin = false;
-      let finalOdds = bet.odds;
-
-      if (bet.betType === 'A_BACK' && winningChoice === 'A') isWin = true;
-      else if (bet.betType === 'B_BACK' && winningChoice === 'B') isWin = true;
-      else if (bet.betType === 'A_LAY' && winningChoice === 'B') isWin = true;
-      else if (bet.betType === 'B_LAY' && winningChoice === 'A') isWin = true;
-      else if (bet.betType === 'A_PAIR_PLUS') {
-        const type = rankA.type;
-        if (PAIR_PLUS_MULTIPLIERS[type]) {
-          isWin = true;
-          finalOdds = PAIR_PLUS_MULTIPLIERS[type];
-        }
-      } else if (bet.betType === 'B_PAIR_PLUS') {
-        const type = rankB.type;
-        if (PAIR_PLUS_MULTIPLIERS[type]) {
-          isWin = true;
-          finalOdds = PAIR_PLUS_MULTIPLIERS[type];
-        }
-      }
-
-      if (isWin) {
-        bet.status = 'WIN';
-        // Profit calculation
-        const grossProfit = bet.amount * (finalOdds - 1);
-        const rawNetProfit = grossProfit * 0.98; // 2% platform commission
-        const { netProfit } = await capProfitByLimit(bet.userId, 'teenpatti', rawNetProfit);
-        const payout = bet.amount + netProfit;
-
-        // Atomic wallet credit
-        const user = await User.findOneAndUpdate(
-          { username: bet.userId },
-          { $inc: { walletBalance: payout } },
-          { new: true }
-        );
-
-        // Distribute house loss up hierarchy
-        await distributeCasinoPL(bet.userId, -netProfit, {
-          matchName: `TeenPatti Round ${currentRound.roundId}`,
-          selection: bet.betType
-        });
-
-        if (user) {
-          io.emit('wallet_updated', { userId: bet.userId, balance: user.walletBalance });
-          io.to('teenpatti').emit('teenpatti_payout', {
-            userId: bet.userId,
-            amount: payout,
-            betType: bet.betType,
-            result: 'WIN'
-          });
-        }
-      } else {
-        bet.status = 'LOSE';
-
-        // Distribute house profit up hierarchy
-        await distributeCasinoPL(bet.userId, bet.amount, {
-          matchName: `TeenPatti Round ${currentRound.roundId}`,
-          selection: bet.betType
-        });
-
-        io.to('teenpatti').emit('teenpatti_payout', {
-          userId: bet.userId,
-          amount: 0,
-          betType: bet.betType,
-          result: 'LOSE'
-        });
-      }
-
-      await bet.save();
-    }
-
-  } catch (err) {
-    console.error('[TEENPATTI] Error settling bets:', err);
+async function playerReady({ socket = null, userId = null } = {}) {
+  const normUser = userId ? String(userId).trim() : null;
+  if (socket) {
+    socket.join(ROOM_NAME);
+    const existingUid = activeSockets.get(socket.id) || normUser;
+    activeSockets.set(socket.id, existingUid || null);
+    if (normUser) socket.teenPattiUserId = normUser;
   }
-}
-
-function drawDeterministicTeenPattiCards(roundId) {
-  const deck = createDeck();
-  const hash = crypto.createHmac('sha256', 'betpro-teenpatti-provably-fair').update(roundId).digest('hex');
-  for (let i = deck.length - 1; i > 0; i--) {
-    const chunk = parseInt(hash.substring((i * 4) % (hash.length - 4), (i * 4) % (hash.length - 4) + 4), 16);
-    const j = chunk % (i + 1);
-    const temp = deck[i];
-    deck[i] = deck[j];
-    deck[j] = temp;
+  if (normUser) {
+    activeUsers.set(normUser, Date.now());
   }
 
-  let cardsA = deck.slice(0, 3);
-  let cardsB = deck.slice(3, 6);
-  let rankA = getHandRank(cardsA);
-  let rankB = getHandRank(cardsB);
-
-  if (rankA.score === rankB.score) {
-    cardsB = [deck[3], deck[4], deck[6]];
-    rankB = getHandRank(cardsB);
-  }
-
-  return { cardsA, cardsB, rankA, rankB };
-}
-
-// ─── Deterministic Round Synchronization (Pure Vercel Serverless Resilient) ───────
-function ensureLiveRound(now = Date.now()) {
-  const TOTAL_CYCLE = (ROUND_SETTINGS.DEALING_DURATION + ROUND_SETTINGS.BETTING_DURATION + ROUND_SETTINGS.SUSPENSE_DURATION + ROUND_SETTINGS.RESULT_DURATION) * 1000; // 19000ms
-  const cycleIndex = Math.floor(now / TOTAL_CYCLE);
-  const startTime = cycleIndex * TOTAL_CYCLE;
-  const endTime = startTime + TOTAL_CYCLE;
-  const roundId = `TP-${startTime}`;
-
-  const elapsed = now - startTime;
-  const dealingEnd = ROUND_SETTINGS.DEALING_DURATION * 1000;
-  const bettingEnd = dealingEnd + (ROUND_SETTINGS.BETTING_DURATION * 1000);
-  const suspenseEnd = bettingEnd + (ROUND_SETTINGS.SUSPENSE_DURATION * 1000);
-
-  if (currentRound && currentRound.roundId === roundId) {
-    if (elapsed < dealingEnd) {
-      phase = 'OPEN';
-      currentRound.status = 'DEALING';
-      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
-    } else if (elapsed < bettingEnd) {
-      phase = 'OPEN';
-      currentRound.status = 'BETTING_OPEN';
-      roundTimer = Math.ceil((bettingEnd - elapsed) / 1000);
-    } else if (elapsed < suspenseEnd) {
-      phase = 'CLOSED';
-      currentRound.status = 'BETTING_CLOSED';
-      roundTimer = 0;
-    } else {
-      phase = 'RESULT';
-      currentRound.status = 'RESULT_DECLARED';
-      currentRound.result = currentRound.winResult;
-      roundTimer = 0;
-      if (!currentRound.settled) {
-        currentRound.settled = true;
-        declareResult().catch(err => console.warn('[TEENPATTI SETTLE]', err.message));
-      }
-    }
-    return currentRound;
-  }
-
-  const { cardsA, cardsB, rankA, rankB } = drawDeterministicTeenPattiCards(roundId);
-  const winResult = rankA.score > rankB.score ? 'A' : rankB.score > rankA.score ? 'B' : 'TIE';
-
-  let currentPhase = 'OPEN';
-  let currentStatus = 'BETTING_OPEN';
-  let timer = 0;
-
-  if (elapsed < dealingEnd) {
-    currentPhase = 'OPEN';
-    currentStatus = 'DEALING';
-    timer = Math.ceil((bettingEnd - elapsed) / 1000);
-  } else if (elapsed < bettingEnd) {
-    currentPhase = 'OPEN';
-    currentStatus = 'BETTING_OPEN';
-    timer = Math.ceil((bettingEnd - elapsed) / 1000);
-  } else if (elapsed < suspenseEnd) {
-    currentPhase = 'CLOSED';
-    currentStatus = 'BETTING_CLOSED';
-    timer = 0;
+  if (phase === 'IDLE' || !currentRound) {
+    await startNewRound();
   } else {
-    currentPhase = 'RESULT';
-    currentStatus = 'RESULT_DECLARED';
-    timer = 0;
+    broadcastState(socket);
   }
 
-  currentRound = {
-    roundId,
-    status: currentStatus,
-    startTime,
-    endTime,
-    result: currentStatus === 'RESULT_DECLARED' ? winResult : 'PENDING',
-    cards: { A: cardsA, B: cardsB },
-    handNames: { A: rankA.type, B: rankB.type },
-    winResult,
-    settled: currentStatus === 'RESULT_DECLARED'
-  };
-
-  phase = currentPhase;
-  roundTimer = timer;
-
-  if (mongoose.connection.readyState === 1) {
-    TeenPattiHand.findOne({ roundId }).then(doc => {
-      if (!doc) {
-        TeenPattiHand.create({
-          roundId,
-          status: currentRound.status,
-          startTime: new Date(startTime),
-          cards: currentRound.cards,
-          handNames: currentRound.handNames,
-          result: currentRound.result
-        }).catch(() => {});
-      }
-    }).catch(() => {});
-  }
-
-  return currentRound;
+  return sanitizeRoundForClient(currentRound, Date.now());
 }
 
-function getCurrentState(now = Date.now()) {
-  const round = ensureLiveRound(now);
-  let sanitizedCards = null;
-  let sanitizedHandNames = null;
-
-  if (round.status === 'RESULT_DECLARED' || round.status === 'BETTING_CLOSED') {
-    sanitizedCards = round.cards;
-    sanitizedHandNames = round.status === 'RESULT_DECLARED' ? round.handNames : null;
-  } else {
-    sanitizedCards = {
-      A: [null, null, null],
-      B: [null, null, null]
-    };
-    sanitizedHandNames = null;
+function playerLeave({ socket = null, userId = null } = {}) {
+  const effectiveUserId = userId || socket?.teenPattiUserId;
+  if (socket) {
+    socket.leave(ROOM_NAME);
+    activeSockets.delete(socket.id);
+    socket.teenPattiUserId = null;
+  }
+  if (effectiveUserId) {
+    activeUsers.delete(String(effectiveUserId).trim());
   }
 
-  return {
-    roundId: round.roundId,
-    status: round.status,
-    result: round.status === 'RESULT_DECLARED' ? round.winResult : 'PENDING',
-    timer: roundTimer,
-    cards: sanitizedCards,
-    handNames: sanitizedHandNames,
-    history: history.length > 0 ? history : ['A', 'B', 'A', 'A', 'B', 'B', 'A'],
-    serverTimestamp: now
-  };
+  if (!hasActivePlayers() && roundBets.length === 0) {
+    transitionToIdle();
+  }
+
+  return sanitizeRoundForClient(currentRound, Date.now());
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// API HANDLERS
-// ═══════════════════════════════════════════════════════════════════════════
+function handleSocketDisconnect(socket) {
+  if (!socket) return;
+  const uid = activeSockets.get(socket.id) || socket.teenPattiUserId;
+  activeSockets.delete(socket.id);
+  if (uid) {
+    const stillSocketed = Array.from(activeSockets.values()).some((id) => id === uid);
+    if (!stillSocketed) {
+      activeUsers.delete(String(uid).trim());
+    }
+  }
+  if (!hasActivePlayers() && roundBets.length === 0) {
+    transitionToIdle();
+  }
+}
+
+function getCurrentState(now = Date.now(), { viewerUserId = null } = {}) {
+  if (viewerUserId && activeUsers.has(String(viewerUserId))) {
+    activeUsers.set(String(viewerUserId), now);
+  }
+  return sanitizeRoundForClient(currentRound, now);
+}
+
+const VALID_BET_TYPES = new Set([
+  'A_BACK',
+  'A_LAY',
+  'B_BACK',
+  'B_LAY',
+  'A_PAIR_PLUS',
+  'B_PAIR_PLUS',
+]);
+
 async function placeBet(userId, betType, amount) {
-  const now = Date.now();
-  const round = ensureLiveRound(now);
-
-  if (round.status !== 'BETTING_OPEN' && round.status !== 'DEALING') {
+  if (!currentRound || phase === 'IDLE') {
+    throw new Error('Click Ready to Start before placing bets');
+  }
+  if (currentRound.status !== 'BETTING_OPEN') {
     throw new Error('Betting is currently closed');
   }
-
-  if (!amount || isNaN(amount) || amount < 10) {
-    throw new Error('Invalid stake amount (minimum 10)');
+  if (!VALID_BET_TYPES.has(betType)) {
+    throw new Error('Invalid bet type');
   }
 
-  // Validate hierarchical max bet size & profit limit for Teen Patti
-  const estimatedProfit = amount * (ROUND_SETTINGS.BACK_LAY_ODDS - 1);
-  await validateBetLimit(userId, 'teenpatti', amount, estimatedProfit);
-
-  // Deduct balance atomically
-  const user = await User.findOneAndUpdate(
-    { username: userId, walletBalance: { $gte: amount } },
-    { $inc: { walletBalance: -amount } },
-    { new: true }
-  );
-
-  if (!user) {
-    throw new Error('Insufficient wallet balance');
+  const stake = round2(parseFloat(amount));
+  if (!stake || isNaN(stake) || stake < 10) {
+    throw new Error('Minimum stake amount is ₹10');
   }
 
-  // Determine standard odds for the bet
-  let odds = ROUND_SETTINGS.BACK_LAY_ODDS;
-  if (betType.includes('PAIR_PLUS')) {
-    odds = 1.0; // Payout multiplier is dynamic based on winner rank
-  }
+  activeUsers.set(String(userId), Date.now());
+
+  const isLay = betType === 'A_LAY' || betType === 'B_LAY';
+  const isPairPlus = betType.includes('PAIR_PLUS');
+  const odds = isPairPlus ? 1.0 : ROUND_SETTINGS.BACK_LAY_ODDS;
+  const riskAmount = isLay ? round2(stake * (odds - 1)) : stake;
+  const estimatedProfit = isLay
+    ? stake
+    : isPairPlus
+      ? round2(stake * (PAIR_PLUS_MULTIPLIERS.PAIR - 1))
+      : round2(stake * (odds - 1));
+
+  await validateBetLimit(userId, 'teenpatti', riskAmount, estimatedProfit);
+  const walletResult = await debitPlayerWallet(userId, riskAmount, io);
 
   const bet = new TeenPattiBet({
     userId,
-    roundId: round.roundId,
+    roundId: currentRound.roundId,
     betType,
-    amount,
+    amount: stake,
+    liability: riskAmount,
     odds,
-    status: 'PENDING'
+    status: 'PENDING',
   });
   await bet.save();
 
+  roundBets.push({
+    _id: bet._id,
+    userId,
+    roundId: currentRound.roundId,
+    betType,
+    amount: stake,
+    liability: riskAmount,
+    odds,
+    status: 'PENDING',
+  });
+
   if (io) {
-    io.emit('wallet_updated', { userId, balance: user.walletBalance });
-    io.to('teenpatti').emit('teenpatti_bet_placed', {
+    io.to(ROOM_NAME).emit('teenpatti_bet_placed', {
       userId,
       betType,
-      amount,
-      odds
+      amount: stake,
+      liability: riskAmount,
+      odds,
+      roundId: currentRound.roundId,
     });
   }
 
-  return { success: true, balance: user.walletBalance, bet };
+  return {
+    success: true,
+    balance: walletResult.effectiveBalance,
+    bet,
+  };
 }
 
 function getActiveRound() {
-  return currentRound || ensureLiveRound(Date.now());
+  return currentRound;
+}
+
+function getHistory() {
+  return history;
+}
+
+function _resetForTest() {
+  clearTimers();
+  activeSockets.clear();
+  activeUsers.clear();
+  currentRound = null;
+  phase = 'IDLE';
+  roundTimer = 0;
+  phaseEndsAt = 0;
+  roundBets = [];
+  history = [];
+  historyLoaded = false;
+  isStartingRound = false;
+  isTickProcessing = false;
+  isSettling = false;
+  io = null;
 }
 
 module.exports = {
+  ROUND_SETTINGS,
+  PAIR_PLUS_MULTIPLIERS,
   initTeenPattiManager,
-  ensureLiveRound,
+  playerReady,
+  playerLeave,
+  handleSocketDisconnect,
   getCurrentState,
-  placeBet,
   getActiveRound,
-  getHandRank
+  getHistory,
+  placeBet,
+  getHandRank,
+  evaluateBetOutcome,
+  _resetForTest,
 };
