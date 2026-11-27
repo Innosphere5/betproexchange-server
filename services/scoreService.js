@@ -451,6 +451,15 @@ const updateLiveScores = async (io) => {
                         const stillLive = Boolean(f.status?.live || f.status?.statusId === 1 || f.status?.statusName === 'Live');
                         const isFinished = !stillLive && (f.status?.statusName === 'Finished' || f.status?.statusId === 2);
                         if (stillLive) {
+                            // Never let delayed OddsPapi scores overwrite authoritative Roanuz or fresh Sportmonks data
+                            if (staleMatch.roanuzMatchKey || roanuzScoreService.memoryCache?.has(String(staleMatch.matchId))) {
+                                continue;
+                            }
+                            const lastUp = staleMatch.score?.lastUpdated || staleMatch.lastUpdated;
+                            if (lastUp && staleMatch.sportmonksFixtureId && (Date.now() - new Date(lastUp).getTime()) < 30000) {
+                                continue;
+                            }
+
                             // ✅ GUARD: Don't set a future match to 'live' from stale verification
                             if (staleMatch.startTime) {
                                 const msUntilStart = new Date(staleMatch.startTime).getTime() - Date.now();

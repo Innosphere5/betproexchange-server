@@ -416,18 +416,26 @@ function advanceCricketState(state, liveData, oddsHint = {}) {
 
     const activeWickets = state.battingTeam === 'teamA' ? state.p1Wickets : state.p2Wickets;
 
-    // Track delivery badges for thisOver (mirroring BPExch)
-    if (currentRaw > state.lastApiScore) {
-        const delta = currentRaw - state.lastApiScore;
+    // Track delivery badges cleanly on incremental updates; never seed synthetic ['0','1','0','1']
+    if (state.lastApiScore === 0 && currentRaw > 12) {
+        // Initial mid-match hydration: anchor baseline score without fabricating a delivery
         state.lastApiScore = currentRaw;
-        let delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
         if (activeWickets > (state.lastActiveWickets || 0)) {
             state.lastActiveWickets = activeWickets;
-            delivery = 'W';
         }
-        state.thisOver.push(delivery);
-        if (state.thisOver.length > 6) {
-            state.thisOver = state.thisOver.slice(-6);
+    } else if (currentRaw > state.lastApiScore) {
+        const delta = currentRaw - state.lastApiScore;
+        state.lastApiScore = currentRaw;
+        if (delta <= 7 || activeWickets > (state.lastActiveWickets || 0)) {
+            let delivery = delta === 4 ? '4' : delta === 6 ? '6' : (delta > 6 ? '4' : String(delta));
+            if (activeWickets > (state.lastActiveWickets || 0)) {
+                state.lastActiveWickets = activeWickets;
+                delivery = 'W';
+            }
+            state.thisOver.push(delivery);
+            if (state.thisOver.length > 6) {
+                state.thisOver = state.thisOver.slice(-6);
+            }
         }
         state.lastScoreUpdate = Date.now();
     } else if (currentRaw < state.lastApiScore) {
@@ -441,8 +449,8 @@ function advanceCricketState(state, liveData, oddsHint = {}) {
         state.lastScoreUpdate = Date.now();
     }
 
-    if (!state.thisOver || state.thisOver.length === 0) {
-        state.thisOver = ['0', '1', '0', '1'];
+    if (!Array.isArray(state.thisOver)) {
+        state.thisOver = [];
     }
 
     // ─── Apply wickets from oddsHint (Betfair "Fall of Nth Wkt" markets) ───────
@@ -468,10 +476,11 @@ function advanceCricketState(state, liveData, oddsHint = {}) {
 
     if (oddsHint.actualOvers != null && oddsHint.actualOvers >= 0) {
         // ── Odds-market path ──────────────────────────────────────────────────
-        // actualOvers = highest completed-over market that is OPEN.
-        // The batting team is IN that over (or just finished it), so we display
-        // "N.0" unless we can infer balls bowled this over from run delta.
         const knownOversDone = Math.min(oddsHint.actualOvers, maxOvers);
+        if (state.oddsHintOvers != null && knownOversDone > state.oddsHintOvers) {
+            // New over began: reset previous over's delivery history
+            state.thisOver = [];
+        }
 
         // Estimate balls bowled within the current incomplete over using runs
         // scored since the last over-boundary (conservative: 1 ball per run delta up to 5)

@@ -230,13 +230,16 @@ function parseSportmonksFixture(fixture, matchInDb = null) {
       const latestBallNumber = latestBallObj.ball;
       const currentOverIndex = Math.floor(latestBallNumber);
 
-      const ballsInOver = activeBalls.filter(b => Math.floor(b.ball) === currentOverIndex);
+      const ballsInOver = activeBalls
+        .filter(b => Math.floor(b.ball) === currentOverIndex)
+        .sort((a, b) => (Number(a.ball) - Number(b.ball)) || ((Number(a.id) || 0) - (Number(b.id) || 0)));
       thisOver = ballsInOver.map(formatBallBadge);
+      const newestBall = ballsInOver[ballsInOver.length - 1] || latestBallObj;
 
-      const bowlerName = latestBallObj.bowler?.fullname || latestBallObj.bowler?.lastname || 'Bowler';
-      const batsmanName = latestBallObj.batsman?.fullname || latestBallObj.batsman?.lastname || 'Batsman';
-      const actionName = latestBallObj.score?.name || `${latestBallObj.score?.runs || 0} Runs`;
-      lastBallText = `${latestBallObj.ball}: ${actionName} (${bowlerName} to ${batsmanName})`;
+      const bowlerName = newestBall.bowler?.fullname || newestBall.bowler?.lastname || 'Bowler';
+      const batsmanName = newestBall.batsman?.fullname || newestBall.batsman?.lastname || 'Batsman';
+      const actionName = newestBall.score?.name || `${newestBall.score?.runs || 0} Runs`;
+      lastBallText = `${newestBall.ball}: ${actionName} (${bowlerName} to ${batsmanName})`;
     }
   }
 

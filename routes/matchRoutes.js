@@ -321,8 +321,8 @@ router.get('/:id', async (req, res) => {
                 if (!sc.wickets || sc.wickets === 0) {
                     sc.wickets = sc.battingTeam === 'teamB' ? sc.teamB_wickets : sc.teamA_wickets;
                 }
-                if (!sc.thisOver || sc.thisOver.length === 0) {
-                    sc.thisOver = ['0', '1', '0', '1'];
+                if (!sc.thisOver || !Array.isArray(sc.thisOver)) {
+                    sc.thisOver = [];
                 }
             }
         } catch (fmtErr) {
@@ -488,7 +488,7 @@ const handleScoreUpdateRoute = async (req, res) => {
         const battingTeamName = body.battingTeamName ?? (battingTeam === 'teamB' ? match.teamB : match.teamA);
         const crr = body.runRate ?? sc.runRate ?? '0.00';
         const rrr = body.reqRunRate ?? sc.reqRunRate ?? '0.00';
-        const thisOver = Array.isArray(body.thisOver) ? body.thisOver : (sc.thisOver || ['0', '1', '0', '1']);
+        const thisOver = Array.isArray(body.thisOver) ? body.thisOver : (Array.isArray(sc.thisOver) ? sc.thisOver : []);
 
         const updatedScore = {
             ...sc.toObject ? sc.toObject() : sc,

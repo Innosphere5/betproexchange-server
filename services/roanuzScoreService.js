@@ -61,44 +61,84 @@ const normalizeTeamName = (name) => {
  */
 function formatRoanuzBallBadge(ball) {
   if (!ball) return '0';
-  if (ball.repr) {
-    if (ball.repr === 'r0') return '0';
-    if (ball.repr === 'r1') return '1';
-    if (ball.repr === 'r2') return '2';
-    if (ball.repr === 'r3') return '3';
-    if (ball.repr === 'r4') return '4';
-    if (ball.repr === 'r5') return '5';
-    if (ball.repr === 'r6') return '6';
-    if (ball.repr.includes('wd')) return ball.team_score?.runs > 1 ? `${ball.team_score.runs}Wd` : 'Wd';
-    if (ball.repr.includes('nb')) return ball.team_score?.runs > 1 ? `${ball.team_score.runs}Nb` : 'Nb';
-    if (ball.repr.includes('lb')) return 'Lb';
-    if (ball.repr.includes('b')) return 'B';
-    if (ball.repr.startsWith('w') || ball.repr === 'w') return 'W';
+  const repr = String(ball.repr || '').toLowerCase().trim();
+  const ballType = String(ball.ball_type || '').toLowerCase().trim();
+  const isWicket = Boolean(ball.wicket || ball.is_wicket || ball.team_score?.is_wicket || /\bw\d*\b/.test(repr));
+  const runs = Number(ball.team_score?.runs ?? ball.batsman?.runs ?? 0);
+
+  const isWide = ballType === 'wide' || /\bwd\d*\b|\d*wd\b/.test(repr) || repr.includes('wd');
+  if (isWide) {
+    const base = runs > 1 ? `${runs}Wd` : 'Wd';
+    return isWicket ? `${base}+W` : base;
   }
-  if (ball.wicket || ball.is_wicket) return 'W';
-  const runs = ball.team_score?.runs ?? ball.batsman?.runs ?? 0;
-  return String(runs);
+
+  const isNoBall = ballType === 'no_ball' || ballType === 'noball' || /\bnb\d*\b|\d*nb\b/.test(repr) || repr.includes('nb');
+  if (isNoBall) {
+    const base = runs > 1 ? `${runs}Nb` : 'Nb';
+    return isWicket ? `${base}+W` : base;
+  }
+
+  if (isWicket) return 'W';
+
+  const isLegBye = ballType === 'leg_bye' || ballType === 'legbye' || /\blb\d*\b|\d*lb\b/.test(repr) || repr.includes('lb');
+  if (isLegBye) {
+    return runs > 1 ? `${runs}Lb` : 'Lb';
+  }
+
+  const isBye = ballType === 'bye' || ballType === 'byes' || /\bb\d+\b|^b$/.test(repr);
+  if (isBye) {
+    return runs > 1 ? `${runs}B` : 'B';
+  }
+
+  if (/^r\d+$/.test(repr)) {
+    const rVal = ball.team_score?.runs ?? Number(repr.slice(1));
+    return String(Number.isFinite(Number(rVal)) ? rVal : 0);
+  }
+
+  return String(Number.isFinite(runs) ? runs : 0);
 }
 
 /**
- * Format string ball repr into standard cricket badge
+ * Format compact Roanuz ball_repr string into standard cricket badge
  */
 function formatReprBadge(reprStr) {
   if (!reprStr) return '0';
-  const str = String(reprStr).toLowerCase();
-  if (str === 'r0') return '0';
-  if (str === 'r1') return '1';
-  if (str === 'r2') return '2';
-  if (str === 'r3') return '3';
-  if (str === 'r4') return '4';
-  if (str === 'r5') return '5';
-  if (str === 'r6') return '6';
-  if (str.includes('wd')) return 'Wd';
-  if (str.includes('nb')) return 'Nb';
-  if (str.includes('lb')) return 'Lb';
-  if (str.includes('b')) return 'B';
-  if (str.startsWith('w') || str === 'w') return 'W';
-  return str.replace('r', '');
+  const str = String(reprStr).toLowerCase().trim();
+  const numMatch = str.match(/(\d+)/);
+  const num = numMatch ? Number(numMatch[1]) : 0;
+  const hasWicket = /\bw\b|^w\d*$|,w\b|\bw,/.test(str);
+
+  if (str.includes('wd')) {
+    const base = num > 1 ? `${num}Wd` : 'Wd';
+    return hasWicket ? `${base}+W` : base;
+  }
+  if (str.includes('nb')) {
+    const base = num > 1 ? `${num}Nb` : 'Nb';
+    return hasWicket ? `${base}+W` : base;
+  }
+  if (hasWicket) return 'W';
+  if (str.includes('lb')) return num > 1 ? `${num}Lb` : 'Lb';
+  if (/^b\d*$|\bb\d*\b/.test(str)) return num > 1 ? `${num}B` : 'B';
+  if (/^[re]\d+$/.test(str)) return String(num);
+  return str.replace(/^r/, '') || '0';
+}
+
+/**
+ * Chronological comparator for Roanuz ball-by-ball objects (ascending: ball 1 -> ball 6)
+ */
+function compareRoanuzBalls(a, b) {
+  const ovA0 = Number(a?.overs?.[0] ?? 0);
+  const ovB0 = Number(b?.overs?.[0] ?? 0);
+  if (ovA0 !== ovB0) return ovA0 - ovB0;
+  const ovA1 = Number(a?.overs?.[1] ?? 0);
+  const ovB1 = Number(b?.overs?.[1] ?? 0);
+  if (ovA1 !== ovB1) return ovA1 - ovB1;
+  const keyA = Number(a?.key);
+  const keyB = Number(b?.key);
+  if (Number.isFinite(keyA) && Number.isFinite(keyB) && keyA !== keyB) {
+    return keyA - keyB;
+  }
+  return 0;
 }
 
 /**
@@ -214,22 +254,52 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
   // Run Rate
   const runRate = live.score?.run_rate ? Number(live.score.run_rate).toFixed(2) : "0.00";
 
-  // Ball-by-ball thisOver calculation
+  // Ball-by-ball thisOver calculation (sorted chronologically ascending & over-aligned)
   let thisOver = [];
   let lastBallText = '';
 
-  if (ballByBallData && ballByBallData.data?.over?.balls?.length > 0) {
-    const balls = ballByBallData.data.over.balls;
-    thisOver = balls.map(formatRoanuzBallBadge);
-    const lastBallObj = balls[balls.length - 1];
-    if (lastBallObj) {
-      const ovStr = Array.isArray(lastBallObj.overs) ? `${lastBallObj.overs[0]}.${lastBallObj.overs[1]}` : '';
-      lastBallText = `${ovStr ? ovStr + ': ' : ''}${lastBallObj.comment || ''}`;
-    }
-  } else if (live.recent_overs_repr && live.recent_overs_repr.length > 0) {
-    const latestOverRepr = live.recent_overs_repr[live.recent_overs_repr.length - 1];
-    if (latestOverRepr && Array.isArray(latestOverRepr.ball_repr)) {
-      thisOver = latestOverRepr.ball_repr.map(formatReprBadge);
+  const ovWholeLive = Math.floor(currentOvers);
+  const ovBallsLive = Array.isArray(live.score?.overs)
+    ? safeNum(live.score.overs[1], 0)
+    : Math.round((currentOvers % 1) * 10);
+
+  if (ovWholeLive > 0 || ovBallsLive > 0) {
+    // When ballsInCurOver > 0 (e.g. [85, 2]), the active over 0-based index is ovWholeLive (85).
+    // When ballsInCurOver === 0 (e.g. [85, 0]), the just-completed over 0-based index is ovWholeLive - 1 (84).
+    const targetOverZeroIdx = ovBallsLive > 0 ? ovWholeLive : Math.max(0, ovWholeLive - 1);
+
+    const bbbOver = ballByBallData?.data?.over;
+    const bbbInnings = bbbOver?.index?.innings;
+    const validBbbInnings = !live.innings || !bbbInnings || bbbInnings === live.innings;
+    const rawBbbBalls = validBbbInnings && Array.isArray(bbbOver?.balls) ? [...bbbOver.balls] : [];
+
+    // Filter balls belonging to the target over (fallback to all balls in over response only when over_number matches)
+    const matchingBbbBalls = rawBbbBalls.filter(
+      (b) => Array.isArray(b?.overs) && Number(b.overs[0]) === targetOverZeroIdx
+    );
+    const overMatchesIndex = Number(bbbOver?.index?.over_number) === targetOverZeroIdx + 1;
+    const candidateBbbBalls = matchingBbbBalls.length > 0
+      ? matchingBbbBalls
+      : (overMatchesIndex ? rawBbbBalls : []);
+
+    candidateBbbBalls.sort(compareRoanuzBalls);
+
+    // Match live.recent_overs_repr entry for the exact same active over (already chronological)
+    const reprList = Array.isArray(live.recent_overs_repr) ? live.recent_overs_repr : [];
+    const matchingRepr = reprList.find((o) => Number(o?.overnumber) === targetOverZeroIdx);
+    const reprBalls = Array.isArray(matchingRepr?.ball_repr) ? matchingRepr.ball_repr.map(formatReprBadge) : [];
+
+    // Primary: sorted ballByBall entries for the active over (richer commentary + ball_type + wicket flags).
+    // Fallback: live.recent_overs_repr for that same active over when ballByBall is unavailable or lagged behind.
+    if (candidateBbbBalls.length > 0) {
+      thisOver = candidateBbbBalls.map(formatRoanuzBallBadge);
+      const lastBallObj = candidateBbbBalls[candidateBbbBalls.length - 1];
+      if (lastBallObj) {
+        const ovStr = Array.isArray(lastBallObj.overs) ? `${lastBallObj.overs[0]}.${lastBallObj.overs[1]}` : '';
+        lastBallText = `${ovStr ? ovStr + ': ' : ''}${lastBallObj.comment || ''}`;
+      }
+    } else if (reprBalls.length > 0) {
+      thisOver = reprBalls;
     }
   }
 
@@ -804,5 +874,7 @@ const serviceInstance = new RoanuzScoreService();
 module.exports = {
   roanuzScoreService: serviceInstance,
   parseRoanuzMatch,
-  formatRoanuzBallBadge
+  formatRoanuzBallBadge,
+  formatReprBadge,
+  compareRoanuzBalls,
 };

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRoanuzMatch, formatRoanuzBallBadge } = require('../services/roanuzScoreService');
+const { parseRoanuzMatch, formatRoanuzBallBadge, formatReprBadge } = require('../services/roanuzScoreService');
 const roanuzClient = require('../services/roanuzClient');
 
 test('🏏 Roanuz API Client: Authentication and Token Caching', async () => {
@@ -158,6 +158,64 @@ test('🏏 Roanuz Match Parser: Comprehensive scorecard, batsmen, bowler and ove
   // Assert thisOver Badges and Commentary
   assert.deepEqual(parsed.thisOver, ['1', '0', '4', 'W']);
   assert.ok(parsed.lastBall.includes('Matt Renshaw to Ben Duckett: WICKET!'));
+});
+
+test('🏏 Roanuz Descending Balls Fix: Sorts reverse-chronological API deliveries ascending and picks latest ball', () => {
+  const reverseOrderMatch = {
+    key: 'a-rz--cricket--rZ2070749752328343616',
+    format: 'test',
+    status: 'started',
+    teams: { a: { key: 'nz', name: 'New Zealand' }, b: { key: 'ind', name: 'India' } },
+    play: {
+      innings: { a_1: { score: { runs: 246 }, wickets: 5 } },
+      live: {
+        innings: 'a_1',
+        batting_team: 'a',
+        score: { runs: 246, wickets: 5, overs: [85, 0], run_rate: 2.89 },
+        recent_overs_repr: [
+          { overnumber: 84, ball_repr: ['r0', 'r0', 'r1', 'r0', 'r0', 'r0'] }
+        ]
+      }
+    }
+  };
+
+  // Roanuz live API returns over.balls newest-first (6 -> 1)
+  const reverseBallByBall = {
+    data: {
+      over: {
+        index: { innings: 'a_1', over_number: 85 },
+        balls: [
+          { key: '567680', overs: [84, 6], repr: 'r0', comment: 'Ball 6 dot.', team_score: { runs: 0 } },
+          { key: '567616', overs: [84, 5], repr: 'r0', comment: 'Ball 5 dot.', team_score: { runs: 0 } },
+          { key: '567552', overs: [84, 4], repr: 'r0', comment: 'Ball 4 dot.', team_score: { runs: 0 } },
+          { key: '567488', overs: [84, 3], repr: 'r1', comment: 'Ball 3 single.', team_score: { runs: 1 } },
+          { key: '567424', overs: [84, 2], repr: 'r0', comment: 'Ball 2 dot.', team_score: { runs: 0 } },
+          { key: '567360', overs: [84, 1], repr: 'r0', comment: 'Ball 1 dot.', team_score: { runs: 0 } },
+        ]
+      }
+    }
+  };
+
+  const parsed = parseRoanuzMatch(reverseOrderMatch, reverseBallByBall);
+  assert.deepEqual(parsed.thisOver, ['0', '0', '1', '0', '0', '0']);
+  assert.ok(parsed.lastBall.startsWith('84.6:'), `Expected lastBall 84.6, got ${parsed.lastBall}`);
+
+  // Pre-start / 0.0 overs must return [] (never dummy ['0','1','0','1'])
+  const preStartMatch = {
+    ...reverseOrderMatch,
+    play: {
+      innings: { a_1: { score: { runs: 0 }, wickets: 0 } },
+      live: { innings: 'a_1', batting_team: 'a', score: { runs: 0, wickets: 0, overs: [0, 0] } }
+    }
+  };
+  assert.deepEqual(parseRoanuzMatch(preStartMatch, null).thisOver, []);
+
+  // Extra + wicket + compact repr formatting edge cases
+  assert.equal(formatRoanuzBallBadge({ repr: 'wd', is_wicket: true, team_score: { runs: 1 } }), 'Wd+W');
+  assert.equal(formatRoanuzBallBadge({ repr: 'lb4', ball_type: 'leg_bye', team_score: { runs: 4 } }), '4Lb');
+  assert.equal(formatRoanuzBallBadge({ repr: 'b2', ball_type: 'bye', team_score: { runs: 2 } }), '2B');
+  assert.equal(formatReprBadge('nb4'), '4Nb');
+  assert.equal(formatReprBadge('lb2'), '2Lb');
 
   setTimeout(() => process.exit(0), 100);
 });
