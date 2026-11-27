@@ -18,101 +18,110 @@
 
 ## Overview
 
-**BetPro Exchange Server** is a real-time cricket betting exchange backend engineered with **Node.js**, **Express 5**, and **Socket.IO**. It ingests live odds, match schedules, and ball-by-ball telemetry from multiple cricket providers (**Roanuz Cricket API v5**, **OddsPapi v5 REST & WebSocket**, and a circuit-broken **Sportmonks Multi-Key Pool**), prices derivatives via a seeded Monte Carlo simulation engine, guards markets with an event-driven suspension state machine, and distributes profits/losses across a 4-tier agent hierarchy.
+**BetPro Exchange Server** is the real-time core engine powering BetPro Exchange. Built with **Node.js**, **Express 5**, and **Socket.IO**, it orchestrates multi-provider cricket feed ingestion (**Roanuz Cricket API v5**, **OddsPapi v5 REST & WebSocket**, and a circuit-broken **Sportmonks Multi-Key Pool**), prices derivative markets via a deterministic **Monte Carlo simulation engine**, enforces sub-second **market suspension state machines**, executes atomic bet matching and liability locks, and distributes cascading profit/loss across a 4-tier agent hierarchy.
 
-To guarantee low latency, atomic financial safety, and bounded storage footprint under heavy real-time traffic, persistence is distributed across **three specialized database tiers**: **Upstash Redis**, **MongoDB Atlas**, and **Supabase PostgreSQL**.
+To combine sub-5ms feed responsiveness, atomic wagering locks, and bounded long-term storage, persistence is specialized across **three complementary data tiers**: **Upstash Redis**, **MongoDB Atlas**, and **Supabase PostgreSQL**.
 
 ---
 
-## Tech Stack
+## Technology Stack
 
 <p align="left">
   <img src="https://skillicons.dev/icons?i=nodejs,express,mongodb,postgres,supabase,redis,js,git" alt="Backend Tech Stack Icons" />
 </p>
 
-| Category | Technology | Role |
-|---|---|---|
-| **Runtime & Web** | Node.js (`>=20.0.0`), Express `5.2.1`, Compression, CORS | HTTP API, SSE streams, serverless adapter (`/api/index.js`) |
-| **Hot Cache** | Upstash Redis (`ioredis` TCP + `@upstash/redis` REST + L1 Map) | Sub-5ms match catalogs, live scores, quotes & wallet cache |
-| **Operational DB** | MongoDB Atlas (Mongoose `9.4.1`) | Active matches, nested markets, atomic wallet locks & 24h TTL |
-| **Relational Archive** | Supabase PostgreSQL (`@supabase/supabase-js` + `jose` JWKS) | 24h match results, settled bets, ACID financial ledger & audit logs |
-| **Real-Time & Cron** | Socket.IO `4.8.3`, `ws`, `node-cron` | Sub-second WebSocket fan-out, feed ingestion & lifecycle jobs |
-| **Security & Auth** | `jsonwebtoken`, `bcryptjs`, `jose` (Remote JWKS) | Role-based RBAC, password hashing & optional Supabase JWT verify |
-| **Pricing & Testing** | Seeded Monte Carlo Engine + Native `node:test` (`143` tests) | Calibrated Fancy/Figure/Even-Odd pricing & suspension replay checks |
+| Domain | Technology | Version | Role in Architecture |
+|---|---|---|---|
+| **Runtime & HTTP** | Node.js + Express + Compression + CORS | `20+` / `5.2.1` | Core API server, gzip compression & Vercel serverless adapter |
+| **In-Memory & Distributed Cache** | Upstash Redis (`ioredis` TCP + `@upstash/redis` REST + L1 Map) | `6.1.0` / `1.41.0` | Sub-5ms live scores, quotes, wallets & pre-warmed match catalogs |
+| **Operational Sportsbook DB** | MongoDB Atlas (Mongoose) | `9.4.1` | Active matches, nested markets, atomic `{ $gte }` wallet locks & 24h TTL |
+| **Relational Archive & Ledger** | Supabase PostgreSQL (`@supabase/supabase-js` + `jose` JWKS) | `2.119.2` / `6.2.18` | 24h match result archive, settled bet archive, ACID ledger & suspension audits |
+| **Real-Time Transport** | Socket.IO + `ws` + Express SSE | `4.8.3` / `8.20.0` | WebSocket client fan-out, OddsPapi WS ingestion & suspension SSE streams |
+| **Scheduling & Feeds** | `node-cron` + Axios | `4.2.1` / `1.15.0` | Automated fixture sync, score polling, status lifecycle & settlement jobs |
+| **Auth & Security** | `jsonwebtoken` + `bcryptjs` + `jose` | `9.0.3` / `3.0.3` | Role-scoped bearer JWTs, salted password hashes & Supabase JWKS verify |
+| **Validation & Testing** | Native Node Test Runner (`node:test`) | Built-in | 143 automated tests across pricing, suspension, failover, feeds & DBs |
 
 ---
 
-## System Design Architecture
+## System Design & Architecture
 
-### Polyglot Database Specialization & Data Flow
-
-Each database handles strictly the workload it is optimized for:
+### 1. Polyglot Persistence & Real-Time Pipeline
 
 ```mermaid
 flowchart LR
-    Feeds["External Feeds\nRoanuz v5 | OddsPapi v5 WS/REST | Sportmonks Pool"] --> Core["Ingestion, Pricing & Suspension Core\n(Express + Socket.IO + Cron Workers)"]
+    Feeds["External Cricket Feeds<br/>Roanuz v5, OddsPapi v5 WS+REST, Sportmonks Pool"] --> Core["Ingestion, Pricing & Suspension Core<br/>Express 5 + Socket.IO + Cron Workers"]
 
-    Core -->|"Sub-5ms read/write\nTTL 500ms-30s"| Redis["Upstash Redis\n(TCP ioredis + REST + L1 Cache)\nbpx:matches:live | bpx:score:* | bpx:odds:*"]
-    Core -->|"Atomic wallet & bet locks\n24h completedAt TTL"| Mongo["MongoDB Atlas\nActive Matches (Yesterday..Tomorrow)\nNested Markets, Open Bets & Wallets"]
-    Core -->|"Async fail-safe dual-write\nACID ledgers & 24h archive"| Supa["Supabase PostgreSQL\nmatch_results (expires_at = +24h)\nbet_settlement_archive\nfinancial_ledger | suspension_audit_log"]
+    Core -->|Sub-5ms Hot Cache| Redis["Upstash Redis + L1 Map<br/>Live Catalog, Scores, Odds & Wallets"]
+    Core -->|Atomic Locks + 24h TTL| Mongo["MongoDB Atlas<br/>Active Matches, Open Bets & Users"]
+    Core -->|Fail-Safe Async Archive| Supa["Supabase PostgreSQL<br/>match_results, bet_settlement_archive,<br/>financial_ledger, suspension_audit_log"]
 
-    Clients["Next.js Clients"] <-->|"WebSocket & SSE"| Core
-    Clients -->|"Fast Catalog Read"| Redis
-    Reports["Settlements & Results API"] --> Mongo
+    Clients["Next.js Web Clients"] <-->|WebSocket & SSE| Core
+    Clients -->|Catalog Read| Redis
+    Reports["Results & Hierarchy Reports"] --> Mongo
     Reports --> Supa
 ```
 
-### Storage Specialization Matrix
+### 2. Database Specialization Matrix
 
-| Tier | Stored Entities | Key Advantages | Lifecycle / Eviction Policy |
+| Tier | Workload Assigned | Why This Engine | Eviction / Retention Lifecycle |
 |---|---|---|---|
-| **Tier 1: Upstash Redis + L1 Map** | Live match catalog, active catalog, tick odds, live score payloads, user wallet snapshot | `<1–5ms` reads via TCP `ioredis` (REST + L1 fallback on serverless) | Short TTL (`2s–30s`) with active cache warming every `3s` |
-| **Tier 2: MongoDB Atlas** | Active `Match` documents (`fancyMarkets`, `figureMarkets`, `evenOddMarkets`, `score`), active `Bet`, `User`, `UserProfitLimit` | Single-document atomic `{ $gte }` balance locks (`findOneAndUpdate`) + flexible nested market arrays | Native TTL index `{ completedAt: 1 }` (`expireAfterSeconds: 86400`); inactive upcoming matches pruned outside `[yesterday .. tomorrow]` |
-| **Tier 3: Supabase PostgreSQL** | `match_results`, `bet_settlement_archive`, `financial_ledger`, `suspension_audit_log` | Typed relational integrity, fast SQL reporting aggregations, and offloading historical log growth from MongoDB | Explicit `expires_at` (`completed_at + 24h`) cleaned by `purge_expired_match_results()` (`pg_cron` + backend sweeper); RLS + `service_role` grants |
+| **Tier 1: Upstash Redis (`ioredis` TCP + REST + L1 Map)** | `bpx:matches:live`, `bpx:matches:all`, `bpx:score:*`, `bpx:odds:*`, `bpx:user:*:wallet` | Sub-millisecond L1 hits & <5ms Redis TCP reads shield persistent databases from polling spikes | Short TTL (`2s–30s`) kept hot by `matchCatalogService` (`3s` live / `9s` catalog warmer) |
+| **Tier 2: MongoDB Atlas (Mongoose)** | Active `Match` documents (nested `fancyMarkets`, `figureMarkets`, `evenOddMarkets`, `tiedMatchMarket`), active `Bet`, `User`, `MarketOdds`, `UserProfitLimit` | Single-document atomic `{ walletBalance: { $gte: liability } } + $inc` eliminates distributed lock overhead; dynamic nested market schemas update in place | Native TTL index `{ completedAt: 1 }` (`86400s` / 24h); upcoming matches outside `[yesterday .. tomorrow]` automatically pruned |
+| **Tier 3: Supabase PostgreSQL (`supabaseService.js`)** | `match_results`, `bet_settlement_archive`, `financial_ledger`, `suspension_audit_log` | Typed relational integrity, indexed SQL aggregations, and offloading high-volume historical logs/audits from MongoDB Atlas storage quotas | `match_results` tracks `expires_at = completed_at + 24h` purged by SQL `purge_expired_match_results()` (`pg_cron` + backend sweeper); RLS enabled (`service_role` only) |
 
-### Match & Market Lifecycle
+### 3. Background Worker Orchestration
+
+| Scheduler / Engine | Cadence | Responsibility |
+|---|---|---|
+| `roanuzScoreService` (`liveScoreJob`) | `1.5s` active / `6s` idle | Primary Roanuz v5 live score, chronological ball-by-ball (`This Over`), batsmen/bowler & pre-match toss detector |
+| `matchCatalogService` | `3s` live / `9s` full | Pre-warms slim active catalog (`-fancyMarkets -figureMarkets ...`) into L1 Map + Redis |
+| `suspensionEngine` | Event-driven + `1s` tick | Evaluates staleness, wicket holds, end-of-over locks & liability bounds; pushes SSE & archives audits to Supabase |
+| `oddsApiLiveService` | WebSocket + REST bootstrap | Sub-second Betfair Exchange & Bookmaker Back/Lay odds sync + unmatched bet auto-matching |
+| `scoreService` (`scoreUpdate.job`) | `10s` fallback | OddsPapi score fallback strictly guarded against overwriting Roanuz or fresh Sportmonks matches |
+| `statusService` (`statusUpdate.job`) | `60s` | `upcoming -> live -> completed` cricket transitions & immediate post-match settlement trigger |
+| `resultSettlementService` (`settlementJob`) | `60s` | Official result verification, match completion stamping (`completedAt`), Supabase archival & active-only broadcast |
+| `matchService` (`matchFetch.job`) | Startup + `15m` | Yesterday-to-tomorrow fixture sync, SRL removal, out-of-window pruning & 24h completed match cleanup |
+
+### 4. End-to-End Match, Pricing & Settlement Flow
 
 ```mermaid
 sequenceDiagram
-    participant Sched as Match Sync & Fixture Filter
-    participant Feed as Live Score Engines (Roanuz / Sportmonks / OddsPapi)
-    participant Susp as Pricing & Suspension Engine
-    participant Mongo as MongoDB (matches)
-    participant Supa as Supabase (match_results)
+    participant Feeds as External APIs
+    participant Sync as MatchSync & Filter
+    participant Engine as Pricing & Suspension
+    participant Mongo as MongoDB Atlas
+    participant Supa as Supabase PostgreSQL
+    participant UI as Next.js Clients
 
-    Sched->>Mongo: Keep ONLY Live + Upcoming within [Yesterday .. Tomorrow]
-    Sched->>Sched: Classify Test vs T10/T20/ODI (Restrict "The Draw" to Test)
-    Feed->>Feed: Sort Roanuz/Sportmonks balls ascending -> accurate This Over
-    Feed->>Susp: Trigger seeded Monte Carlo + ball-level suspension checks
-    Note over Feed,Supa: Match finishes or winner declared
-    Feed->>Mongo: Set status=completed, completedAt=now, clear active odds
-    Feed->>Supa: Upsert match_results (expires_at = completed_at + 24h)
-    Feed->>Sched: Broadcast active-only catalog (completed hidden from /dashboard)
-    Note over Mongo,Supa: After 24 hours
-    Mongo->>Mongo: TTL index + cleanupCompletedMatches() deletes stale Match & MarketOdds
-    Supa->>Supa: purgeExpiredMatchResults() removes rows with expires_at <= NOW()
+    Feeds->>Sync: Fetch fixtures & live feeds
+    Sync->>Sync: Filter Live + Scheduled Yesterday..Tomorrow
+    Sync->>Sync: Restrict Draw to Test; Tied Match to T10/T20/ODI
+    Feeds->>Engine: Deliveries sorted ascending -> This Over + Stats
+    Engine->>Engine: Seeded Monte Carlo pricing + priority suspension
+    Engine-->>UI: Socket.IO scores/odds + SSE suspension updates
+    Note over Sync,Supa: Match concludes or winner declared
+    Sync->>Mongo: Set completed, winner, completedAt, closed markets
+    Sync->>Supa: Upsert match_results, settled bets & ledger entries
+    Sync-->>UI: Broadcast active-only catalog
+    Note over Mongo,Supa: After 24 Hours
+    Mongo->>Mongo: TTL index & sweeper purge expired completed matches
+    Supa->>Supa: Purge match_results past 24h expires_at
 ```
 
 ---
 
-## Core Engines & Services
+## Core Engines & Business Rules
 
-1. **Multi-Provider Live Score & Ball-by-Ball Pipeline**
-   - **Roanuz Cricket API v5 (`services/roanuzClient.js`, `services/roanuzScoreService.js`)**: Primary live cricket score & ball-by-ball commentary source; verifies active `innings` and over index, sorts reverse-chronological `over.balls` arrays ascending (`1 -> 6`), formats extras & dismissals (`Wd`, `2Wd`, `Wd+W`, `Nb`, `4Nb`, `4Lb`, `2B`, `W`), and falls back cleanly to `recent_overs_repr`.
-   - **Sportmonks Multi-Key Pool (`services/sportmonksPoolClient.js`, `services/sportmonksScoreService.js`)**: Weighted round-robin failover pool with cooldown and circuit-breaker tracking across keys.
-   - **OddsPapi v5 (`services/oddsApiLiveService.js`, `services/oddsApiRest.js`, `services/scoreService.js`)**: Real-time WebSocket odds consumer + REST fallback strictly guarded from overwriting Roanuz or fresh Sportmonks matches.
+- **Authoritative Ball-by-Ball Normalization (`services/roanuzScoreService.js`)**
+  - Aligns Roanuz `ballByBall` responses with `live.innings` and `live.score.overs`, sorts reverse-chronological deliveries ascending (`compareRoanuzBalls`), selects the final delivery for `lastBall`, formats complex deliveries (`Wd`, `2Wd`, `Wd+W`, `Nb+W`, `4Lb`, `2B`, `W`), and eliminates synthetic fallback arrays (`[]` until actual deliveries occur).
 
-2. **Format-Aware Market Rules (`services/fixtureFilter.js`, `services/matchService.js`)**
-   - **Strict Schedule Horizon**: Synchronizes live matches and upcoming schedules strictly for yesterday, today, and next-day (`< 2 days` ahead, configurable via `APP_TIMEZONE_OFFSET_MINUTES`), filtering out SRL/virtual leagues and long-horizon fixtures (`>= 2 days` out).
-   - **Test vs Limited-Overs Separation**: `isTestMatchFormat()` isolates `The Draw` exclusively to **Test / First-Class** fixtures (`TEST`), stripping any 3-way feed draw outcomes from **T10 / T20 / ODI** Match Odds & Bookmaker while serving **TIED MATCH** (`Yes` / `No`) via `fancyMarketsService.js`.
+- **Quantitative Pricing & Suspension (`services/pricing/`, `services/suspension/`)**
+  - Seeded Monte Carlo simulator (p95 recompute benchmark `<150ms` for 20,000 simulations) prices Fancy, Last Figure (`0–9`), and Even/Odd lines deterministically from `(matchState, stateSeq)`.
+  - Stateful priority suspension machine guards against stale feeds (`45s` tolerance), wicket settling holds, over boundaries, and exposure caps.
 
-3. **Quantitative Pricing & Suspension Engine (`services/pricing/`, `services/suspension/`)**
-   - Deterministic, seed-reproducible Monte Carlo simulator calibrating **Fancy**, **Last Figure (0–9)**, and **Even/Odd** lines against match format (`T20` / `ODI` / `TEST`) and ball-by-ball state.
-   - Priority-ordered suspension state machine protecting against stale feeds, delivery hold windows, end-of-over locks, and exposure limits, with audit logs offloaded to Supabase.
-
-4. **Toss, Settlement & 4-Tier Hierarchy Finance (`services/tossOddsEngine.js`, `services/settlementService.js`, `services/hierarchyService.js`, `utils/superAdminWallet.js`)**
-   - Standardized pre-match Toss odds (`1.98` / `2.02`) auto-locked at match start and swept safely on completion.
-   - Cascading P/L distribution across `User -> Master -> SuperMaster -> Admin -> SuperAdmin -> Book/Platform` with profit-only platform fee (`1.5%`) and SuperAdmin fixed display balance (`100,000`) with unlimited administrative spend.
+- **4-Tier Hierarchy P/L & SuperAdmin Wallet Governance (`services/hierarchyService.js`, `utils/superAdminWallet.js`)**
+  - Cascades house profit/loss across `User -> Master -> SuperMaster -> Admin -> SuperAdmin -> Platform Book`, deducting the `1.5%` platform fee strictly on net house profit (`amount > 0`).
+  - Enforces fixed `100,000` display wallet balance for `superadmin` accounts with unlimited administrative allocation (`admin`, `supermaster`, `master`, and `user` accounts remain strictly guarded by atomic `{ $gte }` balance deductions).
 
 ---
 
@@ -120,31 +129,31 @@ sequenceDiagram
 
 ```text
 betproexchange-server/
-├── server.js                          # Express app, HTTP/Socket.IO server & job bootstrap
-├── api/index.js                       # Serverless deployment entry adapter
+├── server.js                          # Express app, Socket.IO server, DB connect & health routes
+├── api/index.js                       # Serverless export adapter
 ├── models/                            # Mongoose schemas (Match w/ 24h TTL, User, Bet, Transaction, etc.)
-├── routes/                            # REST routers (auth, user, match, admin, teenpatti)
-├── middleware/                        # JWT authentication & role authorization guards
-├── services/                          # Real-time engines & database connectors
-│   ├── pricing/                       # Calibrated Monte Carlo odds engine & benchmarks
-│   ├── suspension/                    # Stateful market suspension engine & replay validator
-│   ├── supabaseService.js             # Supabase client, JWKS verification & async archive sync
+├── routes/                            # authRoutes, userRoutes, matchRoutes, adminRoutes, teenPattiRoutes
+├── middleware/                        # JWT authentication & hierarchical authorization middleware
+├── services/                          # Real-time pricing, feed ingestion & persistence services
+│   ├── pricing/                       # Monte Carlo calibration, simulator & performance benchmarks
+│   ├── suspension/                    # Stateful suspension machine & replay test suite
+│   ├── supabaseService.js             # Supabase SDK client, JWKS verification & dual-write archive
 │   ├── upstashRedisCache.js           # Dual TCP/REST Redis + L1 in-memory cache layer
-│   ├── matchService.js                # Schedule sync & 24h completed match cleanup sweeper
-│   ├── matchCatalogService.js         # Slim payload projection, cache warmer & active broadcaster
-│   ├── fixtureFilter.js               # Yesterday..tomorrow window, format & league filtering
+│   ├── fixtureFilter.js               # Yesterday..tomorrow window, format & league eligibility
+│   ├── matchCatalogService.js         # Slim projection, background warmer & active broadcaster
+│   ├── matchService.js                # Schedule sync & 24h completed cleanup sweeper
 │   ├── roanuzClient.js / roanuzScoreService.js
 │   ├── sportmonksPoolClient.js / sportmonksScoreService.js
 │   ├── oddsApiLiveService.js / oddsApiRest.js / scoreService.js
 │   ├── fancyMarketsService.js / tossOddsEngine.js / cricketEngine.js
-│   ├── resultSettlementService.js / settlementService.js / statusService.js
-│   ├── hierarchyService.js / limitService.js / openBetMatcher.js
-├── jobs/                              # Cron orchestrators (matchFetch, liveScore, scoreUpdate, status, settlement)
-├── supabase/migrations/               # PostgreSQL schema, RLS policies, grants & pg_cron cleanup
+│   ├── statusService.js / resultSettlementService.js / settlementService.js
+│   ├── hierarchyService.js / hierarchyHelper.js / limitService.js / openBetMatcher.js
+├── jobs/                              # Node-cron background loops
+├── supabase/migrations/               # PostgreSQL tables, indexes, RLS policies, grants & pg_cron
 │   └── 001_betpro_dual_db.sql
-├── utils/                             # Exchange calculation & SuperAdmin wallet helpers
-├── scripts/                           # Seeding & maintenance utilities
-└── test/                              # Native Node test suites (143 passing tests)
+├── utils/                             # Bet math & SuperAdmin wallet helpers
+├── scripts/                           # Admin seeding & maintenance utilities
+└── test/                              # 143 unit & integration tests (Node native test runner)
 ```
 
 ---
@@ -154,13 +163,13 @@ betproexchange-server/
 ### Prerequisites
 
 - **Node.js** `>= 20.0.0`
-- **MongoDB Atlas** cluster (or local MongoDB instance)
-- **Supabase PostgreSQL** project (optional until schema is applied; server degrades gracefully if tables are not yet initialized)
-- **Upstash Redis** instance (optional; falls back cleanly to in-memory L1 cache)
+- **MongoDB Atlas** (or local MongoDB server)
+- **Supabase PostgreSQL** project (optional until schema migration is applied; writes degrade gracefully without interrupting MongoDB flows)
+- **Upstash Redis** instance (optional; falls back transparently to L1 memory cache)
 
 ### Environment Variables
 
-Create `.env` from `.env.example` (never commit `.env` to version control):
+Copy `.env.example` to `.env` and populate values privately (never commit `.env`):
 
 ```env
 PORT=5000
@@ -178,68 +187,59 @@ SUPABASE_PUBLISHABLE_KEY=<your_supabase_publishable_key>
 SUPABASE_SECRET_KEY=<your_supabase_secret_key>
 SUPABASE_JWKS_URL=https://<project-ref>.supabase.co/auth/v1/.well-known/jwks.json
 
-# Auth & External Cricket Data Providers
-JWT_SECRET=<strong_random_secret>
+# Auth & External Sports Feeds
+JWT_SECRET=<strong_random_jwt_secret>
 ODDS_API_KEY=<your_oddspapi_key>
 SPORTMONKS_API_KEY=<your_sportmonks_key>
 ROANUZ_PROJECT_KEY=<your_roanuz_project_key>
 ROANUZ_API_KEY=<your_roanuz_api_key>
 ```
 
-### Database Setup & Local Run
+### Setup & Verification
 
 ```bash
 # 1. Install dependencies
 npm install
 
-# 2. Apply Supabase SQL migration (run once in Supabase Dashboard -> SQL Editor):
+# 2. Apply Supabase SQL migration once in Supabase Dashboard -> SQL Editor:
 #    supabase/migrations/001_betpro_dual_db.sql
 
-# 3. Seed root SuperAdmin account (configure seed script env vars locally)
-node scripts/seedSuperAdmin.js
-
-# 4. Start backend & WebSocket server
+# 3. Start backend & WebSocket server
 npm start
-```
 
-### Verification & Test Suite
-
-```bash
+# 4. Run full verification suite (143 tests)
 npm test
 ```
 
-Runs `143` automated tests across domain logic, Monte Carlo calibration & p95 latency benchmarks, suspension replay validation, Sportmonks failover, Roanuz ball-by-ball ordering, SuperAdmin wallet rules, and dual-DB lifecycle policies.
-
 ---
 
-## API Overview
+## API Reference Summary
 
-| Method & Path | Access | Description |
+| Endpoint | Access | Responsibility |
 |---|---|---|
-| `GET /health` \| `/api/health` | Public | Server uptime, MongoDB state, and Supabase schema readiness |
-| `GET /api/pool-status` | Public | Sportmonks key pool health, Redis stats, and Supabase diagnostics |
-| `GET /api/matches/live` | Public | Pre-warmed slim list of live in-play matches |
-| `GET /api/matches` | Public | Active catalog (live + scheduled `[yesterday .. tomorrow]`) |
-| `GET /api/matches/results` | Public | Completed match results within the active 24h retention window |
-| `GET /api/matches/:id` | Public | Full match details, live score, and active market odds (MongoDB / Redis / Supabase fallback) |
-| `GET /api/matches/:matchId/suspension-stream` | Public | Real-time SSE suspension state stream |
-| `POST /api/auth/login` \| `/api/auth/register` | Public | JWT issuance & role-aware authentication |
-| `GET /api/user/wallet` | Auth | Effective balance, credit & unlimited SuperAdmin normalization |
-| `POST /api/user/bet` | Auth | Atomic balance deduction, odds/suspension verification & bet placement |
-| `POST /api/user/bets/:betId/cancel` | Auth | Cancel unmatched open bet & refund liability |
-| `POST /api/admin/*` | Role Guarded | Hierarchy user creation, cash load/settle, profit limits, winner & toss declarations |
+| `GET /health` \| `GET /api/health` | Public | Server uptime, MongoDB state & Supabase schema diagnostics |
+| `GET /api/pool-status` | Public | Sportmonks pool failover metrics, Redis stats & Supabase status |
+| `GET /api/matches/live` | Public | Slim pre-warmed active live cricket fixtures |
+| `GET /api/matches` | Public | Live-first active fixture catalog (`yesterday .. tomorrow`) |
+| `GET /api/matches/results` | Public | Recently concluded results within the 24-hour retention window |
+| `GET /api/matches/:id` | Public | Detailed markets & scorecards (MongoDB / Redis / Supabase fallback) |
+| `GET /api/matches/:matchId/suspension-stream` | Public | Server-Sent Events stream for real-time market halts |
+| `POST /api/auth/login` \| `/api/auth/register` | Public | JWT issuance & role authentication |
+| `GET /api/user/wallet` | Auth | Wallet, credit & normalized SuperAdmin balance lookup |
+| `POST /api/user/bet` | Auth | Atomic balance deduction, odds/suspension validation & placement |
+| `POST /api/user/bets/:betId/cancel` | Auth | Unmatched open-bet cancellation & liability refund |
+| `POST /api/admin/*` | Role Guarded | Hierarchy provisioning, cash settlement, profit limits & winner declarations |
 
 ---
 
 ## Security Architecture
 
-- **Zero Secrets in Repository**: Credentials live strictly in `.env` (gitignored); `SUPABASE_SECRET_KEY` never leaves server memory and PostgreSQL tables enforce Row Level Security (`service_role` access only).
-- **Atomic Financial Guards**: All bet deductions and downline cash transfers execute inside atomic MongoDB `{ $gte }` preconditions (`findOneAndUpdate`), eliminating double-spend race conditions.
-- **Role-Scoped Authorization & Limits**: All administrative routes enforce bearer JWT validation, ancestor ownership checks, per-market `maxBet` / net-profit caps, and strict SuperAdmin privilege isolation.
+- **Zero Secrets in Source Control**: `.env` is excluded via `.gitignore`; `SUPABASE_SECRET_KEY` operates strictly on the server with PostgreSQL Row Level Security enforcing `service_role` access only.
+- **Atomic Financial Guards**: Bet placements and hierarchy balance transfers require atomic MongoDB `{ $gte }` preconditions (`findOneAndUpdate`) preventing race conditions and negative-balance exploits.
+- **Strict Role & Input Enforcement**: Routes enforce JWT signatures, hierarchical ancestor ownership, per-market profit/stake caps, and exclusion of client-originated odds tampering.
 
 ---
 
 ## License
 
 Proprietary and Confidential. Unauthorized copying, distribution, or modification without explicit written authorization is strictly prohibited.
-
