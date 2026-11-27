@@ -95,8 +95,8 @@ sequenceDiagram
 
     Feeds->>Sync: Fetch fixtures & live feeds
     Sync->>Sync: Filter Live + Scheduled Yesterday..Tomorrow
-    Sync->>Sync: Restrict Draw to Test; Tied Match to T10/T20/ODI
-    Feeds->>Engine: Deliveries sorted ascending -> This Over + Stats
+    Sync->>Sync: Restrict Draw to Test and Tied Match to T10, T20, ODI
+    Feeds->>Engine: Sort deliveries ascending into This Over and Stats
     Engine->>Engine: Seeded Monte Carlo pricing + priority suspension
     Engine-->>UI: Socket.IO scores/odds + SSE suspension updates
     Note over Sync,Supa: Match concludes or winner declared
