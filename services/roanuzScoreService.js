@@ -478,7 +478,7 @@ class RoanuzScoreService {
     this.SYNC_TIMEOUT_MS = 15000;  // Safety timeout
 
     this.dbWritePending = new Map();  // matchId -> { payload, timer }
-    this.DB_WRITE_DEBOUNCE_MS = 4000; // Debounce Mongo writes to 4s
+    this.DB_WRITE_DEBOUNCE_MS = 1200; // Fast DB persistence (~1.2s) so REST and reloads stay in sync
     this.lastPreTossCheck = new Map(); // roanuzKey -> timestampMs
   }
 

@@ -82,11 +82,12 @@ class OddsApiRest {
         return this.request('fixtures/today', { sportId: 27, ...params });
     }
 
-    async getFixtureOdds(fixtureId, bookmakers = []) {
+    async getFixtureOdds(fixtureId, bookmakers = ['betfair-ex', 'pinnacle']) {
         const params = { fixtureId };
-        if (bookmakers.length > 0) {
-            params.bookmakers = bookmakers.join(',');
-        }
+        const list = Array.isArray(bookmakers) && bookmakers.length > 0
+            ? bookmakers
+            : ['betfair-ex', 'pinnacle'];
+        params.bookmakers = list.join(',');
         return this.request('fixtures/odds', params);
     }
 

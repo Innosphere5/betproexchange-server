@@ -177,8 +177,14 @@ async function getData(endpoint, options = {}) {
  * @param {string} fixtureId
  * @returns {Promise<object>}
  */
-async function getFixtureOdds(fixtureId) {
-  return fetchFromOddspapi('fixtures/odds', { fixtureId });
+async function getFixtureOdds(fixtureId, bookmakers = ['betfair-ex', 'pinnacle']) {
+  const list = Array.isArray(bookmakers) && bookmakers.length > 0
+    ? bookmakers
+    : ['betfair-ex', 'pinnacle'];
+  return fetchFromOddspapi('fixtures/odds', {
+    fixtureId,
+    bookmakers: list.join(','),
+  });
 }
 
 /**

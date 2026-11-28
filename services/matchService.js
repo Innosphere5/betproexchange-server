@@ -338,7 +338,7 @@ const fetchUpcomingMatches = async (io) => {
       if (isLive || isWithin72Hours || fixture.hasOdds) {
         try {
           oddsResponse = await getData("fixtures/odds", {
-            params: { fixtureId },
+            params: { fixtureId, bookmakers: "betfair-ex,pinnacle" },
           });
 
           if (oddsResponse) {

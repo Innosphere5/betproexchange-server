@@ -116,3 +116,115 @@ test('extractBetfairFancyMarkets extracts real Oddspapi Betfair Fancy ladders an
   // Limit category maps betfair_fancy cleanly
   assert.equal(normalizeCategory('betfair_fancy'), 'fancy');
 });
+
+test('oddsApiRest.getFixtureOdds always includes default bookmakers filter for live Oddspapi v5 fixtures', async () => {
+  const oddsApiRest = require('../services/oddsApiRest');
+  const originalRequest = oddsApiRest.request.bind(oddsApiRest);
+  let captured = null;
+  oddsApiRest.request = async (endpoint, params) => {
+    captured = { endpoint, params };
+    return { fixtureId: params.fixtureId, odds: {} };
+  };
+  try {
+    await oddsApiRest.getFixtureOdds('id2703874977212836');
+    assert.equal(captured.endpoint, 'fixtures/odds');
+    assert.equal(captured.params.fixtureId, 'id2703874977212836');
+    assert.equal(captured.params.bookmakers, 'betfair-ex,pinnacle');
+  } finally {
+    oddsApiRest.request = originalRequest;
+  }
+});
+
+test('OddsApiLiveService propagates live event odds to ALL linked sibling matches with independent team swap', async () => {
+  const oddsApiLive = require('../services/oddsApiLiveService');
+  const Match = require('../models/Match');
+  const eventId = 'id_test_reissued_999';
+  const primaryId = 'id_test_reissued_999';
+  const siblingId = 'id_test_sibling_888';
+
+  const origFindOne = Match.findOne;
+  const origEmit = oddsApiLive.io;
+  const emittedPayloads = [];
+
+  Match.findOne = async ({ matchId }) => {
+    if (matchId === primaryId) return { matchId: primaryId, teamA: 'MI Emirates', teamB: 'Desert Vipers', isTestMatch: false };
+    if (matchId === siblingId) return { matchId: siblingId, teamA: 'Desert Vipers', teamB: 'MI Emirates', isTestMatch: false };
+    return null;
+  };
+  oddsApiLive.io = {
+    emit: (ev, payload) => {
+      if (ev === 'market_odds_update') emittedPayloads.push(payload);
+    },
+    to: () => ({ emit: () => {} }),
+  };
+
+  try {
+    oddsApiLive.eventMetadata.set(eventId, {
+      eventId,
+      home: 'MI Emirates',
+      away: 'Desert Vipers',
+      league: 'ILT20',
+      isLive: true,
+    });
+    oddsApiLive.addEventMatchLink(eventId, siblingId);
+    oddsApiLive.addEventMatchLink(eventId, primaryId, { primary: true });
+
+    await oddsApiLive.processOddsForEvent({
+      fixtureId: eventId,
+      odds: {
+        'betfair-ex': {
+          qHome: {
+            marketId: 271,
+            outcomeId: 271,
+            price: 1.60,
+            active: true,
+            meta: {
+              availableToBack: [{ price: 1.60, size: 4800000 }],
+              availableToLay: [{ price: 1.61, size: 4000000 }],
+            },
+          },
+          qAway: {
+            marketId: 271,
+            outcomeId: 272,
+            price: 2.64,
+            active: true,
+            meta: {
+              availableToBack: [{ price: 2.64, size: 173200 }],
+              availableToLay: [{ price: 2.66, size: 213900 }],
+            },
+          },
+        },
+      },
+    });
+
+    const primaryWrite = oddsApiLive.writeQueue.get(primaryId);
+    const siblingWrite = oddsApiLive.writeQueue.get(siblingId);
+    assert.ok(primaryWrite, 'primary reissued match must be queued');
+    assert.ok(siblingWrite, 'swapped sibling match must ALSO be queued');
+
+    assert.equal(primaryWrite.teamABack, 1.60);
+    assert.equal(primaryWrite.teamALay, 1.61);
+    assert.equal(primaryWrite.teamBBack, 2.64);
+    assert.equal(primaryWrite.teamBLay, 2.66);
+
+    assert.equal(siblingWrite.teamABack, 2.64);
+    assert.equal(siblingWrite.teamALay, 2.66);
+    assert.equal(siblingWrite.teamBBack, 1.60);
+    assert.equal(siblingWrite.teamBLay, 1.61);
+
+    assert.equal(emittedPayloads.length, 2);
+  } finally {
+    Match.findOne = origFindOne;
+    oddsApiLive.io = origEmit;
+    oddsApiLive.eventMetadata.delete(eventId);
+    oddsApiLive.eventQuotes.delete(eventId);
+    oddsApiLive.eventToMatchIds.delete(eventId);
+    oddsApiLive.eventToMatchId.delete(eventId);
+    oddsApiLive.swapCache.delete(primaryId);
+    oddsApiLive.swapCache.delete(siblingId);
+    oddsApiLive.oddsCache.delete(primaryId);
+    oddsApiLive.oddsCache.delete(siblingId);
+    oddsApiLive.writeQueue.delete(primaryId);
+    oddsApiLive.writeQueue.delete(siblingId);
+  }
+});

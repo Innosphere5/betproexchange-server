@@ -40,10 +40,15 @@ class OddsApiLiveService {
     this.reconnectTimer = null;
     this.isConnecting = false;
 
-    // Fixture mapping: eventId → DB matchId
+    // Fixture mapping: eventId → primary DB matchId, and eventId → Set of all linked DB matchIds
     this.eventToMatchId = new Map();
+    this.eventToMatchIds = new Map();
     // eventId → fixture metadata (home, away, etc.)
     this.eventMetadata = new Map();
+    // WS first-tick REST seed tracking & heartbeat state
+    this.wsSeededEvents = new Set();
+    this.wsHeartbeatInterval = null;
+    this.lastWsMessageAt = 0;
 
     // Persistent raw odds storage per event: eventId -> { [bookmaker]: { [quoteKey]: quote } }
     // Enables continuous delta accumulation so single-runner WebSocket updates never get dropped
@@ -74,12 +79,25 @@ class OddsApiLiveService {
 
     this.io = io;
     this.writeInterval = setInterval(() => this.flushWriteQueue(), 1000);
-    this.staleCheckInterval = setInterval(() => this.checkStaleOdds(), 60000); // Check every 60s (not 20s) — cricket odds don't change as fast as football
-    this.restPollInterval = setInterval(() => this.pollLinkedFixtures(), 30000); // 30s — REST poll interval for live matches
+    this.staleCheckInterval = setInterval(() => this.checkStaleOdds(), 60000); // Check every 60s
+    this.restPollInterval = setInterval(() => this.pollLinkedFixtures(), 10000); // 10s — keep live exchange odds & depth fresh
     this.upcomingPollInterval = setInterval(
       () => this.pollUpcomingFixtures(),
       5 * 60 * 1000,
     );
+    this.wsHeartbeatInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (this.lastWsMessageAt > 0 && Date.now() - this.lastWsMessageAt > 50000) {
+        console.warn("[OddsApiLive] ⚠️ WebSocket silent >50s — recycling stale connection...");
+        try {
+          this.ws.terminate();
+        } catch (e) {}
+        return;
+      }
+      try {
+        this.ws.ping();
+      } catch (e) {}
+    }, 25000);
     // Real-time matching engine for open bets (checked every 2.5s)
     const { checkAndMatchOpenBets } = require('./openBetMatcher');
     this.openBetsMatcherInterval = setInterval(async () => {
@@ -115,6 +133,7 @@ class OddsApiLiveService {
     this.ws.on("open", () => {
       console.log("[OddsApiLive] ✅ WebSocket connected. Authenticating...");
       this.isConnecting = false;
+      this.lastWsMessageAt = Date.now();
       const loginPayload = {
         type: "login",
         apiKey: API_KEY,
@@ -127,7 +146,12 @@ class OddsApiLiveService {
       this.ws.send(JSON.stringify(loginPayload));
     });
 
+    this.ws.on("pong", () => {
+      this.lastWsMessageAt = Date.now();
+    });
+
     this.ws.on("message", (raw) => {
+      this.lastWsMessageAt = Date.now();
       try {
         const str = raw.toString();
         const lines = str.split("\n").filter((l) => l.trim());
@@ -272,6 +296,7 @@ class OddsApiLiveService {
           try {
             const oddsData = await oddsApiRest.getFixtureOdds(
               fixture.fixtureId || fixture.id,
+              BOOKMAKERS,
             );
             if (oddsData) {
               const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
@@ -299,6 +324,7 @@ class OddsApiLiveService {
                 try {
                   const oddsData = await oddsApiRest.getFixtureOdds(
                     fixture.fixtureId || fixture.id,
+                    BOOKMAKERS,
                   );
                   if (oddsData) {
                     const dataArray = Array.isArray(oddsData)
@@ -315,11 +341,8 @@ class OddsApiLiveService {
         } catch (err) { }
       }
       // Log any active DB matches that still couldn't be linked (not on this API)
-      const linkedMatchIds = new Set(
-        Array.from(this.eventToMatchId.values()).map(String),
-      );
       const unlinkedActive = activeMatches.filter(
-        (m) => !linkedMatchIds.has(String(m.matchId)),
+        (m) => !this.isMatchIdLinked(m.matchId),
       );
       if (unlinkedActive.length > 0) {
         console.warn(
@@ -337,6 +360,45 @@ class OddsApiLiveService {
     }
   }
 
+  addEventMatchLink(eventId, matchId, { primary = false } = {}) {
+    if (!eventId || !matchId) return [];
+    const eKey = String(eventId);
+    const mKey = String(matchId);
+    if (!this.eventToMatchIds.has(eKey)) {
+      this.eventToMatchIds.set(eKey, new Set());
+    }
+    this.eventToMatchIds.get(eKey).add(mKey);
+    if (primary || !this.eventToMatchId.has(eKey)) {
+      this.eventToMatchId.set(eKey, mKey);
+    }
+    return Array.from(this.eventToMatchIds.get(eKey));
+  }
+
+  getLinkedMatchIds(eventId) {
+    if (!eventId) return [];
+    const eKey = String(eventId);
+    const ids = new Set();
+    const mappedSet = this.eventToMatchIds.get(eKey);
+    if (mappedSet) {
+      for (const mId of mappedSet) ids.add(String(mId));
+    }
+    const primary = this.eventToMatchId.get(eKey) || this.eventToMatchId.get(eventId);
+    if (primary) ids.add(String(primary));
+    return Array.from(ids);
+  }
+
+  isMatchIdLinked(matchId) {
+    if (!matchId) return false;
+    const target = String(matchId);
+    for (const set of this.eventToMatchIds.values()) {
+      if (set.has(target)) return true;
+    }
+    for (const mId of this.eventToMatchId.values()) {
+      if (String(mId) === target) return true;
+    }
+    return false;
+  }
+
   async recoverLinkedFixtures() {
     try {
       const activeMatches = await Match.find({
@@ -349,22 +411,35 @@ class OddsApiLiveService {
         oddsApiEventId: { $exists: true, $ne: "" },
       });
 
-      let recovered = 0;
+      const eventIdsToRecover = new Set();
+      for (const m of activeMatches) {
+        if (m.oddsApiEventId) {
+          this.addEventMatchLink(m.oddsApiEventId, m.matchId, {
+            primary: String(m.matchId) === String(m.oddsApiEventId),
+          });
+          eventIdsToRecover.add(m.oddsApiEventId);
+        }
+      }
       for (const mo of marketOdds) {
-        const eventId = mo.oddsApiEventId;
-        if (this.eventToMatchId.has(eventId)) continue;
+        if (mo.oddsApiEventId) {
+          this.addEventMatchLink(mo.oddsApiEventId, mo.matchId, {
+            primary: String(mo.matchId) === String(mo.oddsApiEventId),
+          });
+          eventIdsToRecover.add(mo.oddsApiEventId);
+        }
+      }
 
+      let recovered = 0;
+      for (const eventId of eventIdsToRecover) {
         try {
           const fixtureData = await oddsApiRest.getFixtures({ id: eventId });
           const fixtures = Array.isArray(fixtureData)
             ? fixtureData
             : [fixtureData];
-          const fixture = fixtures.find((f) => f && f.id === eventId);
+          const fixture = fixtures.find((f) => f && (f.id === eventId || f.fixtureId === eventId));
 
           if (fixture) {
             this.storeFixtureMetadata(fixture);
-            this.eventToMatchId.set(eventId, mo.matchId);
-
             const oddsData = await oddsApiRest.getFixtureOdds(
               eventId,
               BOOKMAKERS,
@@ -428,10 +503,12 @@ class OddsApiLiveService {
     });
 
     if (reissuedId) {
-      const matchId = this.eventToMatchId.get(eventId);
-      if (matchId) {
+      const linkedIds = this.getLinkedMatchIds(eventId);
+      for (const matchId of linkedIds) {
         console.log(`[OddsApiLive] 🔁 Fixture ${eventId} reissued to ${reissuedId}. Linking match ${matchId}...`);
-        this.eventToMatchId.set(reissuedId, matchId);
+        this.addEventMatchLink(reissuedId, matchId, {
+          primary: String(matchId) === String(reissuedId),
+        });
         if (this.deletedGraceTimers && this.deletedGraceTimers.has(eventId)) {
           clearTimeout(this.deletedGraceTimers.get(eventId));
           this.deletedGraceTimers.delete(eventId);
@@ -449,116 +526,132 @@ class OddsApiLiveService {
   }
 
   async linkEventToMatch(eventId) {
-    if (this.eventToMatchId.has(eventId)) {
-      return this.eventToMatchId.get(eventId);
-    }
+    if (!eventId) return null;
 
-    // Add cooldown to prevent spamming DB for unlinked events
+    // Add short cooldown to prevent spamming DB for unlinked events
     if (!this.linkCooldown) this.linkCooldown = new Map();
+    const existingIds = this.getLinkedMatchIds(eventId);
     if (this.linkCooldown.has(eventId)) {
       const lastAttempt = this.linkCooldown.get(eventId);
-      if (Date.now() - lastAttempt < 10000) return null; // 10s cooldown — allow faster retry
+      if (Date.now() - lastAttempt < 10000) {
+        return existingIds.length > 0 ? (this.eventToMatchId.get(eventId) || existingIds[0]) : null;
+      }
     }
     this.linkCooldown.set(eventId, Date.now());
 
     const metadata = this.eventMetadata.get(eventId);
-    if (!metadata || !metadata.home || !metadata.away) return null;
 
     try {
       const matches = await Match.find({
         status: { $in: ["live", "upcoming"] },
       });
-      const apiHome = this.normalize(metadata.home);
-      const apiAway = this.normalize(metadata.away);
-      const apiTime = metadata.commenceTime
-        ? new Date(metadata.commenceTime).getTime()
-        : 0;
 
-      // Pass 0: Direct Match ID or oddsApiEventId match
       const altEventId = String(eventId).startsWith('id') ? String(eventId).replace(/^id/, '') : ('id' + String(eventId));
+      const linkedNow = new Set();
+
+      // Pass 0a: Exact matchId match (highest priority — reissued primary fixture)
+      for (const match of matches) {
+        if (String(match.matchId) === String(eventId) || String(match.matchId) === altEventId) {
+          this.addEventMatchLink(eventId, match.matchId, { primary: true });
+          linkedNow.add(String(match.matchId));
+          console.log(`[OddsApiLive] 🔗 Direct Primary Linked event ${eventId} → match ${match.matchId}`);
+        }
+      }
+
+      // Pass 0b: Explicit oddsApiEventId match (catches sibling docs sharing the reissued oddsApiEventId)
       for (const match of matches) {
         if (
-          String(match.matchId) === String(eventId) ||
-          String(match.matchId) === altEventId ||
-          String(match.oddsApiEventId) === String(eventId) ||
-          String(match.oddsApiEventId) === altEventId
+          !linkedNow.has(String(match.matchId)) &&
+          (String(match.oddsApiEventId) === String(eventId) || String(match.oddsApiEventId) === altEventId)
         ) {
-          this.eventToMatchId.set(eventId, match.matchId);
-          console.log(`[OddsApiLive] 🔗 Direct ID Linked event ${eventId} → match ${match.matchId}`);
-          return match.matchId;
+          this.addEventMatchLink(eventId, match.matchId);
+          linkedNow.add(String(match.matchId));
+          console.log(`[OddsApiLive] 🔗 Direct Alias Linked event ${eventId} → match ${match.matchId}`);
         }
       }
 
-      // Pass 1 & 2: Collect ALL candidates, then pick the BEST match
-      // This prevents linking a live fixture to the wrong match when multiple
-      // matches exist between the same teams (e.g., Test series + ODI series).
-      const candidates = [];
+      // Pass 1 & 2: Collect ALL matching team candidates (including reversed home/away siblings)
+      if (metadata && metadata.home && metadata.away) {
+        const apiHome = this.normalize(metadata.home);
+        const apiAway = this.normalize(metadata.away);
+        const apiTime = metadata.commenceTime
+          ? new Date(metadata.commenceTime).getTime()
+          : 0;
 
-      for (const match of matches) {
-        const dbHome = this.normalize(match.teamA);
-        const dbAway = this.normalize(match.teamB);
-        const dbTime = new Date(match.startTime).getTime();
+        const candidates = [];
 
-        // Exact normalized match
-        const exactMatch =
-          (dbHome === apiHome && dbAway === apiAway) ||
-          (dbHome === apiAway && dbAway === apiHome);
+        for (const match of matches) {
+          const dbHome = this.normalize(match.teamA);
+          const dbAway = this.normalize(match.teamB);
+          const dbTime = new Date(match.startTime).getTime();
 
-        // Substring fallback
-        const homeContains =
-          (dbHome.includes(apiHome) || apiHome.includes(dbHome)) &&
-          dbHome.length >= 3 && apiHome.length >= 3;
-        const awayContains =
-          (dbAway.includes(apiAway) || apiAway.includes(dbAway)) &&
-          dbAway.length >= 3 && apiAway.length >= 3;
-        const homeContainsSwap =
-          (dbHome.includes(apiAway) || apiAway.includes(dbHome)) &&
-          dbHome.length >= 3 && apiAway.length >= 3;
-        const awayContainsSwap =
-          (dbAway.includes(apiHome) || apiHome.includes(dbAway)) &&
-          dbAway.length >= 3 && apiHome.length >= 3;
-        const fuzzyMatch =
-          (homeContains && awayContains) ||
-          (homeContainsSwap && awayContainsSwap);
+          const exactMatch =
+            (dbHome === apiHome && dbAway === apiAway) ||
+            (dbHome === apiAway && dbAway === apiHome);
 
-        if (!exactMatch && !fuzzyMatch) continue;
+          const homeContains =
+            (dbHome.includes(apiHome) || apiHome.includes(dbHome)) &&
+            dbHome.length >= 3 && apiHome.length >= 3;
+          const awayContains =
+            (dbAway.includes(apiAway) || apiAway.includes(dbAway)) &&
+            dbAway.length >= 3 && apiAway.length >= 3;
+          const homeContainsSwap =
+            (dbHome.includes(apiAway) || apiAway.includes(dbHome)) &&
+            dbHome.length >= 3 && apiAway.length >= 3;
+          const awayContainsSwap =
+            (dbAway.includes(apiHome) || apiHome.includes(dbAway)) &&
+            dbAway.length >= 3 && apiHome.length >= 3;
+          const fuzzyMatch =
+            (homeContains && awayContains) ||
+            (homeContainsSwap && awayContainsSwap);
 
-        const isTest = Boolean(
-          match.isTestMatch ||
-          (match.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(match.league)) ||
-          (metadata.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
-        );
-        const maxAllowedHours = match.status === 'live' ? 168 : (isTest ? 144 : 24);
-        const timeDiff = apiTime > 0 ? Math.abs(dbTime - apiTime) / (1000 * 60 * 60) : 0;
+          if (!exactMatch && !fuzzyMatch) continue;
 
-        if (timeDiff <= maxAllowedHours || apiTime === 0) {
-          // Scoring: higher = better match
-          let score = 0;
-          // Strongly prefer matching live API fixture to live DB match
-          if (metadata.isLive && match.status === 'live') score += 10000;
-          // Prefer upcoming-to-upcoming
-          if (!metadata.isLive && match.status === 'upcoming') score += 5000;
-          // Penalize live API fixture linking to upcoming DB match
-          if (metadata.isLive && match.status === 'upcoming') score += 0;
-          // Prefer exact match over fuzzy
-          if (exactMatch) score += 1000;
-          // Prefer closest start time
-          score -= timeDiff;
+          const isTest = Boolean(
+            match.isTestMatch ||
+            (match.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(match.league)) ||
+            (metadata.league && /\b(test|test match|sheffield|ranji|first-class|first class|4-day|5-day)\b/i.test(metadata.league))
+          );
+          const maxAllowedHours = match.status === 'live' ? 168 : (isTest ? 144 : 24);
+          const timeDiff = apiTime > 0 ? Math.abs(dbTime - apiTime) / (1000 * 60 * 60) : 0;
 
-          candidates.push({ match, score, exactMatch, timeDiff });
+          if (timeDiff <= maxAllowedHours || apiTime === 0) {
+            let score = 0;
+            if (metadata.isLive && match.status === 'live') score += 10000;
+            if (!metadata.isLive && match.status === 'upcoming') score += 5000;
+            if (metadata.isLive && match.status === 'upcoming') score += 0;
+            if (exactMatch) score += 1000;
+            score -= timeDiff;
+
+            candidates.push({ match, score, exactMatch, timeDiff });
+          }
+        }
+
+        if (candidates.length > 0) {
+          candidates.sort((a, b) => b.score - a.score);
+          const best = candidates[0];
+          const primaryId = linkedNow.size === 0 ? best.match.matchId : this.eventToMatchId.get(eventId);
+          for (const cand of candidates) {
+            // Link best match and any live/same-day sibling within 30h (e.g. reissued + cancelled duplicate doc)
+            if (cand === best || cand.timeDiff <= 30) {
+              this.addEventMatchLink(eventId, cand.match.matchId, {
+                primary: cand === best && linkedNow.size === 0,
+              });
+              linkedNow.add(String(cand.match.matchId));
+              if (!cand.match.oddsApiEventId && cand.match._id) {
+                Match.updateOne({ _id: cand.match._id }, { $set: { oddsApiEventId: eventId } }).catch(() => {});
+              }
+            }
+          }
+          console.log(
+            `[OddsApiLive] 🔗 Linked${best.exactMatch ? '' : ' (fuzzy)'} ${metadata.home} v ${metadata.away} → ${linkedNow.size} match(es) (primary ${primaryId || best.match.matchId}, timeDiff: ${best.timeDiff.toFixed(1)}h)`,
+          );
         }
       }
 
-      if (candidates.length > 0) {
-        // Sort by score descending (best match first)
-        candidates.sort((a, b) => b.score - a.score);
-        const best = candidates[0];
-        this.eventToMatchId.set(eventId, best.match.matchId);
-        Match.updateOne({ _id: best.match._id }, { $set: { oddsApiEventId: eventId } }).catch(() => {});
-        console.log(
-          `[OddsApiLive] 🔗 Linked${best.exactMatch ? '' : ' (fuzzy)'} ${metadata.home} v ${metadata.away} → match ${best.match.matchId} (score: ${best.score.toFixed(0)}, timeDiff: ${best.timeDiff.toFixed(1)}h, ${candidates.length} candidates)`,
-        );
-        return best.match.matchId;
+      const finalIds = this.getLinkedMatchIds(eventId);
+      if (finalIds.length > 0) {
+        return this.eventToMatchId.get(eventId) || finalIds[0];
       }
     } catch (err) {
       console.error(
@@ -690,10 +783,11 @@ class OddsApiLiveService {
 
     this.storeFixtureMetadata(msg.payload || msg);
 
-    let matchId = this.eventToMatchId.get(eventId);
-    if (!matchId) {
-      matchId = await this.linkEventToMatch(eventId);
-      if (!matchId) return;
+    const linkedIds = this.getLinkedMatchIds(eventId);
+    let primaryMatchId = linkedIds[0];
+    if (!primaryMatchId) {
+      primaryMatchId = await this.linkEventToMatch(eventId);
+      if (!primaryMatchId) return;
     }
 
     if (!this.lastOddsLogTime) this.lastOddsLogTime = new Map();
@@ -702,16 +796,31 @@ class OddsApiLiveService {
     if (now - lastLog >= 10000) {
       this.lastOddsLogTime.set(eventId, now);
       console.log(
-        `[OddsApiLive] ⚡ WebSocket odds streaming for event ${eventId} (match ${matchId})`,
+        `[OddsApiLive] ⚡ WebSocket odds streaming for event ${eventId} (match ${primaryMatchId})`,
       );
     }
+
     await this.processOddsForEvent(msg.payload || msg);
+
+    // WS UPDATE packets often arrive one runner/outcome at a time; seed full REST snapshot on first WS event
+    if (!this.wsSeededEvents.has(eventId)) {
+      this.wsSeededEvents.add(eventId);
+      oddsApiRest.getFixtureOdds(eventId, BOOKMAKERS)
+        .then(async (oddsData) => {
+          if (!oddsData) return;
+          const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
+          for (const odd of dataArray) {
+            await this.processOddsForEvent(odd);
+          }
+        })
+        .catch(() => {});
+    }
   }
 
   async processOddsForEvent(eventObj) {
     const eventId = eventObj.fixtureId || eventObj.id;
-    const matchId = this.eventToMatchId.get(eventId);
-    if (!matchId) return;
+    const targetMatchIds = this.getLinkedMatchIds(eventId);
+    if (targetMatchIds.length === 0) return;
 
     const metadata = this.eventMetadata.get(eventId);
     if (!metadata) return;
@@ -905,6 +1014,66 @@ class OddsApiLiveService {
         break;
       }
     }
+
+    for (const targetMatchId of targetMatchIds) {
+      await this._applyOddsSnapshotToMatch(targetMatchId, {
+        eventId,
+        metadata,
+        normalizedOdds,
+        bestHomePrice,
+        bestAwayPrice,
+        homeBack,
+        homeBackVol,
+        homeLay,
+        homeLayVol,
+        awayBack,
+        awayBackVol,
+        awayLay,
+        awayLayVol,
+        drawBack,
+        drawBackVol,
+        drawLay,
+        drawLayVol,
+        homeLadderBack,
+        homeLadderLay,
+        awayLadderBack,
+        awayLadderLay,
+        drawLadderBack,
+        drawLadderLay,
+        usedBookie,
+      });
+    }
+  }
+
+  async _applyOddsSnapshotToMatch(matchId, snapshot) {
+    let {
+      eventId,
+      metadata,
+      normalizedOdds,
+      bestHomePrice,
+      bestAwayPrice,
+      homeBack,
+      homeBackVol,
+      homeLay,
+      homeLayVol,
+      awayBack,
+      awayBackVol,
+      awayLay,
+      awayLayVol,
+      drawBack,
+      drawBackVol,
+      drawLay,
+      drawLayVol,
+      homeLadderBack,
+      homeLadderLay,
+      awayLadderBack,
+      awayLadderLay,
+      drawLadderBack,
+      drawLadderLay,
+      usedBookie,
+    } = snapshot;
+
+    let dbMatch = null;
 
     // If no exchange/bookmaker odds found, check if DB already has valid odds
     if (bestHomePrice === 0 || bestAwayPrice === 0) {
@@ -1891,8 +2060,12 @@ class OddsApiLiveService {
    * Reverse-lookup: find the odds API event ID for a given DB matchId
    */
   findEventIdForMatchId(matchId) {
+    const target = String(matchId);
+    for (const [eventId, mSet] of this.eventToMatchIds.entries()) {
+      if (mSet.has(target)) return eventId;
+    }
     for (const [eventId, mId] of this.eventToMatchId.entries()) {
-      if (String(mId) === String(matchId)) return eventId;
+      if (String(mId) === target) return eventId;
     }
     return null;
   }
@@ -1902,20 +2075,24 @@ class OddsApiLiveService {
       const liveMatches = await Match.find({ status: "live" });
       if (liveMatches.length === 0) return;
 
-      const linkedMatchIds = new Set(
-        Array.from(this.eventToMatchId.values()).map(String),
-      );
-      const unlinkedLive = liveMatches.filter(
-        (m) => !linkedMatchIds.has(String(m.matchId)),
-      );
+      // Ensure every live match with oddsApiEventId or matching unlinked live doc is linked immediately
+      const unlinkedLive = [];
+      for (const m of liveMatches) {
+        if (!this.isMatchIdLinked(m.matchId)) {
+          if (m.oddsApiEventId && this.eventMetadata.has(m.oddsApiEventId)) {
+            this.addEventMatchLink(m.oddsApiEventId, m.matchId, {
+              primary: String(m.matchId) === String(m.oddsApiEventId),
+            });
+          } else {
+            unlinkedLive.push(m);
+          }
+        }
+      }
 
-      // ✅ If live matches exist that are not yet linked, re-run bootstrap — but with
-      // a 5-minute cooldown to avoid hammering the API for matches it simply doesn't cover.
       if (unlinkedLive.length > 0) {
         if (!this.lastBootstrapAttempt) this.lastBootstrapAttempt = 0;
         const msSinceLastBootstrap = Date.now() - this.lastBootstrapAttempt;
         if (msSinceLastBootstrap > 2 * 60 * 1000) {
-          // 2 minutes — faster re-link for live matches with missing odds
           this.lastBootstrapAttempt = Date.now();
           console.log(
             `[OddsApiLive] 🔄 Found ${unlinkedLive.length} unlinked live match(es). Re-bootstrapping...`,
@@ -1924,18 +2101,32 @@ class OddsApiLiveService {
         }
       }
 
-      for (const [eventId, matchId] of this.eventToMatchId.entries()) {
-        const isLive = liveMatches.some(
-          (m) => String(m.matchId) === String(matchId),
-        );
-        if (!isLive) continue;
+      const liveMatchIdSet = new Set(liveMatches.map((m) => String(m.matchId)));
+      const eventIdsToPoll = new Set();
 
+      for (const [eventId, mSet] of this.eventToMatchIds.entries()) {
+        for (const mId of mSet) {
+          if (liveMatchIdSet.has(String(mId))) {
+            eventIdsToPoll.add(eventId);
+            break;
+          }
+        }
+      }
+      for (const [eventId, mId] of this.eventToMatchId.entries()) {
+        if (liveMatchIdSet.has(String(mId))) {
+          eventIdsToPoll.add(eventId);
+        }
+      }
+
+      for (const eventId of eventIdsToPoll) {
+        const linkedIds = this.getLinkedMatchIds(eventId);
         try {
           console.log(
-            `[OddsApiLive] 🔄 Polling REST live odds for event ${eventId} (match ${matchId})...`,
+            `[OddsApiLive] 🔄 Polling REST live odds for event ${eventId} (matches: ${linkedIds.join(', ')})...`,
           );
           const oddsData = await oddsApiRest.getFixtureOdds(
             eventId,
+            BOOKMAKERS,
           );
           if (oddsData) {
             console.log(
@@ -1961,16 +2152,31 @@ class OddsApiLiveService {
       const upcomingMatches = await Match.find({ status: "upcoming" });
       if (upcomingMatches.length === 0) return;
 
-      const upcomingMatchIds = new Set(upcomingMatches.map((m) => m.matchId));
-      for (const [eventId, matchId] of this.eventToMatchId.entries()) {
-        if (!upcomingMatchIds.has(matchId)) continue;
+      const upcomingMatchIds = new Set(upcomingMatches.map((m) => String(m.matchId)));
+      const eventIdsToPoll = new Set();
+      for (const [eventId, mSet] of this.eventToMatchIds.entries()) {
+        for (const mId of mSet) {
+          if (upcomingMatchIds.has(String(mId))) {
+            eventIdsToPoll.add(eventId);
+            break;
+          }
+        }
+      }
+      for (const [eventId, mId] of this.eventToMatchId.entries()) {
+        if (upcomingMatchIds.has(String(mId))) {
+          eventIdsToPoll.add(eventId);
+        }
+      }
 
+      for (const eventId of eventIdsToPoll) {
+        const linkedIds = this.getLinkedMatchIds(eventId);
         try {
           console.log(
-            `[OddsApiLive] 🔄 Polling REST upcoming odds for event ${eventId} (match ${matchId})...`,
+            `[OddsApiLive] 🔄 Polling REST upcoming odds for event ${eventId} (matches: ${linkedIds.join(', ')})...`,
           );
           const oddsData = await oddsApiRest.getFixtureOdds(
             eventId,
+            BOOKMAKERS,
           );
           if (oddsData) {
             console.log(
@@ -1990,7 +2196,7 @@ class OddsApiLiveService {
       }
 
       const unlinkedUpcoming = upcomingMatches.filter(
-        (m) => !Array.from(this.eventToMatchId.values()).includes(m.matchId),
+        (m) => !this.isMatchIdLinked(m.matchId),
       );
       if (unlinkedUpcoming.length > 0) {
         await this.bootstrapUpcomingFixtures();
@@ -2126,6 +2332,7 @@ class OddsApiLiveService {
             try {
               const oddsData = await oddsApiRest.getFixtureOdds(
                 fixture.fixtureId || fixture.id,
+                BOOKMAKERS,
               );
               if (oddsData) {
                 const dataArray = Array.isArray(oddsData)
@@ -2155,11 +2362,22 @@ class OddsApiLiveService {
 
     try {
       let targetEventId = null;
-      for (const [eventId, mId] of this.eventToMatchId.entries()) {
-        const mStr = String(mId).trim().toLowerCase();
-        if (mStr === cleanId.toLowerCase() || mStr === withPrefix.toLowerCase() || mStr === String(fixtureIdOrMatchId).toLowerCase()) {
-          targetEventId = eventId;
-          break;
+      const targetsToMatch = new Set([cleanId.toLowerCase(), withPrefix.toLowerCase(), String(fixtureIdOrMatchId).toLowerCase()]);
+      for (const [eventId, mSet] of this.eventToMatchIds.entries()) {
+        for (const mId of mSet) {
+          if (targetsToMatch.has(String(mId).trim().toLowerCase())) {
+            targetEventId = eventId;
+            break;
+          }
+        }
+        if (targetEventId) break;
+      }
+      if (!targetEventId) {
+        for (const [eventId, mId] of this.eventToMatchId.entries()) {
+          if (targetsToMatch.has(String(mId).trim().toLowerCase())) {
+            targetEventId = eventId;
+            break;
+          }
         }
       }
 
@@ -2207,7 +2425,9 @@ class OddsApiLiveService {
             if ((homeMatch && awayMatch) || (homeMatchSwap && awayMatchSwap)) {
               const fId = f.fixtureId || f.id;
               this.storeFixtureMetadata(f);
-              this.eventToMatchId.set(fId, matchDoc.matchId);
+              this.addEventMatchLink(fId, matchDoc.matchId, {
+                primary: String(matchDoc.matchId) === String(fId),
+              });
               targetEventId = fId;
               Match.updateOne({ _id: matchDoc._id }, { $set: { oddsApiEventId: fId } }).catch(() => {});
               console.log(`[OddsApiLive] 🔗 Dynamically linked ${matchDoc.teamA} v ${matchDoc.teamB} (${matchDoc.matchId}) to OddsPapi event ${fId}`);
@@ -2222,8 +2442,9 @@ class OddsApiLiveService {
       }
 
       console.log(`[OddsApiLive] ⚡ On-demand odds fetch requested for ${fixtureIdOrMatchId} (event ${targetEventId})...`);
-      const oddsData = await oddsApiRest.getFixtureOdds(targetEventId);
+      const oddsData = await oddsApiRest.getFixtureOdds(targetEventId, BOOKMAKERS);
       if (oddsData) {
+        this.addEventMatchLink(targetEventId, matchDoc?.matchId || fixtureIdOrMatchId);
         const dataArray = Array.isArray(oddsData) ? oddsData : [oddsData];
         for (const odd of dataArray) {
           await this.processOddsForEvent(odd);
@@ -2245,6 +2466,7 @@ class OddsApiLiveService {
     if (this.staleCheckInterval) clearInterval(this.staleCheckInterval);
     if (this.restPollInterval) clearInterval(this.restPollInterval);
     if (this.upcomingPollInterval) clearInterval(this.upcomingPollInterval);
+    if (this.wsHeartbeatInterval) clearInterval(this.wsHeartbeatInterval);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     // Clear all soft-delete grace timers
     for (const timer of this.deletedGraceTimers.values()) {
