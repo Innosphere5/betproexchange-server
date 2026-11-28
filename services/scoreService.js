@@ -112,16 +112,21 @@ const updateLiveScores = async (io) => {
         const liveDbMatchesForDirectFetch = await Match.find({
             status: 'live',
             matchId: { $nin: Array.from(globalLiveIds) }, // only ones missing from global list
-            sportmonksFixtureId: { $exists: false }       // and not covered by Sportmonks
-        }).select('matchId teamA teamB score lastUpdated').lean();
+            $or: [
+                { sportmonksFixtureId: null },
+                { sportmonksFixtureId: '' },
+                { sportmonksFixtureId: { $exists: false } }
+            ]
+        }).select('matchId oddsApiEventId teamA teamB score lastUpdated').lean();
 
         const extraFixtures = [];
         for (const dbM of liveDbMatchesForDirectFetch) {
             try {
+                const lookupFixtureId = dbM.oddsApiEventId || dbM.matchId;
                 // Direct OddsPapi fixture lookup by match ID
                 const directRes = await getData('fixtures', {
-                    params: { fixtureIds: dbM.matchId },
-                    cacheKeySuffix: `direct_${dbM.matchId}`
+                    params: { fixtureIds: lookupFixtureId },
+                    cacheKeySuffix: `direct_${lookupFixtureId}`
                 });
                 if (Array.isArray(directRes) && directRes.length > 0) {
                     const fixture = directRes[0];

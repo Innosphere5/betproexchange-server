@@ -216,6 +216,39 @@ test('🏏 Roanuz Descending Balls Fix: Sorts reverse-chronological API deliveri
   assert.equal(formatRoanuzBallBadge({ repr: 'b2', ball_type: 'bye', team_score: { runs: 2 } }), '2B');
   assert.equal(formatReprBadge('nb4'), '4Nb');
   assert.equal(formatReprBadge('lb2'), '2Lb');
+});
 
+test('🏏 Roanuz Sibling Alignment: getLiveScoreForMatch aligns swapped team order across reissued fixtures', async () => {
+  roanuzScoreService.memoryCache.set('id_orig_dv', {
+    matchId: 'id_orig_dv',
+    teamA: 'Desert Vipers',
+    teamB: 'Mi Emirates',
+    teamA_runs: '67/2',
+    teamB_runs: '186/4',
+    teamA_wickets: 2,
+    teamB_wickets: 4,
+    overs: '9.2',
+    battingTeam: 'teamA',
+    target: 187,
+  });
+
+  const reissued = {
+    matchId: 'id_reissue_mi',
+    teamA: 'Mi Emirates',
+    teamB: 'Desert Vipers',
+    roanuzMatchKey: null,
+    startTime: new Date(),
+  };
+
+  const resolved = await roanuzScoreService.getLiveScoreForMatch(reissued);
+  assert.ok(resolved);
+  assert.equal(resolved.teamA, 'Mi Emirates');
+  assert.equal(resolved.teamB, 'Desert Vipers');
+  assert.equal(resolved.teamA_runs, '186/4');
+  assert.equal(resolved.teamB_runs, '67/2');
+  assert.equal(resolved.battingTeam, 'teamB');
+  assert.equal(resolved.overs, '9.2');
+
+  roanuzScoreService.memoryCache.delete('id_orig_dv');
   setTimeout(() => process.exit(0), 100);
 });

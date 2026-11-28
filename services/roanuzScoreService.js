@@ -504,48 +504,70 @@ class RoanuzScoreService {
   }
 
   /**
-   * Find match in MongoDB by Roanuz key or fuzzy team matching
+   * Find ALL matching non-completed Match docs in MongoDB (handles reissued Oddspapi fixtures
+   * or swapped home/away team docs) and auto-links `roanuzMatchKey`.
    */
-  async findMatchInDb(roanuzMatch) {
+  async findMatchesInDb(roanuzMatch) {
     const key = roanuzMatch.key;
-    // 1. Match directly by roanuzMatchKey or matchId
-    let match = await Match.findOne({
+    const seenIds = new Set();
+    const matched = [];
+
+    const directMatches = await Match.find({
       $or: [
         { roanuzMatchKey: key },
         { matchId: key }
       ]
     });
-    if (match) return match;
-
-    // 2. Fuzzy match by team names against live & upcoming matches
-    const nameA = roanuzMatch.teams?.a?.name;
-    const nameB = roanuzMatch.teams?.b?.name;
-    if (!nameA || !nameB) return null;
-
-    const normA = normalizeTeamName(nameA);
-    const normB = normalizeTeamName(nameB);
-
-    const candidates = await Match.find({
-      status: { $in: ['live', 'upcoming'] }
-    }).lean();
-
-    for (const cand of candidates) {
-      const candA = normalizeTeamName(cand.teamA);
-      const candB = normalizeTeamName(cand.teamB);
-
-      const matchDirect = candA === normA && candB === normB;
-      const matchReversed = candA === normB && candB === normA;
-
-      if (matchDirect || matchReversed) {
-        // Link Roanuz key in DB
-        await Match.updateOne({ matchId: cand.matchId }, { $set: { roanuzMatchKey: key } }).catch(() => {});
-        cand.roanuzMatchKey = key;
-        console.log(`[Roanuz] 🔗 Linked ${cand.teamA} v ${cand.teamB} (DB matchId: ${cand.matchId}) → Roanuz ${key}`);
-        return cand;
+    for (const m of directMatches) {
+      if (!seenIds.has(m.matchId)) {
+        seenIds.add(m.matchId);
+        matched.push(m);
       }
     }
 
-    return null;
+    const nameA = roanuzMatch.teams?.a?.name;
+    const nameB = roanuzMatch.teams?.b?.name;
+    if (nameA && nameB) {
+      const normA = normalizeTeamName(nameA);
+      const normB = normalizeTeamName(nameB);
+      const roanuzStartMs = roanuzMatch.start_at ? Number(roanuzMatch.start_at) * 1000 : null;
+
+      const candidates = await Match.find({
+        status: { $in: ['live', 'upcoming'] }
+      }).lean();
+
+      for (const cand of candidates) {
+        if (seenIds.has(cand.matchId)) continue;
+        const candA = normalizeTeamName(cand.teamA);
+        const candB = normalizeTeamName(cand.teamB);
+
+        const matchDirect = candA === normA && candB === normB;
+        const matchReversed = candA === normB && candB === normA;
+        if (!matchDirect && !matchReversed) continue;
+
+        // Guard against linking a future match in a multi-game bilateral series (>30h away)
+        if (roanuzStartMs && cand.startTime) {
+          const diffHours = Math.abs(new Date(cand.startTime).getTime() - roanuzStartMs) / 3600000;
+          if (diffHours > 30) continue;
+        }
+
+        await Match.updateOne({ matchId: cand.matchId }, { $set: { roanuzMatchKey: key } }).catch(() => {});
+        cand.roanuzMatchKey = key;
+        seenIds.add(cand.matchId);
+        matched.push(cand);
+        console.log(`[Roanuz] 🔗 Linked ${cand.teamA} v ${cand.teamB} (DB matchId: ${cand.matchId}) → Roanuz ${key}`);
+      }
+    }
+
+    return matched;
+  }
+
+  /**
+   * Find first matching match in MongoDB by Roanuz key or fuzzy team matching
+   */
+  async findMatchInDb(roanuzMatch) {
+    const all = await this.findMatchesInDb(roanuzMatch);
+    return all[0] || null;
   }
 
   /**
@@ -666,9 +688,9 @@ class RoanuzScoreService {
           const matchData = matchDetail?.data;
           if (!matchData) continue;
 
-          // Find or create in DB
-          let matchInDb = await this.findMatchInDb(matchData);
-          if (!matchInDb) {
+          // Find all matching DB docs (handles reissued fixtures) or create if none
+          let targetMatches = await this.findMatchesInDb(matchData);
+          if (targetMatches.length === 0) {
             // Auto-create live match if not in DB so it's instantly bettable & visible
             const newMatchId = String(matchData.key);
             const teamA = matchData.teams?.a?.name || 'Team A';
@@ -678,7 +700,7 @@ class RoanuzScoreService {
             try {
               const roanuzFormat = String(matchData.format || '').toLowerCase();
               const autoFormat = (roanuzFormat === 'oneday' || roanuzFormat === 'odi') ? 'ODI' : (roanuzFormat === 'test' ? 'TEST' : 'T20');
-              matchInDb = await Match.create({
+              const created = await Match.create({
                 matchId: newMatchId,
                 roanuzMatchKey: matchData.key,
                 teamA,
@@ -691,12 +713,15 @@ class RoanuzScoreService {
                   format: autoFormat
                 }
               });
+              targetMatches = [created];
               console.log(`[Roanuz] 🆕 Auto-created live match in DB: ${teamA} v ${teamB} (${newMatchId})`);
             } catch (createErr) {
-              matchInDb = await Match.findOne({ matchId: newMatchId });
+              const existing = await Match.findOne({ matchId: newMatchId });
+              if (existing) targetMatches = [existing];
             }
           }
 
+          for (const matchInDb of targetMatches) {
           const parsed = parseRoanuzMatch(matchData, ballByBall, matchInDb);
           if (!parsed) continue;
 
@@ -716,6 +741,7 @@ class RoanuzScoreService {
           const dbPayload = {
             status: parsed.status,
             format: parsed.format,
+            roanuzMatchKey: matchData.key,
             score: {
               format: parsed.format,
               oversPerInnings: parsed.oversPerInnings,
@@ -808,6 +834,7 @@ class RoanuzScoreService {
               fancyMarketsService.handleLiveMatchOdds(matchDbId, this.io);
             } catch (fErr) {}
           }
+          }
         } catch (mErr) {
           console.warn(`[Roanuz] Error syncing match ${activeMatch.key}:`, mErr.message);
         }
@@ -898,6 +925,87 @@ class RoanuzScoreService {
     }
 
     return null;
+  }
+
+  /**
+   * Align a live score object from a sibling match doc (which may have teamA/teamB swapped)
+   * onto the requested match's teamA/teamB order.
+   */
+  alignScoreToMatchTeams(scoreObj, targetMatch) {
+    if (!scoreObj || !targetMatch?.teamA || !targetMatch?.teamB) return scoreObj;
+    const tA = normalizeTeamName(targetMatch.teamA);
+    const tB = normalizeTeamName(targetMatch.teamB);
+    const sA = normalizeTeamName(scoreObj.teamA);
+    const sB = normalizeTeamName(scoreObj.teamB);
+    if (!sA || !sB || (sA === tA && sB === tB)) return scoreObj;
+    if (sA !== tB || sB !== tA) return scoreObj;
+
+    return {
+      ...scoreObj,
+      teamA: targetMatch.teamA,
+      teamB: targetMatch.teamB,
+      teamA_runs: scoreObj.teamB_runs,
+      teamB_runs: scoreObj.teamA_runs,
+      teamA_wickets: scoreObj.teamB_wickets,
+      teamB_wickets: scoreObj.teamA_wickets,
+      battingTeam: scoreObj.battingTeam === 'teamA' ? 'teamB' : (scoreObj.battingTeam === 'teamB' ? 'teamA' : scoreObj.battingTeam),
+    };
+  }
+
+  /**
+   * Resolves the freshest live score for a match doc, falling back to any active
+   * sibling match in memoryCache or MongoDB sharing the same teams within 30h.
+   */
+  async getLiveScoreForMatch(match) {
+    if (!match) return null;
+    const hasProgress = (s) => Boolean(
+      s && ((s.overs && s.overs !== '0' && s.overs !== '0.0') ||
+      (parseInt(String(s.teamA_runs || '0').split('/')[0], 10) || 0) > 0 ||
+      (parseInt(String(s.teamB_runs || '0').split('/')[0], 10) || 0) > 0)
+    );
+
+    const direct = await this.getLiveScore(match.matchId) ||
+      (match.roanuzMatchKey ? await this.getLiveScore(match.roanuzMatchKey) : null);
+    if (hasProgress(direct)) return direct;
+
+    // Search memoryCache by team names
+    const tA = normalizeTeamName(match.teamA);
+    const tB = normalizeTeamName(match.teamB);
+    if (tA && tB) {
+      for (const cached of this.memoryCache.values()) {
+        const cA = normalizeTeamName(cached?.teamA);
+        const cB = normalizeTeamName(cached?.teamB);
+        if (hasProgress(cached) && ((cA === tA && cB === tB) || (cA === tB && cB === tA))) {
+          return this.alignScoreToMatchTeams(cached, match);
+        }
+      }
+
+      // Search MongoDB siblings with live Roanuz scores (within 30h window)
+      const siblings = await Match.find({
+        matchId: { $ne: match.matchId },
+        status: { $in: ['live', 'completed'] },
+      }).lean();
+      const targetStartMs = match.startTime ? new Date(match.startTime).getTime() : null;
+      for (const sib of siblings) {
+        const sA = normalizeTeamName(sib.teamA);
+        const sB = normalizeTeamName(sib.teamB);
+        if (!((sA === tA && sB === tB) || (sA === tB && sB === tA))) continue;
+        if (targetStartMs && sib.startTime) {
+          const diffH = Math.abs(new Date(sib.startTime).getTime() - targetStartMs) / 3600000;
+          if (diffH > 30) continue;
+        }
+        if (hasProgress(sib.score)) {
+          return this.alignScoreToMatchTeams({
+            matchId: match.matchId,
+            teamA: sib.teamA,
+            teamB: sib.teamB,
+            ...sib.score,
+          }, match);
+        }
+      }
+    }
+
+    return direct;
   }
 }
 

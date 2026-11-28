@@ -172,6 +172,12 @@ router.get('/:id', async (req, res) => {
                 }
                 if (hotScore) {
                     cached.score = { ...(cached.score || {}), ...hotScore };
+                } else {
+                    const { roanuzScoreService } = require('../services/roanuzScoreService');
+                    const sibScore = await roanuzScoreService.getLiveScoreForMatch(cached);
+                    if (sibScore) {
+                        cached.score = { ...(cached.score || {}), ...sibScore };
+                    }
                 }
             } catch (mergeErr) {}
 
@@ -257,14 +263,12 @@ router.get('/:id', async (req, res) => {
         let hotScore = null;
         try {
             const { roanuzScoreService } = require('../services/roanuzScoreService');
-            hotScore = await roanuzScoreService.getLiveScore(lookupId) ||
-              await roanuzScoreService.getLiveScore(altMatchId) ||
-              (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+            hotScore = await roanuzScoreService.getLiveScoreForMatch(match);
             if (hotScore) {
                 match.score = {
                     ...(match.score || {}),
                     ...hotScore,
-                    lastUpdated: new Date()
+                    lastUpdated: hotScore.lastUpdated || new Date()
                 };
                 if (hotScore.format && !match.format) match.format = hotScore.format;
             }

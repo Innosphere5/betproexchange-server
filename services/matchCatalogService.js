@@ -23,11 +23,17 @@ function deduplicateMatches(matches) {
       const existing = uniqueMap.get(key);
       const mHasOdds = mObj.backOddsA != null || mObj.backOddsB != null;
       const existingHasOdds = existing.backOddsA != null || existing.backOddsB != null;
+      const mHasScore = Boolean(mObj.roanuzMatchKey || (mObj.score?.overs && mObj.score.overs !== '0.0' && mObj.score.overs !== '0'));
+      const existingHasScore = Boolean(existing.roanuzMatchKey || (existing.score?.overs && existing.score.overs !== '0.0' && existing.score.overs !== '0'));
 
       if (mObj.status === 'live' && existing.status !== 'live') {
         uniqueMap.set(key, mObj);
       } else if (mObj.status === existing.status) {
-        if (mHasOdds && !existingHasOdds) {
+        if (mHasScore && !existingHasScore) {
+          uniqueMap.set(key, mObj);
+        } else if (!mHasScore && existingHasScore) {
+          // keep existing with verified live score / Roanuz link
+        } else if (mHasOdds && !existingHasOdds) {
           uniqueMap.set(key, mObj);
         } else if (!mHasOdds && existingHasOdds) {
           // keep existing with odds
@@ -46,8 +52,7 @@ function deduplicateMatches(matches) {
 async function attachHotScore(match) {
   try {
     const { roanuzScoreService } = require('./roanuzScoreService');
-    const hotScore = await roanuzScoreService.getLiveScore(match.matchId) ||
-      (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+    const hotScore = await roanuzScoreService.getLiveScoreForMatch(match);
     if (hotScore) {
       return {
         ...match,

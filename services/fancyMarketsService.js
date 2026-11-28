@@ -650,13 +650,12 @@ class FancyMarketsService {
     // Merge authoritative in-memory / Redis live score from Roanuz
     try {
       const { roanuzScoreService } = require('./roanuzScoreService');
-      const hotScore = await roanuzScoreService.getLiveScore(match.matchId) ||
-        (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+      const hotScore = await roanuzScoreService.getLiveScoreForMatch(match);
       if (hotScore) {
         match.score = {
           ...(match.score || {}),
           ...hotScore,
-          lastUpdated: new Date()
+          lastUpdated: hotScore.lastUpdated || new Date()
         };
         if (hotScore.format && !match.format) match.format = hotScore.format;
       }
@@ -885,14 +884,12 @@ class FancyMarketsService {
       // Merge latest hot score from Roanuz (0ms latency)
       try {
         const { roanuzScoreService } = require('./roanuzScoreService');
-        const hotScore = await roanuzScoreService.getLiveScore(match.matchId) ||
-          await roanuzScoreService.getLiveScore(altMatchId) ||
-          (match.roanuzMatchKey ? await roanuzScoreService.getLiveScore(match.roanuzMatchKey) : null);
+        const hotScore = await roanuzScoreService.getLiveScoreForMatch(match);
         if (hotScore) {
           match.score = {
             ...(match.score || {}),
             ...hotScore,
-            lastUpdated: new Date()
+            lastUpdated: hotScore.lastUpdated || new Date()
           };
           if (hotScore.format && !match.format) match.format = hotScore.format;
         }
