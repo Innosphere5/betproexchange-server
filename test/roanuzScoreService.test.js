@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { parseRoanuzMatch, formatRoanuzBallBadge, formatReprBadge } = require('../services/roanuzScoreService');
+const { roanuzScoreService, parseRoanuzMatch, formatRoanuzBallBadge, formatReprBadge } = require('../services/roanuzScoreService');
 const roanuzClient = require('../services/roanuzClient');
 
 test('🏏 Roanuz API Client: Authentication and Token Caching', async () => {

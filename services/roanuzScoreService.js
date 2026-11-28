@@ -900,28 +900,30 @@ class RoanuzScoreService {
       return cached;
     }
 
-    // 3. Fallback to MongoDB
-    const match = await Match.findOne({
-      $or: [
-        { matchId: cleanId },
-        { matchId: altId },
-        { roanuzMatchKey: cleanId },
-        { roanuzMatchKey: altId }
-      ]
-    }).lean();
+    // 3. Fallback to MongoDB (only when connected)
+    if (Match.db?.readyState === 1) {
+      const match = await Match.findOne({
+        $or: [
+          { matchId: cleanId },
+          { matchId: altId },
+          { roanuzMatchKey: cleanId },
+          { roanuzMatchKey: altId }
+        ]
+      }).lean();
 
-    if (match && match.score) {
-      const scoreObj = {
-        matchId: match.matchId,
-        teamA: match.teamA,
-        teamB: match.teamB,
-        league: match.league,
-        status: match.status,
-        ...match.score
-      };
-      this.memoryCache.set(cleanId, scoreObj);
-      this.memoryCache.set(altId, scoreObj);
-      return scoreObj;
+      if (match && match.score) {
+        const scoreObj = {
+          matchId: match.matchId,
+          teamA: match.teamA,
+          teamB: match.teamB,
+          league: match.league,
+          status: match.status,
+          ...match.score
+        };
+        this.memoryCache.set(cleanId, scoreObj);
+        this.memoryCache.set(altId, scoreObj);
+        return scoreObj;
+      }
     }
 
     return null;
@@ -981,26 +983,28 @@ class RoanuzScoreService {
       }
 
       // Search MongoDB siblings with live Roanuz scores (within 30h window)
-      const siblings = await Match.find({
-        matchId: { $ne: match.matchId },
-        status: { $in: ['live', 'completed'] },
-      }).lean();
-      const targetStartMs = match.startTime ? new Date(match.startTime).getTime() : null;
-      for (const sib of siblings) {
-        const sA = normalizeTeamName(sib.teamA);
-        const sB = normalizeTeamName(sib.teamB);
-        if (!((sA === tA && sB === tB) || (sA === tB && sB === tA))) continue;
-        if (targetStartMs && sib.startTime) {
-          const diffH = Math.abs(new Date(sib.startTime).getTime() - targetStartMs) / 3600000;
-          if (diffH > 30) continue;
-        }
-        if (hasProgress(sib.score)) {
-          return this.alignScoreToMatchTeams({
-            matchId: match.matchId,
-            teamA: sib.teamA,
-            teamB: sib.teamB,
-            ...sib.score,
-          }, match);
+      if (Match.db?.readyState === 1) {
+        const siblings = await Match.find({
+          matchId: { $ne: match.matchId },
+          status: { $in: ['live', 'completed'] },
+        }).lean();
+        const targetStartMs = match.startTime ? new Date(match.startTime).getTime() : null;
+        for (const sib of siblings) {
+          const sA = normalizeTeamName(sib.teamA);
+          const sB = normalizeTeamName(sib.teamB);
+          if (!((sA === tA && sB === tB) || (sA === tB && sB === tA))) continue;
+          if (targetStartMs && sib.startTime) {
+            const diffH = Math.abs(new Date(sib.startTime).getTime() - targetStartMs) / 3600000;
+            if (diffH > 30) continue;
+          }
+          if (hasProgress(sib.score)) {
+            return this.alignScoreToMatchTeams({
+              matchId: match.matchId,
+              teamA: sib.teamA,
+              teamB: sib.teamB,
+              ...sib.score,
+            }, match);
+          }
         }
       }
     }
