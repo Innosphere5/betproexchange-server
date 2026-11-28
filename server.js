@@ -537,7 +537,23 @@ function getValidMarketOddsList(matchInDb, runner, betType, marketType) {
     return [8.85];
   }
 
-  // 4. Fancy Market
+  // 4. Betfair Fancy Market (line market: backOdds/layOdds contain active run lines)
+  if (mType === 'betfair_fancy') {
+    if (Array.isArray(matchInDb.betfairFancyMarkets)) {
+      const item = matchInDb.betfairFancyMarkets.find(
+        f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner)
+      );
+      if (item) {
+        const list = type === 'lay' ? (item.layOdds || []) : (item.backOdds || []);
+        const prices = list.map(o => Number(o.price)).filter(p => !isNaN(p) && p > 0);
+        if (prices.length > 0) return prices;
+        if (item.line != null && !isNaN(Number(item.line))) return [Number(item.line)];
+      }
+    }
+    return [];
+  }
+
+  // 4b. Fancy Market
   if (mType === 'fancy') {
     if (Array.isArray(matchInDb.fancyMarkets)) {
       const item = matchInDb.fancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
@@ -611,6 +627,14 @@ function isMarketSuspended(matchInDb, runner, marketType) {
     }
   }
 
+  if (mType === 'betfair_fancy') {
+    const list = Array.isArray(matchInDb.betfairFancyMarkets) ? matchInDb.betfairFancyMarkets : [];
+    const item = list.find(
+      f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner)
+    );
+    if (!item || item.status === 'SUSPENDED') return true;
+  }
+
   if (mType === 'fancy' && Array.isArray(matchInDb.fancyMarkets)) {
     const item = matchInDb.fancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
     if (item && item.status === 'SUSPENDED') return true;
@@ -649,7 +673,8 @@ app.post('/api/user/bet', auth, async (req, res) => {
     }
 
     const numOdds = parseFloat(odds);
-    if (!numOdds || isNaN(numOdds) || numOdds <= 1) {
+    const isLineMarket = marketType === 'betfair_fancy';
+    if (isNaN(numOdds) || (isLineMarket ? numOdds <= 0 : numOdds <= 1)) {
       return res.status(400).json({ error: 'Bet not placed to this market' });
     }
 
@@ -706,8 +731,10 @@ app.post('/api/user/bet', auth, async (req, res) => {
       ? `${matchInDb.teamA} v ${matchInDb.teamB}` 
       : (req.body.matchName || 'Cricket Match');
 
-    // Calculate potential profit for profit limit validation
-    const potentialProfit = (betType === 'back') ? Math.round(stake * (numOdds - 1)) : stake;
+    // Calculate potential profit and liability accurately (Betfair Fancy lines use 1:1 even money instead of decimal multiplier)
+    const potentialProfit = isLineMarket
+      ? Math.round(stake)
+      : (betType === 'back' ? Math.round(stake * (numOdds - 1)) : stake);
 
     // Resolve accurate category based on marketType and match sportKey
     let betCategory = marketType || 'cricket';
@@ -723,7 +750,9 @@ app.post('/api/user/bet', auth, async (req, res) => {
     // Validate hierarchical max bet sizes and profit limits for cricket & sports markets
     await validateBetLimit(req.user.userId, betCategory, stake, potentialProfit);
 
-    const liability = (betType === 'lay' && numOdds > 1) ? Math.round(stake * (numOdds - 1)) : stake;
+    const liability = isLineMarket
+      ? Math.round(stake)
+      : ((betType === 'lay' && numOdds > 1) ? Math.round(stake * (numOdds - 1)) : stake);
 
     const user = await User.findOneAndUpdate(
       { username: req.user.userId, walletBalance: { $gte: liability } },

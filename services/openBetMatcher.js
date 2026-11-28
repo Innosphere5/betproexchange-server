@@ -59,7 +59,17 @@ function getActiveMarketOdds(matchInDb, runner, betType, marketType) {
     return 8.85;
   }
 
-  // 4. Fancy
+  // 4. Fancy & Betfair Fancy
+  if (mType === 'betfair_fancy' && Array.isArray(matchInDb.betfairFancyMarkets)) {
+    const item = matchInDb.betfairFancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
+    if (item) {
+      const oddsList = type === 'lay' ? (item.layOdds || []) : (item.backOdds || []);
+      const best = oddsList?.[0]?.price ?? item.line;
+      return best != null ? Number(best) : null;
+    }
+    return null;
+  }
+
   if (mType === 'fancy' && Array.isArray(matchInDb.fancyMarkets)) {
     const item = matchInDb.fancyMarkets.find(f => normRunner.includes(String(f.name).toLowerCase()) || String(f.name).toLowerCase().includes(normRunner));
     if (item) {

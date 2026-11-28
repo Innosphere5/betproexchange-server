@@ -1,4 +1,8 @@
 const Match = require('../models/Match');
+const {
+  resolveBetfairFancyMeta,
+  formatLiquidityVolume,
+} = require('./oddspapiCricketCatalog');
 
 // Dynamic / resilient loader for pricingEngine to support both CommonJS and ES Module environments (e.g. Vercel Lambda Node 18/20/22/24)
 let pricingEngine = null;
@@ -451,6 +455,192 @@ class FancyMarketsService {
   }
 
   /**
+   * Extract REAL Betfair Fancy (Over Line / Innings Runs Line) markets from Oddspapi quotes
+   * ONLY when available in live/market feeds (prefers `betfair-ex`).
+   * Never synthesizes fake Betfair Fancy rows when none exist in market feeds.
+   */
+  extractBetfairFancyMarkets(normalizedOdds, match = {}) {
+    if (!normalizedOdds || typeof normalizedOdds !== 'object') return [];
+
+    const bkEntries = Object.entries(normalizedOdds).filter(
+      ([, v]) => v && (Array.isArray(v) ? v.length > 0 : Object.keys(v).length > 0)
+    );
+    if (bkEntries.length === 0) return [];
+
+    // Prefer Betfair Exchange first, fallback to other available Oddspapi feeds
+    bkEntries.sort(([a], [b]) => {
+      const la = a.toLowerCase();
+      const lb = b.toLowerCase();
+      const exA = la.includes('betfair') || la.includes('ex') ? 1 : 0;
+      const exB = lb.includes('betfair') || lb.includes('ex') ? 1 : 0;
+      return exB - exA;
+    });
+
+    const groupedByKey = new Map();
+    let chosenBookie = 'betfair-ex';
+
+    for (const [bkKey, rawOutcomes] of bkEntries) {
+      const quotes = Array.isArray(rawOutcomes)
+        ? rawOutcomes
+        : Object.values(rawOutcomes);
+
+      let foundInBookie = false;
+      for (const q of quotes) {
+        if (!q || typeof q !== 'object') continue;
+        const meta = resolveBetfairFancyMeta(q, match);
+        if (!meta) continue;
+
+        foundInBookie = true;
+        if (!groupedByKey.has(meta.key)) {
+          groupedByKey.set(meta.key, { meta, quotes: [], bookie: bkKey });
+        }
+        groupedByKey.get(meta.key).quotes.push(q);
+      }
+
+      if (foundInBookie) {
+        chosenBookie = bkKey;
+        break;
+      }
+    }
+
+    if (groupedByKey.size === 0) return [];
+
+    const results = [];
+    for (const { meta, quotes, bookie } of groupedByKey.values()) {
+      const activeQuotes = quotes.filter(
+        (q) => q && q.active !== false && q.marketActive !== false
+      );
+      const sourceQuotes = activeQuotes.length > 0 ? activeQuotes : quotes;
+      const hasAnyActive = activeQuotes.length > 0;
+
+      // Case A: Quotes carry explicit handicap lines (Oddspapi Over/Under totals pairs)
+      const withHandicap = sourceQuotes.filter(
+        (q) => q.handicap !== undefined && q.handicap !== null && !isNaN(Number(q.handicap)) && Number(q.handicap) > 0
+      );
+
+      let backOdds = [];
+      let layOdds = [];
+      let centerLine = null;
+
+      if (withHandicap.length > 0) {
+        // Group Over / Under quotes by numeric handicap
+        const byLine = new Map();
+        for (const q of withHandicap) {
+          const h = Number(q.handicap);
+          if (!byLine.has(h)) byLine.set(h, { over: null, under: null, all: [] });
+          const entry = byLine.get(h);
+          entry.all.push(q);
+          const on = String(q.outcomeName || q.name || '').trim().toLowerCase();
+          const oIdNum = Number(q.outcomeId);
+          const mIdNum = Number(q.marketId);
+          // On Oddspapi totals: Over has outcomeId === marketId (even pair start), Under has outcomeId === marketId + 1
+          const isOver = on.includes('over') || on.includes('yes') || (Number.isFinite(oIdNum) && Number.isFinite(mIdNum) && oIdNum === mIdNum);
+          const isUnder = on.includes('under') || on.includes('no') || (Number.isFinite(oIdNum) && Number.isFinite(mIdNum) && oIdNum === mIdNum + 1);
+          if (isOver) entry.over = q;
+          else if (isUnder) entry.under = q;
+        }
+
+        const lines = Array.from(byLine.keys()).sort((a, b) => a - b);
+        // Find most balanced center line (price closest to 1.90..2.00)
+        let bestIdx = Math.floor(lines.length / 2);
+        let bestScore = Infinity;
+        for (let i = 0; i < lines.length; i++) {
+          const pair = byLine.get(lines[i]);
+          const pOver = Number(pair.over?.price || pair.all[0]?.price || 2);
+          const pUnder = Number(pair.under?.price || pOver);
+          const score = Math.abs(pOver - pUnder) + Math.abs(pOver - 1.95);
+          if (score < bestScore) {
+            bestScore = score;
+            bestIdx = i;
+          }
+        }
+
+        const centerH = lines[bestIdx];
+        centerLine = centerH;
+
+        const getQuoteVol = (q) => {
+          if (!q) return '100';
+          const sz = q.meta?.availableToBack?.[0]?.size ?? q.meta?.availableToLay?.[0]?.size ?? q.limit;
+          return formatLiquidityVolume(sz, '100');
+        };
+
+        // Populate up to 3 Back (YES / >= Over lines, ascending away from center) & 3 Lay (NO / <= Under lines, descending)
+        const backCandidates = lines.slice(bestIdx, bestIdx + 3).map((h) => {
+          const pair = byLine.get(h);
+          const q = pair.over || pair.all[0];
+          const runLine = Number.isInteger(h) ? h : Math.ceil(h);
+          return { price: runLine, volume: getQuoteVol(q) };
+        });
+
+        const layCandidates = lines
+          .slice(Math.max(0, bestIdx - 2), bestIdx + 1)
+          .reverse()
+          .map((h) => {
+            const pair = byLine.get(h);
+            const q = pair.under || pair.all[0];
+            const runLine = Number.isInteger(h) ? h : Math.floor(h);
+            return { price: runLine, volume: getQuoteVol(q) };
+          });
+
+        backOdds = backCandidates.slice(0, 3);
+        layOdds = layCandidates.slice(0, 3);
+      } else {
+        // Case B: Direct Betfair Exchange LINE quote with `meta.availableToBack` / `meta.availableToLay`
+        const primary = sourceQuotes[0];
+        const rawBack = Array.isArray(primary?.meta?.availableToBack) ? primary.meta.availableToBack : [];
+        const rawLay = Array.isArray(primary?.meta?.availableToLay) ? primary.meta.availableToLay : [];
+
+        backOdds = rawBack
+          .filter((b) => b && Number(b.price) >= 1)
+          .slice(0, 3)
+          .map((b) => ({
+            price: Number(b.price),
+            volume: formatLiquidityVolume(b.size, '100'),
+          }));
+
+        layOdds = rawLay
+          .filter((l) => l && Number(l.price) >= 1)
+          .slice(0, 3)
+          .map((l) => ({
+            price: Number(l.price),
+            volume: formatLiquidityVolume(l.size, '100'),
+          }));
+
+        if (backOdds.length === 0 && Number(primary?.line) > 0) {
+          backOdds = [{ price: Number(primary.line), volume: formatLiquidityVolume(primary.limit, '100') }];
+        } else if (backOdds.length === 0 && Number(primary?.price) >= 4) {
+          backOdds = [{ price: Number(primary.price), volume: formatLiquidityVolume(primary.limit, '100') }];
+        }
+
+        centerLine = backOdds[0]?.price ?? layOdds[0]?.price ?? null;
+      }
+
+      if (backOdds.length > 0 || layOdds.length > 0) {
+        results.push({
+          marketId: String(sourceQuotes[0]?.bookmakerMarketId || sourceQuotes[0]?.marketId || meta.key),
+          name: meta.name,
+          innings: meta.innings,
+          overN: meta.overN,
+          line: centerLine,
+          backOdds,
+          layOdds,
+          status: hasAnyActive ? 'OPEN' : 'SUSPENDED',
+          maxBet: 2000000,
+          sourceBookmaker: bookie || chosenBookie,
+        });
+      }
+    }
+
+    results.sort((a, b) => {
+      if ((a.innings || 0) !== (b.innings || 0)) return (a.innings || 0) - (b.innings || 0);
+      if ((a.overN || 999) !== (b.overN || 999)) return (a.overN || 999) - (b.overN || 999);
+      return a.name.localeCompare(b.name);
+    });
+
+    return results;
+  }
+
+  /**
    * Ensure a single match document has all required markets (Match Odds, Bookmaker, Toss, Scorecard, Figure, Fancy, Even-Odd).
    * For live matches, live calibrated quotes are calculated.
    */
@@ -719,6 +909,8 @@ class FancyMarketsService {
       const computed = this.getCalibratedOdds(match);
 
       // 3. Assemble markets
+      const betfairFancyMarkets = this.extractBetfairFancyMarkets(normalizedOdds, match);
+
       const fancyMarkets = (computed?.fancyMarkets?.length > 0)
         ? computed.fancyMarkets
         : this.extractFancyMarkets(normalizedOdds, match, computed);
@@ -733,6 +925,9 @@ class FancyMarketsService {
 
       // Update match document in cache/memory
       match.tiedMatchMarket = tiedMatchMarket;
+      if (betfairFancyMarkets.length > 0 || (match.betfairFancyMarkets && match.betfairFancyMarkets.length > 0 && normalizedOdds)) {
+        match.betfairFancyMarkets = betfairFancyMarkets;
+      }
       match.evenOddMarkets = evenOddMarkets;
       match.fancyMarkets = fancyMarkets;
       match.figureMarkets = figureMarkets;
@@ -742,15 +937,19 @@ class FancyMarketsService {
       if (now - lastDbUpdate >= 2000) {
         this.lastDbUpdateTime.set(matchId, now);
         this.lastDbUpdateTime.set(altMatchId, now);
+        const dbSet = {
+          tiedMatchMarket,
+          evenOddMarkets,
+          fancyMarkets,
+          figureMarkets,
+        };
+        if (betfairFancyMarkets.length > 0 || (normalizedOdds && match.betfairFancyMarkets !== undefined)) {
+          dbSet.betfairFancyMarkets = match.betfairFancyMarkets || [];
+        }
         Match.updateOne(
           { $or: [{ matchId: match.matchId }, { matchId: altMatchId }, { roanuzMatchKey: match.roanuzMatchKey || match.matchId }] },
           {
-            $set: {
-              tiedMatchMarket,
-              evenOddMarkets,
-              fancyMarkets,
-              figureMarkets
-            }
+            $set: dbSet
           }
         ).catch(e => console.warn(`[FancyMarketsService] DB update warning for ${matchId}:`, e.message));
       }
@@ -790,6 +989,7 @@ class FancyMarketsService {
 
         for (const tId of emitTargets) {
           targetIo.emit('tied_match_market_update', { matchId: tId, tiedMatchMarket });
+          targetIo.emit('betfair_fancy_market_update', { matchId: tId, betfairFancyMarkets: match.betfairFancyMarkets || [] });
           targetIo.emit('even_odd_market_update', { matchId: tId, evenOddMarkets: match.evenOddMarkets });
           targetIo.emit('fancy_market_update', { matchId: tId, fancyMarkets: match.fancyMarkets });
           targetIo.emit('figure_market_update', { matchId: tId, figureMarkets: match.figureMarkets });

@@ -14,6 +14,10 @@ const {
   isTopFranchiseLeague,
   isVirtualOrSimulated,
 } = require("./fixtureFilter");
+const {
+  selectAccurateMatchOddsMarket,
+  extractRunnerDepthFromQuote,
+} = require("./oddspapiCricketCatalog");
 
 /**
  * Extracts Match Odds (h2h / winner) from oddspapi odds response.
@@ -59,23 +63,12 @@ function extractMatchOdds(oddsResponse, fixtureHint = null) {
     byMarket[mId].push(q);
   }
 
-  // Find Match Odds market (market with 2 or 3 outcomes, prioritizing mainLine)
-  let winnerMarket = null;
-  for (const [mId, grp] of Object.entries(byMarket)) {
-    if ((grp.length === 2 || grp.length === 3) && grp.some((q) => q.mainLine === true)) {
-      winnerMarket = grp;
-      break;
-    }
-  }
+  const isTest = isTestMatchFormat(fixtureHint || oddsResponse);
 
-  if (!winnerMarket) {
-    for (const [mId, grp] of Object.entries(byMarket)) {
-      if (grp.length === 2 || grp.length === 3) {
-        winnerMarket = grp;
-        break;
-      }
-    }
-  }
+  // Select accurate Match Odds market:
+  // - Non-Test (T10/T20/ODI): prioritize market 271 (Winner) over 273 (1X2)
+  // - Test: prioritize market 273 (1X2 incl. Draw)
+  let winnerMarket = selectAccurateMatchOddsMarket(byMarket, isTest);
 
   if (!winnerMarket || winnerMarket.length < 2) return null;
 
@@ -103,89 +96,25 @@ function extractMatchOdds(oddsResponse, fixtureHint = null) {
 
   if (!homeQ || !awayQ) return null;
 
-  let backOddsA = null,
-    layOddsA = null,
-    depthBackA = "0",
-    depthLayA = "0";
-  let backOddsB = null,
-    layOddsB = null,
-    depthBackB = "0",
-    depthLayB = "0";
-  let backOddsDraw = null,
-    layOddsDraw = null,
-    depthBackDraw = "0",
-    depthLayDraw = "0";
+  const homeDepth = extractRunnerDepthFromQuote(homeQ, isExchange, isExchange ? "0" : "500");
+  const awayDepth = extractRunnerDepthFromQuote(awayQ, isExchange, isExchange ? "0" : "500");
+  const drawDepth = drawQ ? extractRunnerDepthFromQuote(drawQ, isExchange, isExchange ? "0" : "500") : null;
 
-  if (isExchange) {
-    if (homeQ.meta) {
-      backOddsA = homeQ.meta.availableToBack?.[0]?.price || homeQ.price || null;
-      depthBackA = homeQ.meta.availableToBack?.[0]?.size
-        ? Math.round(homeQ.meta.availableToBack[0].size).toString()
-        : "0";
-      layOddsA =
-        homeQ.meta.availableToLay?.[0]?.price ||
-        (backOddsA ? Number((backOddsA + 0.02).toFixed(2)) : null);
-      depthLayA = homeQ.meta.availableToLay?.[0]?.size
-        ? Math.round(homeQ.meta.availableToLay[0].size).toString()
-        : "0";
-    } else {
-      backOddsA = homeQ.price;
-      layOddsA = Number((homeQ.price + 0.01).toFixed(2));
-    }
+  const backOddsA = homeDepth.back || null;
+  const layOddsA = homeDepth.lay || null;
+  const depthBackA = homeDepth.backVol;
+  const depthLayA = homeDepth.layVol;
 
-    if (awayQ.meta) {
-      backOddsB = awayQ.meta.availableToBack?.[0]?.price || awayQ.price || null;
-      depthBackB = awayQ.meta.availableToBack?.[0]?.size
-        ? Math.round(awayQ.meta.availableToBack[0].size).toString()
-        : "0";
-      layOddsB =
-        awayQ.meta.availableToLay?.[0]?.price ||
-        (backOddsB ? Number((backOddsB + 0.02).toFixed(2)) : null);
-      depthLayB = awayQ.meta.availableToLay?.[0]?.size
-        ? Math.round(awayQ.meta.availableToLay[0].size).toString()
-        : "0";
-    } else {
-      backOddsB = awayQ.price;
-      layOddsB = Number((awayQ.price + 0.01).toFixed(2));
-    }
+  const backOddsB = awayDepth.back || null;
+  const layOddsB = awayDepth.lay || null;
+  const depthBackB = awayDepth.backVol;
+  const depthLayB = awayDepth.layVol;
 
-    if (drawQ) {
-      if (drawQ.meta) {
-        backOddsDraw = drawQ.meta.availableToBack?.[0]?.price || drawQ.price || null;
-        depthBackDraw = drawQ.meta.availableToBack?.[0]?.size
-          ? Math.round(drawQ.meta.availableToBack[0].size).toString()
-          : "0";
-        layOddsDraw =
-          drawQ.meta.availableToLay?.[0]?.price ||
-          (backOddsDraw ? Number((backOddsDraw + 0.02).toFixed(2)) : null);
-        depthLayDraw = drawQ.meta.availableToLay?.[0]?.size
-          ? Math.round(drawQ.meta.availableToLay[0].size).toString()
-          : "0";
-      } else {
-        backOddsDraw = drawQ.price;
-        layOddsDraw = Number((drawQ.price + 0.01).toFixed(2));
-      }
-    }
-  } else {
-    backOddsA = homeQ.price;
-    layOddsA = Number((homeQ.price + 0.01).toFixed(2));
-    depthBackA = homeQ.limit ? Math.round(homeQ.limit).toString() : "500";
-    depthLayA = "500";
+  let backOddsDraw = drawDepth ? (drawDepth.back || null) : null;
+  let layOddsDraw = drawDepth ? (drawDepth.lay || null) : null;
+  let depthBackDraw = drawDepth ? drawDepth.backVol : "0";
+  let depthLayDraw = drawDepth ? drawDepth.layVol : "0";
 
-    backOddsB = awayQ.price;
-    layOddsB = Number((awayQ.price + 0.01).toFixed(2));
-    depthBackB = awayQ.limit ? Math.round(awayQ.limit).toString() : "500";
-    depthLayB = "500";
-
-    if (drawQ) {
-      backOddsDraw = drawQ.price;
-      layOddsDraw = Number((drawQ.price + 0.01).toFixed(2));
-      depthBackDraw = drawQ.limit ? Math.round(drawQ.limit).toString() : "500";
-      depthLayDraw = "500";
-    }
-  }
-
-  const isTest = isTestMatchFormat(fixtureHint || oddsResponse);
   if (!isTest) {
     // Only Test / First-Class matches display The Draw; T10 / T20 / ODI use Tied Match in footer
     backOddsDraw = null;
@@ -216,6 +145,14 @@ function extractMatchOdds(oddsResponse, fixtureHint = null) {
     layOddsDraw,
     depthBackDraw,
     depthLayDraw,
+    matchOddsDepth: {
+      teamABack: homeDepth.backOdds,
+      teamALay: homeDepth.layOdds,
+      teamBBack: awayDepth.backOdds,
+      teamBLay: awayDepth.layOdds,
+      drawBack: isTest ? (drawDepth?.backOdds || (backOddsDraw ? [{ price: backOddsDraw, volume: depthBackDraw }] : [])) : [],
+      drawLay: isTest ? (drawDepth?.layOdds || (layOddsDraw ? [{ price: layOddsDraw, volume: depthLayDraw }] : [])) : [],
+    },
     isTestMatch: isTest,
   };
 }

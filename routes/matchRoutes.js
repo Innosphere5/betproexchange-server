@@ -144,6 +144,9 @@ router.get('/:id', async (req, res) => {
                         cached.layOddsA = hotOdds.runners[0]?.lay ?? cached.layOddsA;
                         cached.backOddsB = hotOdds.runners[1]?.back ?? cached.backOddsB;
                         cached.layOddsB = hotOdds.runners[1]?.lay ?? cached.layOddsB;
+                        if (hotOdds.matchOddsDepth) {
+                            cached.matchOddsDepth = hotOdds.matchOddsDepth;
+                        }
                         if (isTestCached && hotOdds.runners[2]) {
                             cached.backOddsDraw = hotOdds.runners[2]?.back ?? cached.backOddsDraw;
                             cached.layOddsDraw = hotOdds.runners[2]?.lay ?? cached.layOddsDraw;

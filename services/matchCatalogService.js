@@ -7,7 +7,7 @@ const { shouldIncludeFixture, getCricketPriority, getMatchScheduleWindow } = req
  * `evenOddMarkets`, `tiedMatchMarket`, `score.batsmen`) for catalog endpoints.
  * Shrinks `/api/matches` payload ~10x (from ~200 KB to ~20 KB) for instant UI load.
  */
-const SLIM_CATALOG_PROJECTION = '-fancyMarkets -figureMarkets -evenOddMarkets -tiedMatchMarket -oddsData -score.batsmen';
+const SLIM_CATALOG_PROJECTION = '-fancyMarkets -betfairFancyMarkets -figureMarkets -evenOddMarkets -tiedMatchMarket -matchOddsDepth -oddsData -score.batsmen';
 
 /** Deduplicate matches by normalized teams + date, always keeping `live` and priced entries. */
 function deduplicateMatches(matches) {

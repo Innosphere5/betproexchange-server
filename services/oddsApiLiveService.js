@@ -5,6 +5,12 @@ const OddsMarket = require("../models/OddsMarket");
 const oddsApiRest = require("./oddsApiRest");
 const { shouldIncludeFixture, isTestMatchFormat } = require("./fixtureFilter");
 const fancyMarketsService = require("./fancyMarketsService");
+const {
+  selectAccurateMatchOddsMarket,
+  extractRunnerDepthFromQuote,
+  formatLiquidityVolume,
+  resolveBetfairFancyMeta,
+} = require("./oddspapiCricketCatalog");
 require("dotenv").config();
 
 // ─── Configuration ─────────────────────────────────────────────────────────────
@@ -786,6 +792,19 @@ class OddsApiLiveService {
       return 0;
     });
 
+    let homeLadderBack = [],
+      homeLadderLay = [],
+      awayLadderBack = [],
+      awayLadderLay = [],
+      drawLadderBack = [],
+      drawLadderLay = [];
+
+    const isTestMatchEarly = isTestMatchFormat({
+      league: metadata?.league || this.eventMetadata.get(eventId)?.league,
+      teamA: metadata?.home,
+      teamB: metadata?.away,
+    });
+
     for (const bookieKey of allowedKeys) {
       const outcomes = normalizedOdds[bookieKey];
       const isExchange =
@@ -822,43 +841,10 @@ class OddsApiLiveService {
           byMarket[mid].push(q);
         }
 
-        // PRIORITY 1: 1X2 Market 273 (Home / Draw / Away) takes highest priority for 3-way cricket (Test matches)
-        let winnerMarket = null;
-        if (byMarket["273"] && byMarket["273"].length >= 2) {
-          winnerMarket = byMarket["273"];
-        } else {
-          // Check for any market with 3 outcomes or outcomeId 274 (Draw)
-          for (const [mId, grp] of Object.entries(byMarket)) {
-            if (grp.length === 3 || grp.some(q => q.outcomeId === 274 || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'the draw' || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'draw')) {
-              winnerMarket = grp;
-              break;
-            }
-          }
-        }
-        // PRIORITY 2: Market 271 or any 2-way market with mainLine
-        if (!winnerMarket) {
-          if (byMarket["271"] && byMarket["271"].length >= 2) {
-            winnerMarket = byMarket["271"];
-          } else {
-            for (const [mId, grp] of Object.entries(byMarket)) {
-              if (
-                (grp.length === 2 || grp.length === 3) &&
-                (grp.some((q) => q.mainLine === true) || mId === "default")
-              ) {
-                winnerMarket = grp;
-                break;
-              }
-            }
-          }
-        }
-        if (!winnerMarket) {
-          for (const [mId, grp] of Object.entries(byMarket)) {
-            if (grp.length === 2 || grp.length === 3) {
-              winnerMarket = grp;
-              break;
-            }
-          }
-        }
+        // Select accurate Match Odds market:
+        // - Non-Test (T10/T20/ODI): market 271 (Winner incl. super over) takes Priority 1 over low-liquidity 273 (1X2)
+        // - Test: market 273 (1X2 with Draw outcome 274) takes Priority 1
+        const winnerMarket = selectAccurateMatchOddsMarket(byMarket, isTestMatchEarly);
 
         if (winnerMarket) {
           if (winnerMarket.length === 3 || winnerMarket.some(q => q.outcomeId === 274 || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'the draw' || String(q.name || q.outcomeName || '').trim().toLowerCase() === 'draw')) {
@@ -881,96 +867,39 @@ class OddsApiLiveService {
       if (
         homeOutcome &&
         awayOutcome &&
-        homeOutcome.price &&
-        awayOutcome.price
+        (homeOutcome.price || homeOutcome.meta?.availableToBack?.[0]?.price) &&
+        (awayOutcome.price || awayOutcome.meta?.availableToBack?.[0]?.price)
       ) {
         usedBookie = bookieKey;
 
-        // Extract back/lay/size for home
-        if (isExchange && homeOutcome.meta) {
-          homeBack =
-            homeOutcome.meta.availableToBack?.[0]?.price ||
-            homeOutcome.price ||
-            0;
-          homeBackVol =
-            homeOutcome.meta.availableToBack?.[0]?.size !== undefined
-              ? Math.round(homeOutcome.meta.availableToBack[0].size).toString()
-              : "100";
-          homeLay =
-            homeOutcome.meta.availableToLay?.[0]?.price ||
-            Number((homeBack + 0.02).toFixed(2));
-          homeLayVol =
-            homeOutcome.meta.availableToLay?.[0]?.size !== undefined
-              ? Math.round(homeOutcome.meta.availableToLay[0].size).toString()
-              : "100";
-        } else {
-          homeBack = homeOutcome.price;
-          homeBackVol =
-            homeOutcome.limit !== undefined
-              ? Math.round(homeOutcome.limit).toString()
-              : "500";
-          homeLay = Number((homeBack + 0.01).toFixed(2));
-          homeLayVol = "500";
-        }
+        const homeD = extractRunnerDepthFromQuote(homeOutcome, isExchange, "100");
+        homeBack = homeD.back;
+        homeBackVol = homeD.backVol;
+        homeLay = homeD.lay;
+        homeLayVol = homeD.layVol;
+        homeLadderBack = homeD.backOdds;
+        homeLadderLay = homeD.layOdds;
 
-        // Extract back/lay/size for away
-        if (isExchange && awayOutcome.meta) {
-          awayBack =
-            awayOutcome.meta.availableToBack?.[0]?.price ||
-            awayOutcome.price ||
-            0;
-          awayBackVol =
-            awayOutcome.meta.availableToBack?.[0]?.size !== undefined
-              ? Math.round(awayOutcome.meta.availableToBack[0].size).toString()
-              : "100";
-          awayLay =
-            awayOutcome.meta.availableToLay?.[0]?.price ||
-            Number((awayBack + 0.02).toFixed(2));
-          awayLayVol =
-            awayOutcome.meta.availableToLay?.[0]?.size !== undefined
-              ? Math.round(awayOutcome.meta.availableToLay[0].size).toString()
-              : "100";
-        } else {
-          awayBack = awayOutcome.price;
-          awayBackVol =
-            awayOutcome.limit !== undefined
-              ? Math.round(awayOutcome.limit).toString()
-              : "500";
-          awayLay = Number((awayBack + 0.01).toFixed(2));
-          awayLayVol = "500";
-        }
+        const awayD = extractRunnerDepthFromQuote(awayOutcome, isExchange, "100");
+        awayBack = awayD.back;
+        awayBackVol = awayD.backVol;
+        awayLay = awayD.lay;
+        awayLayVol = awayD.layVol;
+        awayLadderBack = awayD.backOdds;
+        awayLadderLay = awayD.layOdds;
 
-        // Extract back/lay/size for draw (Test matches)
         if (drawOutcome) {
-          if (isExchange && drawOutcome.meta) {
-            drawBack =
-              drawOutcome.meta.availableToBack?.[0]?.price ||
-              drawOutcome.price ||
-              0;
-            drawBackVol =
-              drawOutcome.meta.availableToBack?.[0]?.size !== undefined
-                ? Math.round(drawOutcome.meta.availableToBack[0].size).toString()
-                : "100";
-            drawLay =
-              drawOutcome.meta.availableToLay?.[0]?.price ||
-              Number((drawBack + 0.02).toFixed(2));
-            drawLayVol =
-              drawOutcome.meta.availableToLay?.[0]?.size !== undefined
-                ? Math.round(drawOutcome.meta.availableToLay[0].size).toString()
-                : "100";
-          } else {
-            drawBack = drawOutcome.price;
-            drawBackVol =
-              drawOutcome.limit !== undefined
-                ? Math.round(drawOutcome.limit).toString()
-                : "500";
-            drawLay = Number((drawBack + 0.01).toFixed(2));
-            drawLayVol = "500";
-          }
+          const drawD = extractRunnerDepthFromQuote(drawOutcome, isExchange, "100");
+          drawBack = drawD.back;
+          drawBackVol = drawD.backVol;
+          drawLay = drawD.lay;
+          drawLayVol = drawD.layVol;
+          drawLadderBack = drawD.backOdds;
+          drawLadderLay = drawD.layOdds;
         }
 
-        bestHomePrice = homeOutcome.price;
-        bestAwayPrice = awayOutcome.price;
+        bestHomePrice = homeBack;
+        bestAwayPrice = awayBack;
 
         // If we found a valid match odds market, we break out and use it
         break;
@@ -1228,6 +1157,11 @@ class OddsApiLiveService {
     const depthBackB = needsSwap ? homeBackVol : awayBackVol;
     const depthLayB = needsSwap ? homeLayVol : awayLayVol;
 
+    const teamALadderBack = needsSwap ? awayLadderBack : homeLadderBack;
+    const teamALadderLay = needsSwap ? awayLadderLay : homeLadderLay;
+    const teamBLadderBack = needsSwap ? homeLadderBack : awayLadderBack;
+    const teamBLadderLay = needsSwap ? homeLadderLay : awayLadderLay;
+
     const isTestMatch = isTestMatchFormat({
       league: metadata?.league || this.eventMetadata.get(eventId)?.league || dbMatch?.league,
       teamA: metadata?.home || dbMatch?.teamA,
@@ -1242,6 +1176,8 @@ class OddsApiLiveService {
       drawLay = null;
       drawBackVol = "0";
       drawLayVol = "0";
+      drawLadderBack = [];
+      drawLadderLay = [];
     }
 
     // If Test match has no explicit Draw runner from Oddspapi (since Oddspapi maps market 271 as 2-way moneyline),
@@ -1255,7 +1191,18 @@ class OddsApiLiveService {
       drawLay = Number((drawBack + 0.02).toFixed(2));
       drawBackVol = "900K";
       drawLayVol = "200K";
+      drawLadderBack = [{ price: drawBack, volume: drawBackVol }];
+      drawLadderLay = [{ price: drawLay, volume: drawLayVol }];
     }
+
+    const matchOddsDepth = {
+      teamABack: teamALadderBack.length > 0 ? teamALadderBack : (teamABack ? [{ price: teamABack, volume: depthBackA }] : []),
+      teamALay: teamALadderLay.length > 0 ? teamALadderLay : (teamALay ? [{ price: teamALay, volume: depthLayA }] : []),
+      teamBBack: teamBLadderBack.length > 0 ? teamBLadderBack : (teamBBack ? [{ price: teamBBack, volume: depthBackB }] : []),
+      teamBLay: teamBLadderLay.length > 0 ? teamBLadderLay : (teamBLay ? [{ price: teamBLay, volume: depthLayB }] : []),
+      drawBack: isTestMatch ? (drawLadderBack.length > 0 ? drawLadderBack : (drawBack ? [{ price: drawBack, volume: depthBackDraw }] : [])) : [],
+      drawLay: isTestMatch ? (drawLadderLay.length > 0 ? drawLadderLay : (drawLay ? [{ price: drawLay, volume: depthLayDraw }] : [])) : [],
+    };
 
     // ─── Calculate Bookmaker Odds (BPExch-compatible tighter spread & fixed depth) ──
     const bmBackA = teamABack ? Number(teamABack.toFixed(2)) : null;
@@ -1275,36 +1222,39 @@ class OddsApiLiveService {
     const bmMarketStatus = isAtStumps ? "SUSPENDED" : "OPEN";
 
     // ─── Extract Market 278 (To Win the Coin Toss) from OddsPapi quotes ──
-    let tossHomeBack = null, tossHomeLay = null;
-    let tossAwayBack = null, tossAwayLay = null;
+    let tossHomeBack = null, tossHomeLay = null, tossHomeBackVol = "100", tossHomeLayVol = "100";
+    let tossAwayBack = null, tossAwayLay = null, tossAwayBackVol = "100", tossAwayLayVol = "100";
     for (const [bkKey, outcomes] of Object.entries(normalizedOdds)) {
       const quoteList = Array.isArray(outcomes) ? outcomes : Object.values(outcomes);
       const tossQuotes = quoteList.filter(q => q && (q.marketId === 278 || String(q.marketName || '').toLowerCase().includes('coin toss')));
       if (tossQuotes.length >= 2) {
         tossQuotes.sort((a, b) => (Number(a.outcomeId) || 0) - (Number(b.outcomeId) || 0));
-        const qA = tossQuotes[0];
-        const qB = tossQuotes[1];
-        if (qA.meta?.availableToBack?.[0]) {
-          tossHomeBack = qA.meta.availableToBack[0].price;
-          tossHomeLay = qA.meta.availableToLay?.[0]?.price || Number((tossHomeBack + 0.04).toFixed(2));
-        } else if (qA.price > 0) {
-          tossHomeBack = qA.price;
-          tossHomeLay = Number((tossHomeBack + 0.04).toFixed(2));
-        }
-        if (qB.meta?.availableToBack?.[0]) {
-          tossAwayBack = qB.meta.availableToBack[0].price;
-          tossAwayLay = qB.meta.availableToLay?.[0]?.price || Number((tossAwayBack + 0.04).toFixed(2));
-        } else if (qB.price > 0) {
-          tossAwayBack = qB.price;
-          tossAwayLay = Number((tossAwayBack + 0.04).toFixed(2));
-        }
+        const tA = extractRunnerDepthFromQuote(tossQuotes[0], true, "100");
+        const tB = extractRunnerDepthFromQuote(tossQuotes[1], true, "100");
+        tossHomeBack = tA.back || null;
+        tossHomeLay = tA.lay || (tossHomeBack ? Number((tossHomeBack + 0.04).toFixed(2)) : null);
+        tossHomeBackVol = tA.backVol || "100";
+        tossHomeLayVol = tA.layVol || "100";
+        tossAwayBack = tB.back || null;
+        tossAwayLay = tB.lay || (tossAwayBack ? Number((tossAwayBack + 0.04).toFixed(2)) : null);
+        tossAwayBackVol = tB.backVol || "100";
+        tossAwayLayVol = tB.layVol || "100";
         break;
       }
     }
     const tossBackA = needsSwap ? tossAwayBack : tossHomeBack;
     const tossLayA = needsSwap ? tossAwayLay : tossHomeLay;
+    const tossDepthBackA = needsSwap ? tossAwayBackVol : tossHomeBackVol;
+    const tossDepthLayA = needsSwap ? tossAwayLayVol : tossHomeLayVol;
     const tossBackB = needsSwap ? tossHomeBack : tossAwayBack;
     const tossLayB = needsSwap ? tossHomeLay : tossAwayLay;
+    const tossDepthBackB = needsSwap ? tossHomeBackVol : tossAwayBackVol;
+    const tossDepthLayB = needsSwap ? tossHomeLayVol : tossAwayLayVol;
+
+    const hasSideQuotes = Object.values(normalizedOdds).some((outcomes) => {
+      const list = Array.isArray(outcomes) ? outcomes : Object.values(outcomes || {});
+      return list.some((q) => q && (q.marketId === 276 || resolveBetfairFancyMeta(q) !== null));
+    });
 
     const now = new Date();
     const oddsPayload = {
@@ -1321,6 +1271,7 @@ class OddsApiLiveService {
       layOddsDraw: drawLay || null,
       depthBackDraw: drawBackVol || "0",
       depthLayDraw: drawLayVol || "0",
+      matchOddsDepth,
       bookmakerBackA: bmBackA,
       bookmakerLayA: bmLayA,
       bookmakerBackB: bmBackB,
@@ -1338,6 +1289,10 @@ class OddsApiLiveService {
       tossLayA: tossLayA || 2.02,
       tossBackB: tossBackB || 1.98,
       tossLayB: tossLayB || 2.02,
+      tossDepthBackA,
+      tossDepthLayA,
+      tossDepthBackB,
+      tossDepthLayB,
       tossMarketStatus: "OPEN",
       isTestMatch,
       bookmaker: usedBookie,
@@ -1352,10 +1307,24 @@ class OddsApiLiveService {
       cached.teamALay !== oddsPayload.teamALay ||
       cached.teamBBack !== oddsPayload.teamBBack ||
       cached.teamBLay !== oddsPayload.teamBLay ||
+      cached.depthBackA !== oddsPayload.depthBackA ||
+      cached.depthLayA !== oddsPayload.depthLayA ||
       cached.backOddsDraw !== oddsPayload.backOddsDraw ||
-      cached.layOddsDraw !== oddsPayload.layOddsDraw;
+      cached.layOddsDraw !== oddsPayload.layOddsDraw ||
+      cached.bookmakerMarketStatus !== oddsPayload.bookmakerMarketStatus ||
+      JSON.stringify(cached.matchOddsDepth) !== JSON.stringify(oddsPayload.matchOddsDepth);
 
-    if (!changed) return;
+    if (!changed) {
+      if (hasSideQuotes || metadata.isLive) {
+        fancyMarketsService.processLiveMarkets({
+          matchId,
+          normalizedOdds,
+          io: this.io,
+          isLive: metadata.isLive
+        });
+      }
+      return;
+    }
 
     this.oddsCache.set(matchId, oddsPayload);
 
@@ -1385,6 +1354,8 @@ class OddsApiLiveService {
           lay: teamALay,
           depthBack: depthBackA,
           depthLay: depthLayA,
+          backOdds: matchOddsDepth.teamABack,
+          layOdds: matchOddsDepth.teamALay,
         },
         {
           name: dbTeamBName,
@@ -1392,6 +1363,8 @@ class OddsApiLiveService {
           lay: teamBLay,
           depthBack: depthBackB,
           depthLay: depthLayB,
+          backOdds: matchOddsDepth.teamBBack,
+          layOdds: matchOddsDepth.teamBLay,
         },
       ];
       if (isTestMatch) {
@@ -1401,6 +1374,8 @@ class OddsApiLiveService {
           lay: drawLay || null,
           depthBack: drawBackVol || "0",
           depthLay: drawLayVol || "0",
+          backOdds: matchOddsDepth.drawBack,
+          layOdds: matchOddsDepth.drawLay,
         });
       }
 
@@ -1436,6 +1411,7 @@ class OddsApiLiveService {
         updatedAt: now,
         marketStatus: "OPEN",
         runners: runnersList,
+        matchOddsDepth,
         bookmakerMarketStatus: bmMarketStatus,
         bookmakerRunners: bmRunnersList,
         tossBackA: oddsPayload.tossBackA,
@@ -1788,6 +1764,7 @@ class OddsApiLiveService {
             layOddsDraw: update.layOddsDraw,
             depthBackDraw: update.depthBackDraw,
             depthLayDraw: update.depthLayDraw,
+            matchOddsDepth: update.matchOddsDepth || null,
             bookmakerBackA: update.bookmakerBackA,
             bookmakerLayA: update.bookmakerLayA,
             bookmakerBackB: update.bookmakerBackB,
@@ -1805,6 +1782,10 @@ class OddsApiLiveService {
             tossLayA: update.tossLayA || 2.02,
             tossBackB: update.tossBackB || 1.98,
             tossLayB: update.tossLayB || 2.02,
+            tossDepthBackA: update.tossDepthBackA || "100",
+            tossDepthLayA: update.tossDepthLayA || "100",
+            tossDepthBackB: update.tossDepthBackB || "100",
+            tossDepthLayB: update.tossDepthLayB || "100",
             tossMarketStatus: update.tossMarketStatus || "OPEN",
             isTestMatch: Boolean(update.isTestMatch),
             marketStatus: "OPEN",

@@ -68,7 +68,7 @@ function normalizeCategory(category) {
   if (c.includes('casino')) return 'casino';
   if (c.includes('soccer') || c.includes('football')) return 'soccer';
   if (c.includes('tennis')) return 'tennis';
-  if (c.includes('fancy')) return 'fancy';
+  if (c.includes('betfair_fancy') || c.includes('betfair-fancy') || c.includes('fancy')) return 'fancy';
   if (c.includes('bookmaker')) return 'bookmaker';
   if (c.includes('toss')) return 'toss';
   if (c.includes('figure')) return 'figure';

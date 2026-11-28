@@ -145,6 +145,33 @@ const matchSchema = new mongoose.Schema({
     default: []
   },
 
+  // ─── Match Odds 3-Level Depth & Betfair Fancy Markets ───────────────────────
+  matchOddsDepth: {
+    type: {
+      teamABack: [{ price: Number, volume: String }],
+      teamALay: [{ price: Number, volume: String }],
+      teamBBack: [{ price: Number, volume: String }],
+      teamBLay: [{ price: Number, volume: String }],
+      drawBack: [{ price: Number, volume: String }],
+      drawLay: [{ price: Number, volume: String }]
+    },
+    default: null
+  },
+
+  betfairFancyMarkets: {
+    type: [{
+      marketId: { type: String },
+      name: { type: String, required: true },  // e.g. "2nd Innings 6 Overs Line"
+      line: { type: Number, default: null },
+      backOdds: [{ price: Number, volume: String }],
+      layOdds: [{ price: Number, volume: String }],
+      status: { type: String, default: 'OPEN' },
+      maxBet: { type: Number, default: 2000000 },
+      sourceBookmaker: { type: String, default: 'betfair-ex' }
+    }],
+    default: []
+  },
+
   // ─── Tied Match (Others) Market Fields ────────────────────────────────────
   tiedMatchMarket: {
     type: {
