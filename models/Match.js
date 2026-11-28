@@ -31,6 +31,8 @@ const matchSchema = new mongoose.Schema({
     statusText: { type: String, default: '' },
     batsmen: { type: mongoose.Schema.Types.Mixed, default: [] },
     bowler: { type: mongoose.Schema.Types.Mixed, default: null },
+    prevOver: { type: [String], default: [] },
+    inningsStats: { type: mongoose.Schema.Types.Mixed, default: null },
     lastBall: { type: String, default: '' },
     periods: { type: mongoose.Schema.Types.Mixed, default: {} },
     lastUpdated: { type: Date, default: Date.now }

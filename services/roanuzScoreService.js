@@ -254,8 +254,9 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
   // Run Rate
   const runRate = live.score?.run_rate ? Number(live.score.run_rate).toFixed(2) : "0.00";
 
-  // Ball-by-ball thisOver calculation (sorted chronologically ascending & over-aligned)
+  // Ball-by-ball thisOver & prevOver calculation (sorted chronologically ascending & over-aligned)
   let thisOver = [];
+  let prevOver = [];
   let lastBallText = '';
 
   const ovWholeLive = Math.floor(currentOvers);
@@ -284,10 +285,17 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
 
     candidateBbbBalls.sort(compareRoanuzBalls);
 
-    // Match live.recent_overs_repr entry for the exact same active over (already chronological)
+    // Match live.recent_overs_repr entry for the exact same active over + previous over
     const reprList = Array.isArray(live.recent_overs_repr) ? live.recent_overs_repr : [];
     const matchingRepr = reprList.find((o) => Number(o?.overnumber) === targetOverZeroIdx);
     const reprBalls = Array.isArray(matchingRepr?.ball_repr) ? matchingRepr.ball_repr.map(formatReprBadge) : [];
+
+    if (targetOverZeroIdx > 0) {
+      const prevRepr = reprList.find((o) => Number(o?.overnumber) === targetOverZeroIdx - 1);
+      if (Array.isArray(prevRepr?.ball_repr)) {
+        prevOver = prevRepr.ball_repr.map(formatReprBadge);
+      }
+    }
 
     // Primary: sorted ballByBall entries for the active over (richer commentary + ball_type + wicket flags).
     // Fallback: live.recent_overs_repr for that same active over when ballByBall is unavailable or lagged behind.
@@ -296,7 +304,8 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
       const lastBallObj = candidateBbbBalls[candidateBbbBalls.length - 1];
       if (lastBallObj) {
         const ovStr = Array.isArray(lastBallObj.overs) ? `${lastBallObj.overs[0]}.${lastBallObj.overs[1]}` : '';
-        lastBallText = `${ovStr ? ovStr + ': ' : ''}${lastBallObj.comment || ''}`;
+        const rawComment = String(lastBallObj.comment || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+        lastBallText = `${ovStr ? ovStr + ': ' : ''}${rawComment}`;
       }
     } else if (reprBalls.length > 0) {
       thisOver = reprBalls;
@@ -401,6 +410,23 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
   const detectedFormat = (roanuzFormat === 'oneday' || roanuzFormat === 'odi' || maxOvers === 50) ? 'ODI' :
                          (roanuzFormat === 'test') ? 'TEST' : 'T20';
 
+  // Active Innings Stats (fours, sixes, extras, recentOvers)
+  const activeInnObj = innings[live.innings] || (isTeamABatting ? (innA2 || innA1) : (innB2 || innB1)) || {};
+  const calcExtraTotal = (ex) => {
+    if (!ex) return 0;
+    if (typeof ex.total === 'number') return ex.total;
+    if (typeof ex === 'number') return ex;
+    return (Number(ex.bye || 0) + Number(ex.leg_bye || 0) + Number(ex.wide || 0) + Number(ex.no_ball || 0) + Number(ex.penalty || 0));
+  };
+  const activePlayersFours = batsmen.reduce((s, b) => s + (Number(b.fours) || 0), 0);
+  const activePlayersSixes = batsmen.reduce((s, b) => s + (Number(b.sixes) || 0), 0);
+  const inningsStats = {
+    fours: safeNum(activeInnObj.score?.fours ?? activeInnObj.batting_stats?.fours ?? activeInnObj.fours, activePlayersFours),
+    sixes: safeNum(activeInnObj.score?.sixes ?? activeInnObj.batting_stats?.sixes ?? activeInnObj.sixes, activePlayersSixes),
+    extras: safeNum(activeInnObj.extra_runs?.total ?? calcExtraTotal(activeInnObj.extra_runs ?? activeInnObj.extras ?? activeInnObj.score?.extras), 0),
+    oversCount: Array.isArray(activeInnObj.overs) ? Number(`${activeInnObj.overs[0]}.${activeInnObj.overs[1]}`) : currentOvers,
+  };
+
   return {
     matchId: String(matchData.key),
     roanuzMatchKey: matchData.key,
@@ -419,6 +445,8 @@ function parseRoanuzMatch(matchData, ballByBallData = null, matchInDb = null) {
     runRate,
     reqRunRate,
     thisOver,
+    prevOver,
+    inningsStats,
     remRuns,
     remBalls,
     battingTeam,
@@ -701,6 +729,8 @@ class RoanuzScoreService {
               runRate: parsed.runRate,
               reqRunRate: parsed.reqRunRate,
               thisOver: parsed.thisOver,
+              prevOver: parsed.prevOver,
+              inningsStats: parsed.inningsStats,
               remRuns: parsed.remRuns,
               remBalls: parsed.remBalls,
               battingTeam: parsed.battingTeam,
@@ -742,6 +772,8 @@ class RoanuzScoreService {
               runRate: parsed.runRate,
               reqRunRate: parsed.reqRunRate,
               thisOver: parsed.thisOver,
+              prevOver: parsed.prevOver,
+              inningsStats: parsed.inningsStats,
               remRuns: parsed.remRuns,
               remBalls: parsed.remBalls,
               battingTeam: parsed.battingTeam,
